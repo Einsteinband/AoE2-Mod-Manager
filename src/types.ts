@@ -128,6 +128,8 @@ export interface ApplyReport {
   backupPath: string | null;
   requested: number;
   restored: number;
+  /** 本次被覆盖式禁用（true → false，且不在预设中）的模组数 */
+  disabled: number;
   alreadyEnabled: number;
   totalEnabledAfter: number;
   notInStatus: PresetItem[];
@@ -149,5 +151,18 @@ export interface ToggleOutcome {
 }
 
 export type SourceFilter = "all" | ModKind;
+/** v0.2 拖拽排序的写入结果（Rust 侧已进程检测 + 备份 + 回读校验） */
+export interface PriorityOutcome {
+  statusPath: string;
+  backupPath: string | null;
+  /** 本次真正被改写 Priority 的记录数 */
+  updated: number;
+  /** 参与排序的记录总数（= 写入后 Priority 的最大值） */
+  total: number;
+  /** mod-status.json 里有、但前端列表没有的记录（磁盘上已不存在），已被排到末尾 */
+  unlisted: string[];
+  wrote: boolean;
+}
+
 export type StatusFilter = "all" | "enabled" | "disabled" | "unknown";
 export type SortKey = "name" | "updated" | "priority" | "folder";

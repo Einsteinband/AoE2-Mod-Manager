@@ -7,6 +7,7 @@ import type {
   InstalledIndexEntry,
   ModStats,
   Preset,
+  PriorityOutcome,
   PresetItem,
   RootCandidate,
   ScanReport,
@@ -56,6 +57,15 @@ export async function pickFolder(defaultPath?: string | null): Promise<string | 
 /** 把本地绝对路径转成 webview 可加载的 asset URL */
 export function fileUrl(path: string): string {
   return convertFileSrc(path);
+}
+
+/**
+ * 用系统默认浏览器打开外链（GitHub 主页等）。
+ * 不经过 WebView，也不依赖 opener 插件：Rust 侧 explorer.exe 拉起，
+ * 域名白名单（github.com / ageofempires.com）与 https 强制在 Rust 里校验。
+ */
+export function openExternalUrl(url: string): Promise<string> {
+  return invoke<string>("open_external", { url });
 }
 
 /** 在资源管理器中定位模组文件夹（Rust 侧 explorer.exe /select，无需额外插件） */
@@ -110,6 +120,17 @@ export function applyPreset(id: string): Promise<ApplyReport> {
  * 单条启用 / 禁用。后端先确认 AoE2DE_s.exe 未运行，再备份 → 只改 Enabled → 原子替换 → 回读校验。
  * kind 只能是 local / subscribed，folderName 必须是根目录下真实存在的模组文件夹。
  */
+// ---------------- v0.2：手动拖拽排序 ----------------
+
+/**
+ * 把拖拽后的顺序写进 mod-status.json 的 Priority（1..n 连续、不重复）。
+ * `ordered` 是 ModEntry.id 数组（`local:目录名`），不是 WorkshopID——本地模组的 WorkshopID 常为 0。
+ * 后端依次：游戏进程检测 → 备份 → 只改 Priority → 原子替换 → 回读校验（失败自动回滚）。
+ */
+export function updateModPriority(ordered: string[]): Promise<PriorityOutcome> {
+  return invoke<PriorityOutcome>("update_mod_priority", { ordered });
+}
+
 export function toggleModEnabled(
   workshopId: number | null,
   kind: string,

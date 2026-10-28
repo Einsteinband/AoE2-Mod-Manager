@@ -5,7 +5,14 @@ import type { ModEntry } from "../types";
 import { fileUrl } from "../api";
 import { initials, sourceHint, sourceLabel, statusLabel } from "../format";
 
-const props = defineProps<{ mod: ModEntry; active: boolean }>();
+const props = defineProps<{
+  mod: ModEntry;
+  active: boolean;
+  /** 排序模式下显示在卡片右上角的加载序号（1 起） */
+  order?: number;
+  /** 排序模式：卡片可拖拽（光标与边框变化） */
+  sortable?: boolean;
+}>();
 const emit = defineEmits<{ (event: "select", mod: ModEntry): void }>();
 
 const { t } = useI18n();
@@ -30,11 +37,17 @@ const statusClass = computed(() => {
 </script>
 
 <template>
-  <button class="mod-card" :class="{ active }" type="button" @click="emit('select', mod)">
+  <button
+    class="mod-card"
+    :class="{ active, sortable }"
+    type="button"
+    @click="emit('select', mod)"
+  >
     <div class="card-thumb">
       <img v-if="coverUrl" :src="coverUrl" alt="" draggable="false" @error="imgFailed = true" />
       <div v-else class="placeholder">{{ initials(mod.displayName) }}</div>
       <span v-if="!coverUrl" class="no-cover">{{ t("card.noCover") }}</span>
+      <span v-if="order !== undefined" class="order-badge" :title="`#${order}`">{{ order }}</span>
       <span class="source-badge" :class="mod.source" :title="sourceHint(mod.source)">
         {{ sourceLabel(mod.source) }}
       </span>

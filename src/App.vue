@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ModCard from "./components/ModCard.vue";
 import ModDetail from "./components/ModDetail.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import FirstRunWizard from "./components/FirstRunWizard.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
 import PresetManager from "./components/PresetManager.vue";
@@ -10,11 +11,14 @@ import {
   detectRootCandidates,
   getSettings,
   modStats,
+  openExternalUrl,
   pickFolder,
   scanMods,
   setLocale as persistLocale,
   setModRoot,
+  updateModPriority,
 } from "./api";
+import { attachDragSort, type DragEndPayload } from "./dragSort";
 import { formatDateTime, translateBackendMessage } from "./format";
 import { applyLocale, detectSystemLocale, LOCALE_OPTIONS, normalizeLocale, type Locale } from "./i18n";
 import { TAG_ZH, SORT_OPTIONS, localizedTagName } from "./online/types";
@@ -65,6 +69,12 @@ const statsError = ref<string | null>(null);
 const showWarnings = ref(false);
 /** v0.3：预设管理器模态框 */
 const showPresets = ref(false);
+/** 最近一次成功应用的预设（脏检查靠它判断是否还能显示“当前已应用”） */
+const lastAppliedPresetId = ref<string | null>(null);
+/** 应用后重扫得到的「启用集合指纹」 */
+const appliedFingerprint = ref("");
+/** 应用流程正在进行：此期间的扫描结果不应被当成“用户手动改动” */
+let presetApplying = false;
 const choosingRoot = ref(false);
 /** 首次启动引导：没有可用根目录时自动弹出 */
 const showWizard = ref(false);
@@ -167,6 +177,13 @@ function normalizeError(e: unknown): string {
 }
 
 async function refresh(root?: string | null) {
+  // 重扫会重排整个列表，排序模式必须退出（否则拖拽索引会对不上）
+  // 有未保存的排序改动时不允许静默丢弃
+  if (sortMode.value && sortDirty.value) {
+    showToast(t("sort.unsavedBlock"), "error");
+    return;
+  }
+  exitSortMode();
   loading.value = true;
   error.value = null;
   try {
@@ -203,6 +220,8 @@ async function chooseRoot() {
 }
 
 function selectMod(mod: ModEntry) {
+  // 拖拽松手时浏览器仍会补一个 click：这段时间内忽略，避免排序时误切换选中项
+  if (Date.now() < suppressClickUntil) return;
   selectedId.value = mod.id;
 }
 
@@ -235,6 +254,212 @@ function handleRemoved(payload: { id: string }) {
   const next = list[index] ?? list[index - 1] ?? null;
   selectedId.value = next?.id ?? null;
 }
+
+// ---------------- v0.2：手动拖拽排序（Priority） ----------------
+
+/** 排序模式：只有开启时卡片才可拖拽，关闭时保持正常的点击选中 */
+const sortMode = ref(false);
+const sortSaving = ref(false);
+/** 可拖拽的列表：与 report.mods 是同一批对象引用，改 Priority 无需重扫 */
+const dragList = ref<ModEntry[]>([]);
+/** 游戏尚未登记（priority 为 null）的模组，无法参与排序，单独列在下方 */
+const unsortable = ref<ModEntry[]>([]);
+/** 最近一次成功写入磁盘的顺序（判断“有没有未保存改动”，失败时也按它回滚） */
+const savedOrder = ref<string[]>([]);
+/** 有未保存改动时退出排序模式的二次确认 */
+const showDiscardConfirm = ref(false);
+/** 进入排序模式前的筛选快照，退出时还原 */
+let sortSnapshot: {
+  search: string;
+  source: SourceFilter;
+  status: StatusFilter;
+  activeTag: string | null;
+  sortKey: SortKey;
+} | null = null;
+/** 本次排序是否真的改过顺序（决定退出后是否停在“按加载优先级”） */
+let orderChanged = false;
+/** 拖拽结束后短时间内屏蔽 click，避免松手时把卡片误选中 */
+let suppressClickUntil = 0;
+
+const dragEl = ref<HTMLElement | null>(null);
+let disposeDrag: (() => void) | null = null;
+
+/** 右下角 Toast（排序已保存等轻量提示） */
+const toast = ref<{ text: string; kind: "ok" | "error" } | null>(null);
+let toastTimer: number | null = null;
+function showToast(text: string, kind: "ok" | "error" = "ok") {
+  toast.value = { text, kind };
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.value = null;
+    toastTimer = null;
+  }, kind === "error" ? 7000 : 3200);
+}
+
+/** 作者 GitHub 主页：交给 Rust 用系统浏览器打开，绝不在 WebView 里导航 */
+const AUTHOR_URL = "https://github.com/Einsteinband";
+
+async function openAuthorPage() {
+  try {
+    await openExternalUrl(AUTHOR_URL);
+  } catch (e) {
+    showToast(normalizeError(e), "error");
+  }
+}
+
+function compareByPriority(a: ModEntry, b: ModEntry): number {
+  const collator = new Intl.Collator(collationLocale.value, { numeric: true, sensitivity: "base" });
+  const av = a.priority ?? Number.MAX_SAFE_INTEGER;
+  const bv = b.priority ?? Number.MAX_SAFE_INTEGER;
+  return av === bv ? collator.compare(a.displayName, b.displayName) : av - bv;
+}
+
+/**
+ * 进入排序模式。
+ * 关键决策：手动排序只对**全量列表**有意义——过滤后的子集一旦拖拽，
+ * 拖出来的相对顺序会和全局顺序冲突（且无法推断插到哪个槽位），
+ * 所以进入时清空搜索/筛选并把左侧栏置灰锁定，列表固定按 Priority 升序。
+ */
+async function enterSortMode() {
+  if (loading.value || sortSaving.value || !report.value || !mods.value.length) return;
+  sortSnapshot = {
+    search: search.value,
+    source: source.value,
+    status: status.value,
+    activeTag: activeTag.value,
+    sortKey: sortKey.value,
+  };
+  search.value = "";
+  source.value = "all";
+  status.value = "all";
+  activeTag.value = null;
+  sortKey.value = "priority";
+
+  const byPriority = [...mods.value].sort(compareByPriority);
+  dragList.value = byPriority.filter((m) => m.priority !== null);
+  unsortable.value = byPriority.filter((m) => m.priority === null);
+  savedOrder.value = dragList.value.map((m) => m.id);
+  orderChanged = false;
+  sortMode.value = true;
+  // 必须等 DOM 真正渲染出 .sort-grid 再挂载（否则 dragEl 还是 null）
+  await mountDragSortable();
+}
+
+function exitSortMode() {
+  if (!sortMode.value) return;
+  sortMode.value = false;
+  showDiscardConfirm.value = false;
+  unmountDragSortable();
+  const snapshot = sortSnapshot;
+  sortSnapshot = null;
+  if (!snapshot) return;
+  // 筛选还原；但本次真的排过序就停在“按加载优先级”，否则拖完看不到结果
+  search.value = snapshot.search;
+  source.value = snapshot.source;
+  status.value = snapshot.status;
+  activeTag.value = snapshot.activeTag;
+  sortKey.value = orderChanged ? "priority" : snapshot.sortKey;
+}
+
+function handleDragEnd({ oldIndex, newIndex }: DragEndPayload) {
+  const list = dragList.value;
+  if (oldIndex < 0 || oldIndex >= list.length) return;
+  const [moved] = list.splice(oldIndex, 1);
+  if (!moved) return;
+  list.splice(Math.min(newIndex, list.length), 0, moved);
+  suppressClickUntil = Date.now() + 150;
+  // 只改内存顺序，不写盘：等用户点“保存排序”才调 update_mod_priority
+}
+
+/** 有未保存的改动？只比顺序，不比内容 */
+const sortDirty = computed(() => {
+  const ids = dragList.value.map((m) => m.id);
+  return (
+    ids.length !== savedOrder.value.length || ids.some((id, i) => id !== savedOrder.value[i])
+  );
+});
+
+/**
+ * 手动保存：只有点“保存排序”（或排序模式下按 Ctrl+S）才写盘。
+ * 成功后**只**改内存里的 Priority（同一批对象引用），绝不重扫：不闪、滚动条不复位。
+ */
+async function saveSortOrder() {
+  if (sortSaving.value || !sortMode.value || !sortDirty.value) return;
+  const list = [...dragList.value];
+  const ids = list.map((m) => m.id);
+
+  sortSaving.value = true;
+  try {
+    const outcome = await updateModPriority(ids);
+    list.forEach((mod, index) => {
+      mod.priority = index + 1;
+    });
+    savedOrder.value = ids;
+    orderChanged = true;
+    showToast(t("sort.savedToast", { n: outcome.updated }));
+  } catch (e) {
+    // 磁盘没写成功 → 界面顺序回到上一次成功保存的样子
+    const byId = new Map(dragList.value.map((m) => [m.id, m]));
+    dragList.value = savedOrder.value
+      .map((id) => byId.get(id))
+      .filter((m): m is ModEntry => Boolean(m));
+    showToast(normalizeError(e), "error");
+  } finally {
+    sortSaving.value = false;
+  }
+}
+
+/** 退出排序模式：有未保存改动时先二次确认 */
+function requestExitSortMode() {
+  if (!sortMode.value || sortSaving.value) return;
+  if (sortDirty.value) {
+    showDiscardConfirm.value = true;
+    return;
+  }
+  exitSortMode();
+}
+
+/** 放弃更改：内存里的 Priority 本来就没动，直接退出，列表自然回到磁盘顺序 */
+function discardSortChanges() {
+  showDiscardConfirm.value = false;
+  exitSortMode();
+}
+
+/** 启用集合指纹：只取 id，排序后拼串。任何开关 / 增删都会改变它 */
+function enabledFingerprint(list: ModEntry[]): string {
+  return list
+    .filter((m) => m.enabled === true)
+    .map((m) => m.id)
+    .sort()
+    .join("|");
+}
+
+/** 应用预设后：重扫 → 用重扫结果记下指纹 → 标记“当前已应用” */
+async function handlePresetApplied(presetId: string) {
+  presetApplying = true;
+  try {
+    await refresh();
+    appliedFingerprint.value = enabledFingerprint(mods.value);
+    lastAppliedPresetId.value = presetId;
+  } finally {
+    presetApplying = false;
+  }
+}
+
+/**
+ * 脏检查：指纹一变就解除所有预设按钮的置灰。
+ * 覆盖三条来源：软件内开关（handleToggle 局部 patch，无需重扫）、
+ * 游戏里改完再点“重新扫描”、以及安装/删除模组。
+ */
+watch(
+  () => enabledFingerprint(mods.value),
+  (next) => {
+    if (presetApplying || !lastAppliedPresetId.value) return;
+    if (next === appliedFingerprint.value) return;
+    lastAppliedPresetId.value = null;
+    appliedFingerprint.value = "";
+  },
+);
 
 watch(selectedId, async (id) => {
   stats.value = null;
@@ -387,6 +612,58 @@ watch([officialTagList, inferredTagList], () => {
 const officialTagged = computed(
   () => mods.value.filter((m) => m.categorySource === "official").length,
 );
+
+// ---------------- v0.2：拖拽实例的生命周期 ----------------
+
+/**
+ * 挂载 Sortable。
+ * 必须等 sortMode 变 true 且 DOM 真正渲染出 .sort-grid 之后（nextTick）再做：
+ * 旧实现靠 watch([dragEl, sortMode]) 兑，一旦 el 与 sortMode 在同一次 patch 里变化，
+ * 回调可能在 dragEl 还是 null 时就跑完（之后不会再补一次），
+ * 结果就是“能进排序模式、但卡片完全拖不动且无任何报错”。
+ */
+async function mountDragSortable() {
+  await nextTick();
+  const el = dragEl.value;
+  if (!el) {
+    console.warn("[sort] 排序网格未渲染出来，拖拽未挂载");
+    return;
+  }
+  disposeDrag?.();
+  disposeDrag = attachDragSort(el, handleDragEnd);
+}
+
+function unmountDragSortable() {
+  disposeDrag?.();
+  disposeDrag = null;
+}
+
+/** 切到在线页时强制退出排序模式（本地网格会被销毁） */
+watch(mode, (next) => {
+  if (next === "local") return;
+  // 有未保存改动就不让切页：切走会销毁本地网格，等于静默丢弃
+  if (sortMode.value && sortDirty.value) {
+    mode.value = "local";
+    showToast(t("sort.unsavedBlock"), "error");
+    return;
+  }
+  exitSortMode();
+});
+
+/** 排序模式下 Ctrl+S 手动保存 */
+function onSortHotkey(event: KeyboardEvent) {
+  if (!sortMode.value) return;
+  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+  event.preventDefault();
+  void saveSortOrder();
+}
+window.addEventListener("keydown", onSortHotkey);
+
+onBeforeUnmount(() => {
+  unmountDragSortable();
+  window.removeEventListener("keydown", onSortHotkey);
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+});
 </script>
 
 <template>
@@ -396,7 +673,15 @@ const officialTagged = computed(
         <span class="crest">⚔</span>
         <div>
           <h1>{{ t("app.name") }}</h1>
-          <p>{{ t("app.tagline") }}</p>
+          <p class="tagline">
+            {{ t("app.taglinePrefix") }}<a
+              class="author-link"
+              :href="AUTHOR_URL"
+              :title="t('app.authorTitle')"
+              @click.prevent="openAuthorPage"
+              >{{ t("app.author") }}</a
+            >
+          </p>
         </div>
       </div>
 
@@ -414,7 +699,8 @@ const officialTagged = computed(
         <input
           v-model="search"
           type="search"
-          :placeholder="t('search.placeholder')"
+          :placeholder="sortMode ? t('sort.searchDisabled') : t('search.placeholder')"
+          :disabled="sortMode"
           spellcheck="false"
         />
         <button
@@ -451,7 +737,11 @@ const officialTagged = computed(
       </div>
 
       <div v-if="mode === 'local'" class="toolbar">
-        <select v-model="sortKey" :title="t('toolbar.sortLabel')">
+        <select
+          v-model="sortKey"
+          :title="sortMode ? t('sort.sortDisabled') : t('toolbar.sortLabel')"
+          :disabled="sortMode"
+        >
           <option value="name">{{ t("toolbar.sortName") }}</option>
           <option value="updated">{{ t("toolbar.sortUpdated") }}</option>
           <option value="priority">{{ t("toolbar.sortPriority") }}</option>
@@ -465,6 +755,16 @@ const officialTagged = computed(
         </button>
         <button type="button" class="preset-entry" @click="showPresets = true">
           {{ t("toolbar.presets") }}
+        </button>
+        <button
+          type="button"
+          class="sort-toggle"
+          :class="{ active: sortMode }"
+          :disabled="loading || !report || !mods.length"
+          :title="sortMode ? t('sort.exitTitle') : t('sort.enterTitle')"
+          @click="sortMode ? requestExitSortMode() : enterSortMode()"
+        >
+          {{ sortMode ? t("sort.exit") : t("sort.enter") }}
         </button>
       </div>
 
@@ -522,7 +822,8 @@ const officialTagged = computed(
     </div>
 
     <div class="body-grid" :class="{ 'online-mode': mode === 'online' }">
-      <aside v-if="mode === 'local'" class="sidebar">
+      <aside v-if="mode === 'local'" class="sidebar" :class="{ 'sort-locked': sortMode }">
+        <div v-if="sortMode" class="sort-lock-note">{{ t("sort.sidebarLocked") }}</div>
         <div class="side-group">
           <div class="side-title">{{ t("sidebar.source") }}</div>
           <button
@@ -707,6 +1008,49 @@ const officialTagged = computed(
             </div>
           </div>
 
+          <div v-else-if="sortMode" class="sort-wrap">
+            <div class="sort-banner">
+              <span class="glyph">⇅</span>
+              <span>{{ t("sort.banner", { n: dragList.length }) }}</span>
+              <span v-if="sortDirty" class="sort-state dirty">{{ t("sort.dirty") }}</span>
+              <span v-else class="sort-state">{{ t("sort.clean") }}</span>
+              <button
+                type="button"
+                class="sort-save"
+                :disabled="!sortDirty || sortSaving"
+                :title="t('sort.saveTitle')"
+                @click="saveSortOrder()"
+              >
+                {{ sortSaving ? t("sort.saving") : t("sort.save") }}
+              </button>
+            </div>
+
+            <div ref="dragEl" class="card-grid sort-grid">
+              <ModCard
+                v-for="(mod, index) in dragList"
+                :key="mod.id"
+                :mod="mod"
+                :active="mod.id === selectedId"
+                :order="index + 1"
+                sortable
+                @select="selectMod"
+              />
+            </div>
+
+            <div v-if="unsortable.length" class="sort-locked-group">
+              <div class="side-title">{{ t("sort.lockedTitle", { n: unsortable.length }) }}</div>
+              <div class="card-grid">
+                <ModCard
+                  v-for="mod in unsortable"
+                  :key="mod.id"
+                  :mod="mod"
+                  :active="mod.id === selectedId"
+                  @select="selectMod"
+                />
+              </div>
+            </div>
+          </div>
+
           <div v-else-if="!sorted.length" class="state-panel">
             <h2>{{ t("state.filteredTitle") }}</h2>
             <p>{{ t("state.filteredBody", { total: mods.length }) }}</p>
@@ -777,9 +1121,23 @@ const officialTagged = computed(
       <PresetManager
         v-if="showPresets"
         :mods="mods"
+        :applied-id="lastAppliedPresetId"
         @close="showPresets = false"
-        @applied="refresh()"
+        @applied="handlePresetApplied"
       />
     </div>
+
+    <!-- 放弃未保存排序的二次确认 -->
+    <ConfirmDialog
+      v-if="showDiscardConfirm"
+      :title="t('sort.discardTitle')"
+      :message="t('sort.discardMessage')"
+      :confirm-label="t('sort.discardConfirm')"
+      @confirm="discardSortChanges"
+      @cancel="showDiscardConfirm = false"
+    />
+
+    <!-- 轻量提示（排序已保存等）：固定右下角，不挤压布局 -->
+    <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
   </div>
 </template>

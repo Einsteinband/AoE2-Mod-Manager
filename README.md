@@ -2,7 +2,20 @@
 
 # AoE2 Mod Manager
 
-![Screenshot](./docs/screenshot.png)
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="./docs/screenshot-online.png"><img src="./docs/screenshot-online.png" alt="Online Mod Browser" width="100%"></a>
+      <br>
+      <sub><b>Online Mod Browser</b></sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="./docs/screenshot-local.png"><img src="./docs/screenshot-local.png" alt="Local Mod Manager" width="100%"></a>
+      <br>
+      <sub><b>Local Mod Manager</b></sub>
+    </td>
+  </tr>
+</table>
 
 A desktop mod manager for **Age of Empires II: Definitive Edition**, built with Tauri 2 + Vue 3 + TypeScript + Rust.
 

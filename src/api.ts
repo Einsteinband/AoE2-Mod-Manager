@@ -1,0 +1,125 @@
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import type {
+  ApplyReport,
+  AppSettings,
+  DeleteReport,
+  InstalledIndexEntry,
+  ModStats,
+  Preset,
+  PresetItem,
+  RootCandidate,
+  ScanReport,
+  ToggleOutcome,
+} from "./types";
+
+export function getSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>("get_settings");
+}
+
+/** 保存界面语言（en / zh；空字符串 = 跟随系统） */
+export function setLocale(locale: string): Promise<string> {
+  return invoke<string>("set_locale", { locale });
+}
+
+export function candidateRoots(): Promise<string[]> {
+  return invoke<string[]>("candidate_roots");
+}
+
+/** 首次启动引导：带来源说明的候选目录（注册表 / Steam 库 / 用户目录 / 全盘扫描） */
+export function detectRootCandidates(): Promise<RootCandidate[]> {
+  return invoke<RootCandidate[]>("detect_root_candidates");
+}
+
+export function scanMods(root?: string | null): Promise<ScanReport> {
+  return invoke<ScanReport>("scan_mods", { root: root ?? null });
+}
+
+export function setModRoot(root: string): Promise<ScanReport> {
+  return invoke<ScanReport>("set_mod_root", { root });
+}
+
+export function modStats(path: string): Promise<ModStats> {
+  return invoke<ModStats>("mod_stats", { path });
+}
+
+export async function pickFolder(defaultPath?: string | null): Promise<string | null> {
+  const picked = await open({
+    directory: true,
+    multiple: false,
+    title: "选择 AoE2DE 模组根目录（应包含 local 与 subscribed）",
+    defaultPath: defaultPath ?? undefined,
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+/** 把本地绝对路径转成 webview 可加载的 asset URL */
+export function fileUrl(path: string): string {
+  return convertFileSrc(path);
+}
+
+/** 在资源管理器中定位模组文件夹（Rust 侧 explorer.exe /select，无需额外插件） */
+export function revealModFolder(path: string): Promise<void> {
+  return invoke<void>("reveal_mod_folder", { path });
+}
+
+/**
+ * 删除本地模组文件（不论来源）。后端先确认游戏未运行，再校验目标只能是
+ * `<root>/<kind>/<folderName>` 的真实目录，只删那一个目录、清 mod-status.json 记录与分类元数据。
+ * 不会动服务器订阅状态（官方订阅模组下次启动游戏会被重新下载）。
+ */
+export function deleteModFiles(
+  kind: string,
+  folderName: string,
+  workshopId: number | null,
+): Promise<DeleteReport> {
+  return invoke<DeleteReport>("delete_mod_files", {
+    kind,
+    folderName,
+    workshopId: workshopId && workshopId > 0 ? workshopId : null,
+  });
+}
+
+/** 在线页用：本机已安装索引（WorkshopID → 目录/来源），不触发特征扫描 */
+export function installedLocalIndex(): Promise<InstalledIndexEntry[]> {
+  return invoke<InstalledIndexEntry[]>("installed_local_index");
+}
+
+// ---------------- v0.3 预设与批量恢复 ----------------
+
+/** 读取预设列表（%APPDATA%\com.aoe2.modmanager\presets.json） */
+export function listPresets(): Promise<Preset[]> {
+  return invoke<Preset[]>("presets_list");
+}
+
+/** 保存当前启用状态；同名（忽略大小写）覆盖更新 */
+export function savePreset(name: string, items: PresetItem[]): Promise<Preset> {
+  return invoke<Preset>("preset_save", { name, items });
+}
+
+export function deletePreset(id: string): Promise<Preset[]> {
+  return invoke<Preset[]>("preset_delete", { id });
+}
+
+/** 批量恢复：后端会检测游戏进程、备份 mod-status.json、只改 Enabled 并回读校验 */
+export function applyPreset(id: string): Promise<ApplyReport> {
+  return invoke<ApplyReport>("preset_apply", { id });
+}
+
+/**
+ * 单条启用 / 禁用。后端先确认 AoE2DE_s.exe 未运行，再备份 → 只改 Enabled → 原子替换 → 回读校验。
+ * kind 只能是 local / subscribed，folderName 必须是根目录下真实存在的模组文件夹。
+ */
+export function toggleModEnabled(
+  workshopId: number | null,
+  kind: string,
+  folderName: string,
+  enabled: boolean,
+): Promise<ToggleOutcome> {
+  return invoke<ToggleOutcome>("toggle_mod_enabled", {
+    workshopId: workshopId && workshopId > 0 ? workshopId : null,
+    kind,
+    folderName,
+    enabled,
+  });
+}

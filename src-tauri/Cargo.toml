@@ -1,0 +1,46 @@
+[package]
+name = "aoe2-mod-manager"
+version = "0.1.0"
+description = "AoE2 DE Mod Manager (read-only prototype)"
+authors = ["AoE2 Mod Manager"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "aoe2_mod_manager_lib"
+# 桌面端只需 rlib；cdylib 在 Windows GNU 工具链下会触发
+# "export ordinal too large" 链接错误（Windows 目标改用 MSVC 时再加回）
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 与 tauri 依赖的版本保持一致，才能直接使用 webview.cookies() 的返回类型
+cookie = "0.18"
+# 在线模组服务（官方 api.ageofempires.com）
+# proxy-from-env：只用做最后兜底（读 HTTPS_PROXY/HTTP_PROXY）；
+# 系统代理由本项目 net.rs 直接读注册表，ureq 自己不读。
+ureq = { version = "2.12", features = ["json", "proxy-from-env"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# Windows 专用：读系统代理（WinINET 注册表）+ DPAPI 加密会话缓存。
+# 0.61.2 已在本项目 Cargo.lock / 本地 registry 里，不需要额外下载。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_Security_Cryptography",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

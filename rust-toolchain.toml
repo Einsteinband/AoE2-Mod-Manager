@@ -1,0 +1,4 @@
+[toolchain]
+# 使用运行环境默认的 stable（x86_64-pc-windows-gnu），避免工具链漂移
+channel = "stable-x86_64-pc-windows-gnu"
+profile = "minimal"

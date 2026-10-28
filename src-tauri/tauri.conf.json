@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AoE2 Mod Manager",
+  "version": "0.1.0",
+  "identifier": "com.aoe2.modmanager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AoE2 Mod Manager · 帝国时代 II 模组管理器",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1120,
+        "minHeight": 700,
+        "resizable": true,
+        "theme": "Dark",
+        "backgroundColor": "#0d0a07"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost blob: data: https://cdn.ageofempires.com https://images-eds-ssl.xboxlive.com https://*.ageofempires.com https://*.xboxlive.com; style-src 'self' 'unsafe-inline'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "AoE2 Mod Manager",
+    "copyright": "© 2026 AoE2 Mod Manager",
+    "category": "Utility",
+    "shortDescription": "Mod manager for Age of Empires II: Definitive Edition",
+    "longDescription": "Browse, enable/disable and clean up Age of Empires II: Definitive Edition mods. Reads local and subscribed mod folders, saves mod presets, and installs mods from the official Age of Empires mod service.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "target/release/WebView2Loader.dll": "WebView2Loader.dll"
+    },
+    "windows": {
+      "allowDowngrades": true,
+      "nsis": {
+        "installMode": "both",
+        "languages": ["English", "SimpChinese"],
+        "displayLanguageSelector": true,
+        "startMenuFolder": "AoE2 Mod Manager",
+        "installerIcon": "icons/icon.ico",
+        "compression": "lzma"
+      }
+    }
+  }
+}

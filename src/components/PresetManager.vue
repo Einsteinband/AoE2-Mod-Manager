@@ -4,9 +4,10 @@ import { useI18n } from "vue-i18n";
 import type { ApplyReport, ModEntry, Preset, PresetItem } from "../types";
 import { applyPreset, deletePreset, listPresets, savePreset } from "../api";
 import { formatDateTime, translateBackendMessage } from "../format";
+import ConfirmDialog from "./ConfirmDialog.vue";
 
-const props = defineProps<{ mods: ModEntry[] }>();
-const emit = defineEmits<{ (e: "close"): void; (e: "applied"): void }>();
+const props = defineProps<{ mods: ModEntry[]; appliedId: string | null }>();
+const emit = defineEmits<{ (e: "close"): void; (e: "applied", presetId: string): void }>();
 
 const { t } = useI18n();
 
@@ -19,6 +20,9 @@ const name = ref("");
 const result = ref<ApplyReport | null>(null);
 const resultName = ref("");
 const pendingDelete = ref<string | null>(null);
+/** 待确认应用（覆盖式，必须先二次确认） */
+const pendingApply = ref<Preset | null>(null);
+const applyError = ref<string | null>(null);
 
 /** 只有“当前已启用”的模组才进预设 */
 const enabled = computed(() => props.mods.filter((m) => m.enabled === true));
@@ -89,7 +93,23 @@ async function doSave() {
 
 async function doApply(preset: Preset) {
   if (busy.value) return;
+  if (props.appliedId === preset.id) return;
+  applyError.value = null;
+  pendingApply.value = preset;
+}
+
+function cancelApply() {
+  if (busy.value === "apply") return;
+  pendingApply.value = null;
+  applyError.value = null;
+}
+
+/** 二次确认后真正执行：后端会覆盖式写入并自动备份/回读校验 */
+async function confirmApply() {
+  const preset = pendingApply.value;
+  if (!preset || busy.value) return;
   busy.value = "apply";
+  applyError.value = null;
   error.value = null;
   notice.value = null;
   result.value = null;
@@ -97,10 +117,12 @@ async function doApply(preset: Preset) {
     const report = await applyPreset(preset.id);
     result.value = report;
     resultName.value = preset.name;
-    // 让列表重新扫描，把新的启用状态显示出来
-    emit("applied");
+    pendingApply.value = null;
+    // 交给 App.vue：重扫 + 记录指纹 + 标记“当前已应用”
+    emit("applied", preset.id);
   } catch (e) {
-    error.value = normalizeError(e);
+    applyError.value = normalizeError(e);
+    error.value = applyError.value;
   } finally {
     busy.value = "";
   }
@@ -182,6 +204,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
                 t("preset.restoreNote", {
                   requested: result.requested,
                   restored: result.restored,
+                  disabled: result.disabled,
                   alreadyEnabled: result.alreadyEnabled,
                 })
               }}
@@ -230,8 +253,20 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
               </div>
             </div>
             <div class="preset-actions">
-              <button type="button" class="primary" :disabled="busy !== ''" @click="doApply(preset)">
-                {{ busy === "apply" ? t("preset.applying") : t("preset.apply") }}
+              <button
+                type="button"
+                class="primary"
+                :class="{ applied: props.appliedId === preset.id }"
+                :disabled="busy !== '' || props.appliedId === preset.id"
+                @click="doApply(preset)"
+              >
+                {{
+                  props.appliedId === preset.id
+                    ? t("preset.applied")
+                    : busy === "apply"
+                      ? t("preset.applying")
+                      : t("preset.apply")
+                }}
               </button>
               <button
                 type="button"
@@ -248,6 +283,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
         <section class="preset-safety">
           <h3>{{ t("preset.safetyTitle") }}</h3>
           <ul>
+            <li>{{ t("preset.safetyOverwrite") }}</li>
             <li>{{ t("preset.safetyBackup") }}</li>
             <li>{{ t("preset.safetyFields") }}</li>
             <li>{{ t("preset.safetyProcess") }}</li>
@@ -255,5 +291,18 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
         </section>
       </div>
     </div>
+
+    <!-- 覆盖式应用的二次确认 -->
+    <ConfirmDialog
+      v-if="pendingApply"
+      :title="t('preset.confirmTitle')"
+      :message="t('preset.confirmMessage')"
+      :detail="pendingApply.name"
+      :confirm-label="t('preset.confirmApply')"
+      :busy="busy === 'apply'"
+      :error="applyError"
+      @confirm="confirmApply"
+      @cancel="cancelApply"
+    />
   </div>
 </template>

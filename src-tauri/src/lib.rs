@@ -1239,6 +1239,47 @@ fn open_mod_webpage(mod_id: i64) -> Result<String, String> {
     }
 }
 
+/// 用系统默认浏览器打开外链（作者主页 / 官网）。
+/// 不需要 opener 插件：与 open_mod_webpage 一样走 explorer.exe，但这里接受任意 URL，
+/// 因此必须自己把关：强制 https + 主机名白名单，避免前端被注入 file:// / javascript: 之类。
+#[tauri::command]
+fn open_external(url: String) -> Result<String, String> {
+    const ALLOWED_HOSTS: [&str; 4] = [
+        "github.com",
+        "www.github.com",
+        "ageofempires.com",
+        "www.ageofempires.com",
+    ];
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("https://") {
+        return Err(format!("只允许 https 外链（收到：{trimmed}）"));
+    }
+    let host = lower
+        .trim_start_matches("https://")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    if host.is_empty() || !ALLOWED_HOSTS.contains(&host.as_str()) {
+        return Err(format!("不在白名单内的域名（{host}），已拒绝打开"));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer.exe")
+            .raw_arg(trimmed)
+            .spawn()
+            .map_err(|e| format!("无法打开默认浏览器：{e}"))?;
+        Ok(trimmed.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Err(format!("仅支持 Windows（目标地址：{trimmed}）"))
+    }
+}
+
 /// 前端把关键判断写进同一份终端日志，便于对照前后端时序
 #[tauri::command]
 fn ui_log(level: String, message: String) {
@@ -1332,6 +1373,31 @@ async fn toggle_mod_enabled(
     .map_err(|e| format!("切换任务执行失败：{e}"))?
 }
 
+// ---------------- v0.2：手动拖拽排序 ----------------
+
+/// 把拖拽后的顺序写进 mod-status.json 的 Priority（1..n 连续）。
+/// `ordered` 是前端 `ModEntry.id` 数组（`local:目录名`），不是 WorkshopID——本地模组的 WorkshopID 常为 0。
+/// 链路与预设完全一致：游戏进程检测 → 备份 → 只改 Priority → 原子替换 → 回读校验（失败自动回滚）。
+#[tauri::command]
+async fn update_mod_priority(
+    app: tauri::AppHandle,
+    ordered: Vec<String>,
+) -> Result<presets::PriorityOutcome, String> {
+    let root = settings::load_for_app(&app)
+        .mod_root
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+
+    let status_path = PathBuf::from(&root).join(presets::STATUS_FILE);
+    let backup_dir = presets::backups_dir_for(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        presets::reorder_priority(&status_path, &backup_dir, &ordered, false)
+    })
+    .await
+    .map_err(|e| format!("排序任务执行失败：{e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 
 pub fn run() {
@@ -1382,7 +1448,9 @@ pub fn run() {
             preset_save,
             preset_delete,
             preset_apply,
-            toggle_mod_enabled
+            toggle_mod_enabled,
+            update_mod_priority,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

@@ -80,6 +80,8 @@ pub struct ApplyReport {
     pub requested: usize,
     /// 本次真正由 false 改成 true 的模组数
     pub restored: usize,
+    /// 本次被覆盖式禁用（true → false，且不在预设中）的模组数
+    pub disabled: usize,
     /// 预设里本来就已经启用的模组数
     pub already_enabled: usize,
     /// 回读校验后整个 mod-status.json 里 Enabled=true 的总数
@@ -776,9 +778,10 @@ pub fn register_mod(
     })
 }
 
-// ---------------- 预设批量恢复（薄封装，行为与 v0.3 完全一致） ----------------
+// ---------------- 预设批量应用（覆盖式，薄封装） ----------------
 
-/// 应用预设：只把匹配记录的 `Enabled` 改成 `true`，其余字段与格式一律原样透传。
+/// 应用预设：**覆盖式**。所有记录先视为禁用，只有预设内的记录置为启用。
+/// `CheckSum` / `LastUpdate` / `Priority` / `Unsub` 与未知字段一律原样透传。
 /// `skip_process_check` 只给单元测试用。
 pub fn apply_items(
     status_path: &Path,
@@ -787,12 +790,14 @@ pub fn apply_items(
     skip_process_check: bool,
 ) -> Result<ApplyReport, String> {
     if items.is_empty() {
-        return Err("该预设是空的，没有可恢复的模组".to_string());
+        return Err("该预设是空的，没有可应用的模组".to_string());
     }
 
     let mut hits = vec![false; items.len()];
-    let mut already_enabled = 0usize;
-    let mut changed: Vec<String> = Vec::new();
+    // 预设内且原本就是启用状态
+    let mut enabled_now = 0usize;
+    let mut to_enable = 0usize;
+    let mut to_disable = 0usize;
 
     let (outcome, ()) = update_status(status_path, backup_dir, skip_process_check, |root| {
         let mods = mods_array_mut(root)?;
@@ -800,29 +805,36 @@ pub fn apply_items(
             if record.as_object().is_none() {
                 continue;
             }
-            let Some(index) = items
+            let hit = items
                 .iter()
-                .position(|item| matches_parts(record, item.workshop_id, &item.path))
-            else {
-                continue;
-            };
-            hits[index] = true;
+                .position(|item| matches_parts(record, item.workshop_id, &item.path));
+            if let Some(index) = hit {
+                hits[index] = true;
+            }
+            // 覆盖式：命中预设 = true，其余 = false
+            let target = hit.is_some();
+            let current = record.get("Enabled").and_then(|v| v.as_bool());
 
-            if record.get("Enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                already_enabled += 1;
+            if current == Some(target) {
+                if target {
+                    enabled_now += 1;
+                }
                 continue;
             }
-            let path_key = record
-                .get("Path")
-                .and_then(|p| p.as_str())
-                .map(normalize_key)
-                .unwrap_or_default();
+            // 字段缺失等价于禁用：目标也是禁用时不必写字
+            if !target && current.is_none() {
+                continue;
+            }
             if let Some(obj) = record.as_object_mut() {
-                obj.insert("Enabled".to_string(), Value::Bool(true));
-                changed.push(path_key);
+                obj.insert("Enabled".to_string(), Value::Bool(target));
+                if target {
+                    to_enable += 1;
+                } else {
+                    to_disable += 1;
+                }
             }
         }
-        Ok(((), !changed.is_empty()))
+        Ok(((), to_enable + to_disable > 0))
     })?;
 
     let not_in_status: Vec<PresetItem> = items
@@ -832,28 +844,30 @@ pub fn apply_items(
         .map(|(_, item)| item.clone())
         .collect();
 
-    // 全部已启用：没写文件，也就不需要备份
+    // 现状已与该预设完全一致：不写文件，也就不产生备份
     if !outcome.wrote {
         return Ok(ApplyReport {
             status_path: outcome.status_path,
             backup_path: None,
             requested: items.len(),
             restored: 0,
-            already_enabled,
+            disabled: 0,
+            already_enabled: enabled_now,
             total_enabled_after: outcome.total_enabled_after,
-            message: format!(
-                "预设里的 {} 个模组在 mod-status.json 里已经是启用状态，未修改文件。",
-                already_enabled
-            ),
             not_in_status,
             wrote: false,
+            message: format!(
+                "当前配置已与该预设一致（预设内 {} 个模组已启用，其余均已禁用），未修改文件。",
+                enabled_now
+            ),
         });
     }
 
     let message = format!(
-        "已恢复 {} 个模组（原本已启用 {} 个，未找到记录 {} 个）。现在共 {} 个模组处于启用状态，请启动游戏确认。",
-        changed.len(),
-        already_enabled,
+        "已按预设覆盖配置：启用 {} 个（其中原本已启用 {} 个），禁用 {} 个不在预设中的模组，未找到记录 {} 个。现在共 {} 个模组处于启用状态，请启动游戏确认。",
+        to_enable,
+        enabled_now,
+        to_disable,
         not_in_status.len(),
         outcome.total_enabled_after
     );
@@ -861,12 +875,165 @@ pub fn apply_items(
         status_path: outcome.status_path,
         backup_path: outcome.backup_path,
         requested: items.len(),
-        restored: changed.len(),
-        already_enabled,
+        restored: to_enable,
+        disabled: to_disable,
+        already_enabled: enabled_now,
         total_enabled_after: outcome.total_enabled_after,
         not_in_status,
         wrote: true,
         message,
+    })
+}
+
+// ---------------- v0.2：手动拖拽排序（Priority 1..n） ----------------
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorityOutcome {
+    pub status_path: String,
+    pub backup_path: Option<String>,
+    /// 本次真正被改写 Priority 的记录数
+    pub updated: usize,
+    /// 参与排序的记录总数（= 写入后 Priority 的最大值）
+    pub total: usize,
+    /// mod-status.json 里有、但前端列表里没有的记录（磁盘上已不存在），统一排在末尾
+    pub unlisted: Vec<String>,
+    pub wrote: bool,
+}
+
+/// `ModEntry.id`（`local:目录名` / `subscribed:目录名`）→ mod-status.json 的 Path 归一化键。
+///
+/// 故意**不**接受 WorkshopID：本地模组的 WorkshopID 常为 0、手动放入的根本没有，
+/// 用来源+目录名才是唯一且稳定的。
+fn priority_key(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    let (kind, folder) = raw.split_once(':').ok_or_else(|| {
+        format!("无法识别的模组 ID：{raw}（应为 local:目录名 或 subscribed:目录名）")
+    })?;
+    if kind != "local" && kind != "subscribed" {
+        return Err(format!("无法识别的模组 ID：{raw}（来源只能是 local / subscribed）"));
+    }
+    if folder.is_empty() || folder.contains('/') || folder.contains('\\') || folder.contains("..") {
+        return Err(format!("模组文件夹名不合法：{raw}"));
+    }
+    Ok(normalize_key(&crate::install::status_rel_path(kind, folder)))
+}
+
+/// 把前端拖拽后的顺序写进 `mod-status.json` 的 `Priority`：1, 2, 3… 连续且不重复。
+///
+/// 校验：数组非空 → 每个 ID 合法 → 数组内不重复 → 每条都能在 mod-status.json 找到记录。
+/// 任一项不通过就直接报错，此时 `update_status` 保证**完全没有写盘**。
+/// 列表之外的记录（磁盘上已消失、前端扫描不到）不丢弃，按原有相对顺序排在末尾，
+/// 这样 Priority 永远是 1..n 的连续整数，游戏不会遇到空档或并列。
+/// 其余字段（CheckSum / Enabled / LastUpdate / Unsub…）一律原样透传。
+pub fn reorder_priority(
+    status_path: &Path,
+    backup_dir: &Path,
+    ordered: &[String],
+    skip_process_check: bool,
+) -> Result<PriorityOutcome, String> {
+    if ordered.is_empty() {
+        return Err("排序列表为空，未修改任何内容".to_string());
+    }
+
+    let mut wanted: Vec<String> = Vec::with_capacity(ordered.len());
+    for raw in ordered {
+        let key = priority_key(raw)?;
+        if wanted.contains(&key) {
+            return Err(format!(
+                "排序列表里出现了重复项：{raw}，已中止，未修改任何内容"
+            ));
+        }
+        wanted.push(key);
+    }
+
+    let mut updated = 0usize;
+    let mut total = 0usize;
+    let mut unlisted: Vec<String> = Vec::new();
+
+    let (outcome, ()) = update_status(status_path, backup_dir, skip_process_check, |root| {
+        let mods = mods_array_mut(root)?;
+
+        let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (index, record) in mods.iter().enumerate() {
+            if let Some(path) = record.get("Path").and_then(|p| p.as_str()) {
+                if !path.trim().is_empty() {
+                    by_key.entry(normalize_key(path)).or_insert(index);
+                }
+            }
+        }
+
+        // 数量一致性：前端传来的每一个 ID 都必须能在文件里定位到
+        let missing: Vec<String> = ordered
+            .iter()
+            .zip(wanted.iter())
+            .filter(|(_, key)| !by_key.contains_key(*key))
+            .map(|(raw, _)| raw.clone())
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "以下模组在 mod-status.json 里没有记录，排序已中止（未修改任何内容）：{}。请先启动一次游戏，让游戏登记这些模组。",
+                missing.join("、")
+            ));
+        }
+
+        let mut final_order: Vec<usize> = Vec::with_capacity(mods.len());
+        let mut in_list: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for key in &wanted {
+            if let Some(index) = by_key.get(key).copied() {
+                final_order.push(index);
+                in_list.insert(index);
+            }
+        }
+        for index in 0..mods.len() {
+            if in_list.contains(&index) {
+                continue;
+            }
+            let path = mods[index]
+                .get("Path")
+                .and_then(|p| p.as_str())
+                .map(|p| p.to_string())
+                .unwrap_or_default();
+            if !path.is_empty() {
+                unlisted.push(path);
+            }
+            final_order.push(index);
+        }
+
+        total = final_order.len();
+        let mut changed = false;
+        for (slot, index) in final_order.iter().enumerate() {
+            let target = (slot + 1) as i64;
+            let record = &mut mods[*index];
+            if record.get("Priority").and_then(|v| v.as_i64()) == Some(target) {
+                continue;
+            }
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert("Priority".to_string(), Value::from(target));
+                changed = true;
+                if slot < wanted.len() {
+                    updated += 1;
+                }
+            }
+        }
+        Ok(((), changed))
+    })?;
+
+    log::info!(
+        target: "mod-status",
+        "已写入 {} 条优先级（共 {} 条记录，未列出 {} 条）",
+        updated,
+        total,
+        unlisted.len()
+    );
+
+    Ok(PriorityOutcome {
+        status_path: outcome.status_path,
+        backup_path: outcome.backup_path,
+        updated,
+        total,
+        unlisted,
+        wrote: outcome.wrote,
     })
 }
 
@@ -938,15 +1105,17 @@ mod tests {
         let report = apply_items(&status, &dir.join("backups"), &items, true).unwrap();
 
         assert_eq!(report.restored, 1);
+        assert_eq!(report.disabled, 1, "不在预设中的旧启用项必须被禁用");
         assert_eq!(report.already_enabled, 0);
         assert!(report.wrote);
-        assert_eq!(report.total_enabled_after, 2);
+        assert_eq!(report.total_enabled_after, 1, "覆盖式：只应剩下预设中的一条");
 
         let text = fs::read_to_string(&status).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
         let mods = value["Mods"].as_array().unwrap();
         assert_eq!(mods[0]["Enabled"], Value::Bool(true));
         assert_eq!(mods[1]["Enabled"], Value::Bool(false));
+        assert_eq!(mods[2]["Enabled"], Value::Bool(false), "原本启用的 local 模组被覆盖禁用");
         // 其它字段一律原样
         assert_eq!(mods[0]["CheckSum"], Value::String("3591523155".to_string()));
         assert_eq!(mods[0]["LastUpdate"], Value::String("1611403388028".to_string()));
@@ -959,6 +1128,51 @@ mod tests {
         // 备份必须是原始字节
         let backup = report.backup_path.expect("应生成备份");
         assert_eq!(fs::read_to_string(&backup).unwrap(), SAMPLE);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_overwrites_previous_enabled_set() {
+        let (dir, status) = fixture("overwrite");
+        // 先把三条全部启用，模拟“玩家自己攒了一套配置”
+        for (id, path) in [
+            (Some(20505u64), "subscribed//20505_A"),
+            (Some(38825), "subscribed//38825_B"),
+            (Some(0), "local//9_Local"),
+        ] {
+            let sel = ModSelector {
+                workshop_id: id,
+                path: path.to_string(),
+            };
+            set_enabled(&status, &dir.join("backups"), &sel, true, true).unwrap();
+        }
+
+        // 只应用 B：A 与 local 必须被覆盖禁用
+        let items = vec![PresetItem {
+            workshop_id: Some(38825),
+            path: "subscribed//38825_B".to_string(),
+            title: "B".to_string(),
+            priority: Some(2),
+            kind: "subscribed".to_string(),
+        }];
+        let report = apply_items(&status, &dir.join("backups"), &items, true).unwrap();
+        assert_eq!(report.restored, 0, "B 已经是启用状态");
+        assert_eq!(report.already_enabled, 1);
+        assert_eq!(report.disabled, 2, "A 与 local 必须被覆盖禁用");
+        assert_eq!(report.total_enabled_after, 1);
+        assert!(report.wrote);
+        assert!(report.backup_path.is_some());
+
+        let value: Value = serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
+        let mods = value["Mods"].as_array().unwrap();
+        assert_eq!(mods[0]["Enabled"], Value::Bool(false));
+        assert_eq!(mods[1]["Enabled"], Value::Bool(true));
+        assert_eq!(mods[2]["Enabled"], Value::Bool(false));
+        // 覆盖写入不得动其它字段
+        assert_eq!(mods[0]["CheckSum"], Value::String("3591523155".to_string()));
+        assert_eq!(mods[2]["Priority"], serde_json::json!(3));
+        assert_eq!(value["Unsub"], serde_json::json!(["999"]));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -985,11 +1199,20 @@ mod tests {
         let report = apply_items(&status, &dir.join("backups"), &items, true).unwrap();
         assert_eq!(report.requested, 2);
         assert_eq!(report.restored, 0); // local 那条本来就是启用状态
+        assert_eq!(report.disabled, 0, "另外两条本来就已禁用，无需改动");
         assert_eq!(report.already_enabled, 1);
         assert_eq!(report.not_in_status.len(), 1);
         assert_eq!(report.not_in_status[0].workshop_id, Some(777));
-        assert!(!report.wrote, "全部已启用时不应写文件");
+        assert_eq!(report.total_enabled_after, 1);
+        assert!(!report.wrote, "现状已与预设一致时不得写文件");
         assert!(report.backup_path.is_none());
+
+        // 第二次应用：依旧不写文件
+        let again = apply_items(&status, &dir.join("backups"), &items, true).unwrap();
+        assert!(!again.wrote);
+        assert_eq!(again.restored, 0);
+        assert_eq!(again.disabled, 0);
+        assert_eq!(again.already_enabled, 1);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1407,8 +1630,13 @@ mod tests {
         assert!(report.not_in_status.is_empty());
 
         let after_raw = fs::read(&status).unwrap();
-        // false -> true 每条只少 1 个字节：证明没有重排、没有改写其他字段
-        assert_eq!(after_raw.len() + 1, raw.len(), "除 Enabled 外不应有任何字节变化");
+        // 覆盖式：写入后整个文件里只有预设那一条是启用的
+        assert_eq!(report.total_enabled_after, 1, "覆盖式应用后只应剩下预设中的模组启用");
+        let before_enabled = records
+            .iter()
+            .filter(|r| r.get("Enabled").and_then(|v| v.as_bool()) == Some(true))
+            .count();
+        assert_eq!(report.disabled, before_enabled, "原有启用项（不含目标）应全部被禁用");
         let after: Value = serde_json::from_slice(&after_raw).unwrap();
         let after_mods = after.get("Mods").and_then(|m| m.as_array()).unwrap();
         assert_eq!(after_mods.len(), records.len(), "记录条数不得变化");
@@ -1425,6 +1653,80 @@ mod tests {
         let backup = report.backup_path.unwrap();
         assert_eq!(fs::read(&backup).unwrap(), raw, "备份必须是原始字节");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------------- v0.2：拖拽排序 ----------------
+
+    #[test]
+    fn reorder_writes_contiguous_priority_and_keeps_other_fields() {
+        let (dir, status) = fixture("order");
+        // 只提交两条（模拟另有一条没被前端列出），它必须被挪到末尾而不是丢失
+        let ordered = vec![
+            "local:9_Local".to_string(),
+            "subscribed:20505_A".to_string(),
+        ];
+        let out = reorder_priority(&status, &dir.join("backups"), &ordered, true).unwrap();
+        assert!(out.wrote);
+        assert_eq!(out.updated, 2);
+        assert_eq!(out.total, 3);
+        assert_eq!(out.unlisted, vec!["subscribed//38825_B".to_string()]);
+        assert!(out.backup_path.is_some());
+
+        let value: Value = serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
+        let mods = value["Mods"].as_array().unwrap();
+        assert_eq!(mods[2]["Priority"], serde_json::json!(1), "local 被拖到第一位");
+        assert_eq!(mods[0]["Priority"], serde_json::json!(2));
+        assert_eq!(mods[1]["Priority"], serde_json::json!(3), "未提交的记录排在末尾");
+        // Priority 之外一切原样透传
+        assert_eq!(mods[0]["Enabled"], Value::Bool(false));
+        assert_eq!(mods[0]["CheckSum"], Value::String("3591523155".to_string()));
+        assert_eq!(mods[0]["Extra"], serde_json::json!({"Keep": 1}));
+        assert_eq!(mods[2]["Enabled"], Value::Bool(true));
+        assert_eq!(value["Unsub"], serde_json::json!(["999"]));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reorder_is_noop_when_order_already_matches() {
+        let (dir, status) = fixture("noop");
+        let ordered = vec![
+            "subscribed:20505_A".to_string(),
+            "subscribed:38825_B".to_string(),
+            "local:9_Local".to_string(),
+        ];
+        let out = reorder_priority(&status, &dir.join("backups"), &ordered, true).unwrap();
+        assert!(!out.wrote, "顺序没变就不该写盘");
+        assert!(out.backup_path.is_none());
+        assert_eq!(out.updated, 0);
+        assert_eq!(fs::read_to_string(&status).unwrap(), SAMPLE);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reorder_rejects_invalid_ids_without_writing() {
+        let (dir, status) = fixture("reject");
+        let backups = dir.join("backups");
+
+        let err = reorder_priority(&status, &backups, &["local:不存在".to_string()], true)
+            .unwrap_err();
+        assert!(err.contains("没有记录"), "{err}");
+
+        let err = reorder_priority(
+            &status,
+            &backups,
+            &["local:9_Local".to_string(), "local:9_Local".to_string()],
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("重复"), "{err}");
+
+        let err = reorder_priority(&status, &backups, &["../evil:9_Local".to_string()], true)
+            .unwrap_err();
+        assert!(err.contains("无法识别"), "{err}");
+
+        assert_eq!(fs::read_to_string(&status).unwrap(), SAMPLE, "报错时不得写盘");
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -7,7 +7,9 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    tagline: "v0.1.0 · Initial Release",
+    taglinePrefix: "v0.1.1 · Drag & Drop & Preset Fix by ",
+    author: "Einsteinband",
+    authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
   },
   lang: {
@@ -30,6 +32,29 @@ export default {
     rescan: "Rescan",
     changeRoot: "Change root folder",
     presets: "Preset manager",
+  },
+  sort: {
+    enter: "Sort order",
+    exit: "Exit sorting",
+    enterTitle: "Enter load-order sorting: drag cards to reorder mods",
+    exitTitle: "Exit sorting mode; cards go back to click-to-select",
+    banner: "Sorting mode: drag cards to change load order ({n} registered mods)",
+    saving: "Saving…",
+    savedToast: "Order saved; the game will load mods in this order.",
+    searchDisabled: "Search is disabled while sorting",
+    sortDisabled: "Order is set by dragging while in sorting mode",
+    save: "Save order",
+    saveTitle: "Write this order into mod-status.json (Ctrl+S)",
+    dirty: "Unsaved changes",
+    clean: "Matches disk",
+    unsavedBlock:
+      "You have unsaved order changes — click “Save order”, or exit sorting to discard them",
+    discardTitle: "Discard unsaved order?",
+    discardMessage:
+      "The order you dragged has not been written to mod-status.json yet. Exiting restores the order on disk.",
+    discardConfirm: "Discard changes",
+    sidebarLocked: "Filters are locked while sorting; exit sorting to use them",
+    lockedTitle: "Not registered by the game yet ({n}, cannot be sorted)",
   },
   rootbar: {
     root: "Root",
@@ -202,18 +227,26 @@ export default {
       "No presets yet. Enable the mods you want in game, then come back and click \"Save current state\".",
     items: "{n} mods · saved {date}",
     created: "· created {date}",
-    apply: "Restore",
-    applying: "Restoring…",
+    apply: "Apply preset",
+    applying: "Applying…",
+    applied: "✓ Applied",
+    confirmTitle: "Overwrite current setup?",
+    confirmMessage:
+      "Applying this preset overwrites your current setup: mods that are enabled now but not in this preset will be disabled. Continue?",
+    confirmApply: "Continue",
     delete: "Delete",
     deleteConfirm: "Confirm delete?",
     deleted: "Deleted \"{name}\"; the game folder was not touched",
-    restoreNote: "Requested {requested}, restored {restored}, already enabled {alreadyEnabled}.",
+    restoreNote:
+      "Preset has {requested} mods: {restored} enabled, {disabled} disabled by overwrite, {alreadyEnabled} were already enabled.",
     totalEnabledAfter: "{n} mods are enabled now.",
     backupPath: "Backup: {path}",
     noBackup: "No file was modified, so no backup was created.",
     notInStatus: "{n} mods have no record in mod-status.json (unsubscribed, or the folder was renamed): {list}",
     verifyHint: "Launch the game to verify; do not apply a preset while the game is running.",
     safetyTitle: "Safety",
+    safetyOverwrite:
+      "Applying a preset is overwrite-style: every mod is disabled first, then only the mods in the preset are enabled.",
     safetyBackup:
       "Before every write the original mod-status.json is backed up to %APPDATA%\\com.aoe2.modmanager\\backups.",
     safetyFields:

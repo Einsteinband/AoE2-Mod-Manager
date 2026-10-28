@@ -1146,6 +1146,14 @@ button.danger {
 .preset-actions button {
   padding: 5px 11px;
 }
+/* “当前已应用”：置灰但仍要一眼可读，不能和普通禁用混在一起 */
+.preset-actions button.applied:disabled {
+  opacity: 1;
+  cursor: default;
+  color: #a8c98c;
+  border-color: #3f5a34;
+  background: rgba(120, 162, 92, 0.12);
+}
 
 .preset-safety {
   border-top: 1px solid var(--line-soft);
@@ -1419,4 +1427,226 @@ button.delete-btn:disabled {
 }
 .wizard-actions .note {
   margin-left: auto;
+}
+
+/* ---------- v0.2：手动拖拽排序 ---------- */
+
+/* 工具栏开关：与羊皮纸主题一致的“印章”按钮，激活时金光 */
+.sort-toggle {
+  border-color: var(--line);
+  color: var(--parch-dim);
+}
+.sort-toggle:hover:not(:disabled) {
+  border-color: var(--gold-dim);
+  color: var(--parch);
+}
+.sort-toggle.active {
+  border-color: var(--gold);
+  color: var(--gold-bright);
+  background: linear-gradient(180deg, rgba(201, 162, 77, 0.18), rgba(201, 162, 77, 0.06));
+  box-shadow: inset 0 0 0 1px rgba(201, 162, 77, 0.25);
+}
+
+/* 排序模式下筛选锁定：置灰 + 屏蔽交互（防止拖的是过滤后的子集） */
+.sidebar.sort-locked {
+  opacity: 0.42;
+  filter: grayscale(0.6);
+  pointer-events: none;
+  user-select: none;
+}
+.sort-lock-note {
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  border: 1px dashed var(--gold-dim);
+  border-radius: 4px;
+  font-family: var(--serif);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--gold-bright);
+  background: rgba(201, 162, 77, 0.08);
+}
+
+.sort-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 顶部提示条：羊皮纸质感 + 金色描边 */
+.sort-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid rgba(201, 162, 77, 0.45);
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(201, 162, 77, 0.14), rgba(201, 162, 77, 0.04));
+  font-family: var(--serif);
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+  color: var(--parch-dim);
+}
+.sort-banner .glyph {
+  color: var(--gold-bright);
+  font-size: 13px;
+}
+.sort-banner .sort-state {
+  margin-left: auto;
+  color: var(--gold-dim);
+}
+
+.sort-grid {
+  align-content: start;
+}
+.sort-grid .mod-card {
+  cursor: grab;
+}
+.sort-grid .mod-card:active {
+  cursor: grabbing;
+}
+.sort-grid .mod-card:hover {
+  transform: none;
+}
+
+/* 拖拽占位：虚线金框，清晰可辨（Sortable 的 ghostClass） */
+.sort-grid .drag-ghost {
+  opacity: 0.32 !important;
+  border: 1px dashed var(--gold-dim) !important;
+  background: rgba(201, 162, 77, 0.05) !important;
+  box-shadow: none !important;
+}
+.sort-grid .drag-chosen {
+  cursor: grabbing;
+  border-color: var(--gold);
+}
+.sort-grid .drag-active {
+  opacity: 0.9 !important;
+  transform: rotate(0.8deg) scale(1.03);
+  box-shadow: 0 18px 34px rgba(0, 0, 0, 0.62);
+  border-color: var(--gold);
+}
+
+/* 卡片右上角当前加载序号 */
+.order-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  border: 1px solid rgba(201, 162, 77, 0.7);
+  background: rgba(28, 21, 12, 0.9);
+  color: var(--gold-bright);
+  font-family: var(--serif);
+  font-size: 10px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.sort-locked-group {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sort-locked-group .card-grid {
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+
+/* 右下角 Toast */
+.app-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  max-width: 320px;
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid rgba(201, 162, 77, 0.55);
+  background: linear-gradient(180deg, #241b11, #17120c);
+  color: var(--parch);
+  font-family: var(--serif);
+  font-size: 12px;
+  line-height: 1.5;
+  letter-spacing: 0.3px;
+  box-shadow: var(--shadow);
+  animation: app-toast-in 0.18s ease-out;
+}
+.app-toast.error {
+  border-color: rgba(180, 85, 63, 0.75);
+  color: #e7bfb2;
+}
+@keyframes app-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* forceFallback 的浮动克隆体：原生 HTML5 拖放在 WebView2 里会被宿主的 OLE 拖放拦截 */
+.sortable-fallback,
+.drag-fallback {
+  pointer-events: none !important;
+  opacity: 0.92 !important;
+  transform: rotate(1deg) scale(1.03) !important;
+  border: 1px solid var(--gold) !important;
+  border-radius: 4px;
+  box-shadow: 0 22px 44px rgba(0, 0, 0, 0.66) !important;
+  cursor: grabbing !important;
+  z-index: 9999 !important;
+}
+/* 卡片内的图片/文字不能自己发起原生拖拽，否则会抢走 mousedown */
+.sort-grid .mod-card,
+.sort-grid .mod-card * {
+  -webkit-user-drag: none;
+  user-select: none;
+}
+body.sort-dragging,
+body.sort-dragging * {
+  cursor: grabbing !important;
+}
+
+/* 排序提示条右侧的“保存排序 / 退出排序” */
+.sort-banner button {
+  padding: 4px 10px;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+}
+.sort-banner .sort-save {
+  border-color: rgba(201, 162, 77, 0.75);
+  color: var(--gold-bright);
+  background: linear-gradient(180deg, rgba(201, 162, 77, 0.22), rgba(201, 162, 77, 0.08));
+}
+.sort-banner .sort-save:hover:not(:disabled) {
+  border-color: var(--gold-bright);
+  background: linear-gradient(180deg, rgba(201, 162, 77, 0.34), rgba(201, 162, 77, 0.14));
+}
+.sort-banner .sort-save:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+.sort-banner .sort-state.dirty {
+  color: var(--gold-bright);
+}
+
+/* 顶栏作者名：金色超链接，悬浮变亮 + 手型，不破坏原有一行排版 */
+.brand .tagline .author-link {
+  color: var(--gold);
+  text-decoration: none;
+  cursor: pointer;
+  border-bottom: 1px dotted var(--gold-dim);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.brand .tagline .author-link:hover {
+  color: var(--gold-bright);
+  border-bottom-color: var(--gold-bright);
 }

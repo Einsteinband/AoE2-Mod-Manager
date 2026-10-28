@@ -1,117 +1,165 @@
-# AoE2 Mod Manager（阶段一：只读原型）
+**English** | [中文](./README.zh.md)
 
-《帝国时代 II：决定版》模组浏览与管理工具。**本阶段只读**：扫描 `local` 与 `subscribed`，
-展示真实存在的模组信息，不订阅、不下载、不启用/禁用、不删除任何文件。
+# AoE2 Mod Manager
 
-技术栈：Tauri 2 + Vue 3 + TypeScript + Vite + Rust。
+![Screenshot](./docs/screenshot.png)
 
-## 一、环境（本机已就绪，换机器照此复现）
+A desktop mod manager for **Age of Empires II: Definitive Edition**, built with Tauri 2 + Vue 3 + TypeScript + Rust.
 
-| 组件 | 位置 / 版本 | 说明 |
-| --- | --- | --- |
-| Node.js | v22.16.0 | Vite 8 要求 `^20.19 || >=22.12` |
-| Rust | `stable-x86_64-pc-windows-gnu`，`F:\Rust\.cargo` | 无管理员权限，装到 F 盘 |
-| MinGW-w64 | WinLibs GCC 16.2.0 UCRT，`F:\mingw\mingw64` | 提供 `dlltool` / `windres` / `gcc` |
-| WebView2 Runtime | 155.0.4283.62 | 系统已存在 |
+It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `mod-status.json`), shows you what is actually on disk, and lets you enable/disable mods, save mod presets, and browse/install mods from the official Age of Empires mod service — without guesswork and without touching anything it does not fully understand.
 
-需要的环境变量（用户级，已写入）：
+---
 
-```
-CARGO_HOME=F:\Rust\.cargo
-RUSTUP_HOME=F:\Rust\.rustup
-PATH += F:\Rust\.cargo\bin ; F:\mingw\mingw64\bin
-```
+## Features
 
-代理（本机为 Clash，rustup / npm / curl 都需要显式设置，Windows 系统代理它们不读）：
+### Local mods
+- Scans `local/` and `subscribed/` and merges them into one list (name, author, Workshop ID, cover, size, file count).
+- Shows the **enable state, load priority, last update and checksum exactly as `mod-status.json` records them** — never inferred.
+- Toggle a mod on/off: the app first verifies the game is not running, backs up `mod-status.json`, changes only the `Enabled` field, then reads the file back and rolls back automatically if verification fails.
+- Reveal any mod folder in Explorer, open its official page, or delete just that one local folder (with an explicit confirmation that explains the consequences).
+
+### Presets & batch restore
+- Save the current set of enabled mods as a named preset.
+- After a game update disables everything, restore the whole set in one click.
+- Every apply is backed up, verified, and reported item by item (restored / already enabled / no longer present).
+
+### Online mods (official service)
+- Search, browse and install mods from `api.ageofempires.com`, with the official categories, sort options and pagination.
+- Sign-in happens in an embedded WebView2 window on the official Microsoft / Steam / PlayStation pages. **This app never asks for or stores your password.** The session cookie can optionally be cached locally with Windows DPAPI (remember-me).
+- Installed mods are placed in `local/` so the game can enable them immediately.
+- Network settings: follow the Windows system proxy automatically, or set a manual proxy (useful for players behind a proxy).
+
+### First-run setup
+- On first launch the app searches the Windows registry, your Steam libraries, the user profile and common install paths for an Age of Empires II: Definitive Edition folder.
+- If nothing is found (or the saved path disappears later), a setup wizard lets you pick the mod root folder manually and validates it before use.
+
+### Packaging
+- **NSIS installer** with a language selector (English / Simplified Chinese), a per-user / all-users choice and a fully custom install directory.
+- **Portable ZIP**: extract anywhere, no installation, no admin rights.
+
+### Localization
+- Ships with English and Simplified Chinese; the UI language can be switched in the top bar and is remembered in `settings.json`.
+- Language packs are loaded automatically from `src/i18n/locales/*.ts`, so adding a new language is a single drop-in file (see [Adding a language](#adding-a-language)).
+
+---
+
+## Requirements
+
+- Windows 10 / 11 (x64)
+- Microsoft Edge **WebView2 Runtime** — preinstalled on Windows 10/11; otherwise install it from <https://go.microsoft.com/fwlink/p/?LinkId=2124703>
+- Age of Empires II: Definitive Edition (Steam or Microsoft Store)
+
+---
+
+## Install
+
+**Installer** — run `AoE2 Mod Manager_0.1.0_x64-setup.exe`, choose *all users* or *current user*, then pick any install folder (any drive works).
+
+**Portable** — extract `AoE2ModManager-0.1.0-win-x64-portable.zip` anywhere and run `aoe2-mod-manager.exe`. Keep `WebView2Loader.dll` next to the executable.
+
+Settings, presets and the optional login cache are stored in `%APPDATA%\com.aoe2.modmanager` in both cases.
+
+---
+
+## Safety guarantees
+
+- Nothing is written unless you explicitly ask for it (enable/disable, preset apply, install, delete), and every write is preceded by a backup.
+- The game must be closed; a running `AoE2DE_s.exe` makes the app refuse the operation.
+- Only the `Enabled` field of the target record is modified — `CheckSum`, `LastUpdate`, `Priority` and `Unsub` are preserved byte-for-byte in meaning, so checksums keep matching.
+- Deleting a mod only removes that one local folder and its `mod-status.json` record. It never sends unsubscribe requests; use *View on website* for that.
+- Unknown data is displayed as *not provided / unknown* with the reason, never as a plausible guess.
+
+---
+
+## Development
+
+| Component | Notes |
+| --- | --- |
+| Node.js | 22.x (Vite 8 requires `^20.19 \|\| >=22.12`) |
+| Rust | stable, `x86_64-pc-windows-gnu` toolchain used for the released binaries |
+| MinGW-w64 | provides `dlltool` / `windres` / `gcc` |
 
 ```powershell
-$env:HTTPS_PROXY="http://127.0.0.1:7897"; $env:HTTP_PROXY="http://127.0.0.1:7897"
+npm install
+npm run tauri dev      # dev mode (Vite + desktop window)
+npm run build          # frontend only (vue-tsc type check + vite build)
+npm run tauri build    # NSIS installer
+npm run portable       # portable ZIP in dist-portable\
 ```
 
-### 首次部署必备的两步修复
+Backend tests:
 
-1. **工具链 manifest 补丁**（一次性）：
+```powershell
+cargo test --manifest-path src-tauri\Cargo.toml -- --nocapture
+```
+
+### Windows GNU toolchain note
+
+MinGW's `gcc` specs link its own `default-manifest.o`, which conflicts with the manifest injected by `tauri-build` and silently disables Common-Controls v6 (the app then dies at startup with `0xC0000139`). Run the one-time patch on a fresh machine:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-toolchain.ps1
 ```
 
-MinGW 的 gcc specs 会自动链接自带的 `default-manifest.o`，与 `tauri-build` 注入的 manifest
-（含 `Microsoft.Windows.Common-Controls` v6 依赖）冲突，ld 报
-`.rsrc merge failure: multiple non-default manifests`，结果 comctl32 v6 未激活，
-进程启动即 `0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND`。脚本把该对象替换为不含 `.rsrc` 的空对象。
+### Adding a language
 
-2. **图标**（仅有需要改图标时）：
+1. Copy `src/i18n/locales/en.ts` to `src/i18n/locales/<code>.ts` (the file name **is** the language code, e.g. `de.ts`).
+2. Set `export const label = "Deutsch";` and translate the strings. Missing keys fall back to English.
+3. That's it — the language appears in the top-bar switcher automatically, and the system language is detected on first launch.
 
-```powershell
-npm run icons   # 生成 src-tauri/icons/*.png 与 icon.ico（无第三方依赖）
-```
+---
 
-## 二、运行
-
-```powershell
-cd F:\AoE2ModManager
-npm install
-npm run tauri dev      # 开发模式（Vite + 桌面窗口）
-npm run build          # 仅前端产物（vue-tsc 类型检查 + vite build）
-cargo test --manifest-path src-tauri\Cargo.toml -- --nocapture   # 后端扫描测试
-npm run tauri build    # 打包 NSIS 安装包
-```
-
-> 若 PowerShell 里的 `cargo` 找不到，先在新终端里执行一次：
-> `$env:PATH="F:\mingw\mingw64\bin;F:\Rust\.cargo\bin;$env:PATH"`
-
-## 三、已验证的行为（阶段一验收）
-
-| 项 | 结果 |
-| --- | --- |
-| 扫描 `F:\Games\AoE2DE` | 175 个模组（本地 1、已订阅 174） |
-| `info.json` 解析 | 175/175 成功（含字符串内裸换行的非法 JSON，已容错） |
-| `mod-status.json` | 151 启用 / 24 停用 / 0 未知 |
-| 缩略图 | 170 个模组有真实 `thumbnail.jpg`，经 asset 协议只读加载 |
-| 体积/文件数 | 选中模组时按需统计，实测 `399 KB / 38 个文件` |
-| 单元测试 | `cargo test` 4 项通过 |
-| 启动 | `npm run tauri dev` 正常出窗口并显示真实模组 |
-
-## 四、目录结构
+## Project structure
 
 ```
 F:\AoE2ModManager
-├─ src/                       前端
-│  ├─ App.vue                 三栏布局 + 筛选/排序/扫描状态机
-│  ├─ components/ModCard.vue  卡片（封面、来源徽章、状态点）
-│  ├─ components/ModDetail.vue 详情（作者、ID、优先级、路径、体积、问题）
-│  ├─ api.ts                  invoke 封装 + convertFileSrc
-│  ├─ types.ts                与 Rust 结构体一一对应的类型
-│  └─ style.css               深色中世纪主题（羊皮纸/金色，衬线字体）
+├─ src/                          frontend
+│  ├─ App.vue                    three-column layout, top bar, filters, wizard host
+│  ├─ components/
+│  │  ├─ ModCard.vue             local mod card
+│  │  ├─ ModDetail.vue           local mod detail panel
+│  │  ├─ OnlineBrowser.vue       online tab (search / list / detail / install)
+│  │  ├─ OnlineModCard.vue       online mod card
+│  │  ├─ PresetManager.vue       preset modal
+│  │  ├─ FirstRunWizard.vue      first-run mod-root wizard
+│  │  └─ ConfirmDialog.vue       parchment confirmation dialog
+│  ├─ i18n/
+│  │  ├─ index.ts                auto-loading locale registry
+│  │  └─ locales/{en,zh}.ts      language packs (one file per language)
+│  ├─ online/                    official API client, types, tag localization
+│  ├─ api.ts / types.ts / format.ts
+│  └─ style.css                  dark parchment theme
 ├─ src-tauri/
-│  ├─ src/scan.rs             扫描、info.json/ mod-status.json 解析、体积统计
-│  ├─ src/settings.rs         根目录持久化、Steam 库路径探测
-│  ├─ src/lib.rs              Tauri 命令（scan_mods / set_mod_root / mod_stats …）
-│  ├─ build.rs                注入 manifest、复制 WebView2Loader.dll
-│  ├─ link/default-manifest.o 遮蔽 MinGW 自带 manifest 的空对象
-│  └─ capabilities/default.json  仅 core:default + dialog:default
-└─ scripts/                   图标生成、导入表体检、截图、工具链补丁
+│  ├─ src/scan.rs                mod scanning, info.json / mod-status.json parsing
+│  ├─ src/settings.rs            settings, mod-root auto-detection (registry + Steam VDF)
+│  ├─ src/presets.rs             presets and batch restore with backup / rollback
+│  ├─ src/install.rs             download → extract → install → write mod-status.json
+│  ├─ src/online/                official service client, session (WebView2 + DPAPI)
+│  ├─ src/net.rs                 proxy resolution (manual / system registry / env)
+│  ├─ src/metadata.rs            own mod metadata (official tags)
+│  ├─ src/lib.rs                 Tauri commands
+│  └─ build.rs                   manifest injection, WebView2Loader.dll staging
+├─ scripts/                      icons, portable packaging, screenshot, toolchain patch
+└─ docs/
 ```
 
-## 五、数据来源与“不做假”约定
+---
 
-| 字段 | 来源 |
+## Data sources (no-fake-data policy)
+
+| Field | Source |
 | --- | --- |
-| 名称 | `info.json` 的 `Title`；缺失时用去掉数字前缀的文件夹名，并标注来源 |
-| 作者 / 描述 | `info.json` 的 `Author` / `Description`（描述去 HTML 标签后展示） |
-| Workshop ID | 文件夹名 `108404_xxx` 的数字前缀 |
-| 启用状态 / 优先级 / 更新时间 / Checksum | 游戏写出的 `mod-status.json` |
-| 封面 | 模组文件夹内真实存在的 `thumbnail.jpg/.png/.webp` |
-| 内容类型 | 依据真实子目录（`widgetui`→界面 UI，`resources`→游戏资源 …） |
+| Title | `info.json` `Title`; otherwise the folder name without its numeric prefix (and that fact is shown) |
+| Author / Description | `info.json` `Author` / `Description` (description shown as plain text) |
+| Workshop ID | numeric prefix of the folder name, e.g. `108404_xxx` |
+| Enable state / priority / last update / checksum | `mod-status.json` written by the game |
+| Cover | a real `thumbnail.jpg` / `.png` / `.webp` inside the mod folder |
+| Categories | official tags recorded when installing from the online tab, otherwise a local file scan (3 levels deep) |
 
-任何拿不到的数据一律显示“未提供 / 未知”，并在详情里给出原因（缺少 `info.json`、
-`mod-status.json` 无记录、权限不足等），不生成猜测值。缺失字段也会进入
-`ScanReport.warnings`，界面上通过“⚠ N 条提示”查看。
+Anything unavailable is shown as *not provided / unknown* together with the reason (missing `info.json`, no `mod-status.json` record, permission denied, …).
 
-## 六、安全边界
+---
 
-- 全部文件访问为只读：`fs::read_dir` / `fs::read` / `metadata`。
-- `mod_stats` 只统计已配置根目录**之内**的路径（`canonicalize` + `starts_with` 校验）。
-- 缩略图通过 Tauri asset 协议读取，作用域由 Rust 在扫描时动态放行该根目录。
-- 未实现订阅、下载、启用、禁用、卸载；不注入游戏进程、不改客户端 UI。
+## Credits
+
+Not affiliated with Microsoft, Xbox Game Studios or Forgotten Empires. Age of Empires is a trademark of its respective owners.

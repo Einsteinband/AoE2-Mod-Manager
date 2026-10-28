@@ -2,7 +2,20 @@
 
 # AoE2 模组管理器
 
-![Screenshot](./docs/screenshot.png)
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="./docs/screenshot-online.png"><img src="./docs/screenshot-online.png" alt="在线模组浏览" width="100%"></a>
+      <br>
+      <sub><b>在线模组浏览</b></sub>
+    </td>
+    <td align="center" width="50%">
+      <a href="./docs/screenshot-local.png"><img src="./docs/screenshot-local.png" alt="本地模组管理" width="100%"></a>
+      <br>
+      <sub><b>本地模组管理</b></sub>
+    </td>
+  </tr>
+</table>
 
 《帝国时代 II：决定版》的桌面模组管理工具，技术栈 **Tauri 2 + Vue 3 + TypeScript + Rust**。
 

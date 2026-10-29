@@ -211,3 +211,26 @@ export interface ModUpdateReport {
   pages: number;
   items: ModUpdateItem[];
 }
+
+// ---------------- v0.5：模组收藏与自定义备注（user_data.json） ----------------
+
+/** 单个模组的用户数据；key 只用 WorkshopID，卸载模组后仍然保留 */
+export interface ModUserData {
+  /** 自定义备注名；null = 没有备注 */
+  customName: string | null;
+  isFavorite: boolean;
+}
+
+export interface UserDataStore {
+  version: number;
+  /** key 一定是 WorkshopID（数字字符串），与模组是否安装无关 */
+  mods: Record<string, ModUserData>;
+}
+
+export interface SaveUserDataReport {
+  path: string;
+  /** 写前备份的文件路径；首次写入时为 null */
+  backupPath: string | null;
+  entryCount: number;
+  favoriteCount: number;
+}

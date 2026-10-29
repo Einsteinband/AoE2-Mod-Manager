@@ -118,17 +118,19 @@ select {
 .app-shell {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  height: 100%;
+  /* v0.6：纵向 flex——顶栏 / 根目录条 / 主内容 / 全局状态栏，主内容吃满剩余高度 */
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
 }
 
 .topbar {
-  display: grid;
-  grid-template-columns: auto auto minmax(170px, 1fr) auto auto;
+  /* flex + wrap：窗口变窄时工具栏整体换到第二行，绝不把按钮顶出窗口 */
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
-  padding: 12px 18px;
+  gap: 10px 12px;
+  padding: 10px 16px;
   background: linear-gradient(180deg, #191410 0%, #100c09 100%);
   border-bottom: 1px solid var(--line);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
@@ -139,6 +141,7 @@ select {
   align-items: center;
   gap: 12px;
   min-width: 0;
+  flex: 0 1 auto;
 }
 .brand .crest {
   width: 38px;
@@ -175,6 +178,7 @@ select {
 /* 顶部模式切换 */
 .mode-tabs {
   display: inline-flex;
+  flex: 0 0 auto;
   gap: 4px;
   padding: 3px;
   border: 1px solid var(--line);
@@ -184,7 +188,7 @@ select {
 .mode-tabs button {
   border: 1px solid transparent;
   background: transparent;
-  padding: 6px 14px;
+  padding: 6px 12px;
   font-family: var(--serif);
   letter-spacing: 1px;
   color: var(--muted);
@@ -208,6 +212,8 @@ select {
   position: relative;
   display: flex;
   align-items: center;
+  flex: 1 1 220px;
+  min-width: 150px;
 }
 .search-box input {
   width: 100%;
@@ -240,16 +246,43 @@ select {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 顶栏按钮统一压缩一档：字号/内边距变小、不换行、允许收缩，避免右侧被顶出窗口 */
+.toolbar > * {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.toolbar button,
+.toolbar select {
+  padding: 6px 9px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.toolbar select {
+  max-width: 132px;
+  text-overflow: ellipsis;
+}
+/* 排序模式按钮：图标 + 极窄内边距，占位最小 */
+.toolbar button.sort-toggle {
+  padding: 6px 8px;
+  letter-spacing: 0;
 }
 
 /* 设置入口：齿轮按钮，永远钉在顶栏最右侧一列（在线模式下搜索/工具栏消失也不移位） */
 .settings-entry {
-  grid-column: 5;
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 32px;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 30px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -348,6 +381,8 @@ select {
 .body-grid {
   display: grid;
   grid-template-columns: 216px minmax(0, 1fr) 372px;
+  /* flex: 1 让三栏占满顶栏与状态栏之间的全部空间；min-height: 0 是内部滚动的必要条件 */
+  flex: 1 1 auto;
   min-height: 0;
 }
 @media (max-width: 1180px) {
@@ -1552,7 +1587,8 @@ button.delete-btn:disabled {
 .app-toast {
   position: fixed;
   right: 18px;
-  bottom: 18px;
+  /* v0.6：抬到 24px 全局状态栏之上，避免被压住 */
+  bottom: 30px;
   z-index: 60;
   max-width: 320px;
   padding: 10px 14px;
@@ -1624,7 +1660,7 @@ button.delete-btn:disabled {
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(201, 162, 77, 0.18);
 }
 .app-toast.update-toast.stacked {
-  bottom: 78px;
+  bottom: 90px;
 }
 .update-toast-body {
   flex: 1 1 auto;
@@ -1726,4 +1762,89 @@ body.sort-dragging * {
 .brand .tagline .author-link:hover {
   color: var(--gold-bright);
   border-bottom-color: var(--gold-bright);
+}
+
+/* ---------- v0.5：收藏 / 自定义备注名 ---------- */
+/* 详情页标题下的 ⭐ / 📝 按钮行（本地与在线详情页共用） */
+.fav-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+.fav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+}
+.fav-btn.active {
+  border-color: var(--gold);
+  color: var(--gold-bright);
+  background: linear-gradient(180deg, #2a2118, #1c1610);
+  box-shadow: inset 0 0 0 1px rgba(201, 162, 77, 0.35);
+}
+.fav-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.fav-star {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 有备注名时，详情页标题下方小字回显原英文标题 */
+.detail-title-orig {
+  margin: -2px 0 8px;
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* 卡片标题下的原英文标题 */
+.card-sub {
+  margin-top: -2px;
+  font-size: 10px;
+  line-height: 1.3;
+  color: #6b5940;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡片缩略图左下角收藏角标：避开左上来源、右上可更新/序号、右下“无封面” */
+.fav-badge {
+  position: absolute;
+  left: 5px;
+  bottom: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1.6;
+  border-radius: 3px;
+  border: 1px solid rgba(201, 162, 77, 0.55);
+  background: rgba(8, 6, 4, 0.82);
+  color: var(--gold-bright);
+  pointer-events: none;
+}
+
+/* 备注名弹窗 */
+.rename-modal {
+  max-width: 420px;
+}
+.rename-input {
+  display: block;
+  width: 100%;
+  margin: 8px 0 4px;
+  padding: 7px 9px;
+  font-size: 12.5px;
+}
+.rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }

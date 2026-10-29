@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
+mod cache;
 mod download;
 mod install;
 mod metadata;
@@ -15,6 +16,7 @@ mod scan;
 mod secure;
 mod settings;
 mod update;
+mod user_data;
 
 use online::api::ApiClient;
 use online::ApiFailure;
@@ -655,8 +657,16 @@ async fn online_find(
     let client = client(&app)?;
     let start = start.max(1);
     let count = count.clamp(1, 50);
+    // key 与「读缓存」用的必须是同一份 cache::find_key，否则永远读不到自己写的数据
+    let key = cache::find_key(&query, start, count, &sort, &order, &tags);
+    let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        client.find(&query, start, count, &sort, &order, &tags)
+        let result = client.find(&query, start, count, &sort, &order, &tags)?;
+        // 只有成功才写缓存：把 401 / 网络错误写进去会变成「缓存里永远没数据」
+        if let Ok(value) = serde_json::to_value(&result) {
+            cache::put_for_app(&handle, &key, "find", value);
+        }
+        Ok(result)
     })
     .await
     .map_err(|e| ApiFailure::new("internal", format!("查询任务失败：{e}"), None))?
@@ -669,9 +679,19 @@ async fn online_installed(
     count: i64,
 ) -> Result<online::models::FindResult, ApiFailure> {
     let client = client(&app)?;
-    tauri::async_runtime::spawn_blocking(move || client.installed(start.max(1), count.clamp(1, 50)))
-        .await
-        .map_err(|e| ApiFailure::new("internal", format!("查询任务失败：{e}"), None))?
+    let start = start.max(1);
+    let count = count.clamp(1, 50);
+    let key = cache::installed_key(start, count);
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = client.installed(start, count)?;
+        if let Ok(value) = serde_json::to_value(&result) {
+            cache::put_for_app(&handle, &key, "installed", value);
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| ApiFailure::new("internal", format!("查询任务失败：{e}"), None))?
 }
 
 #[tauri::command]
@@ -680,9 +700,90 @@ async fn online_detail(
     mod_id: i64,
 ) -> Result<serde_json::Value, ApiFailure> {
     let client = client(&app)?;
-    tauri::async_runtime::spawn_blocking(move || client.detail(mod_id))
+    let key = cache::detail_key(mod_id);
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let value = client.detail(mod_id)?;
+        if !value.is_null() {
+            cache::put_for_app(&handle, &key, "detail", value.clone());
+        }
+        Ok(value)
+    })
+    .await
+    .map_err(|e| ApiFailure::new("internal", format!("请求任务失败：{e}"), None))?
+}
+
+// ---------------- 在线数据离线缓存（SWR 秒开） ----------------
+
+/// 读缓存：搜索 / 分页。
+/// 返回 None = 未命中；命中但 expired=true 表示已超过 24 小时，前端应当直接走网络。
+/// 注意：Key 由 Rust 侧 cache::find_key 统一计算，前端只传原始参数，不自己拼。
+#[tauri::command]
+async fn online_cache_find(
+    app: tauri::AppHandle,
+    query: String,
+    start: i64,
+    count: i64,
+    sort: String,
+    order: String,
+    tags: Vec<i64>,
+) -> Option<cache::CacheHit> {
+    let start = start.max(1);
+    let count = count.clamp(1, 50);
+    let key = cache::find_key(&query, start, count, &sort, &order, &tags);
+    tauri::async_runtime::spawn_blocking(move || cache::get_for_app(&app, &key))
         .await
-        .map_err(|e| ApiFailure::new("internal", format!("请求任务失败：{e}"), None))?
+        .ok()
+        .flatten()
+}
+
+/// 读缓存：已订阅列表（/Installed，只有分页参数）
+#[tauri::command]
+async fn online_cache_installed(
+    app: tauri::AppHandle,
+    start: i64,
+    count: i64,
+) -> Option<cache::CacheHit> {
+    let key = cache::installed_key(start.max(1), count.clamp(1, 50));
+    tauri::async_runtime::spawn_blocking(move || cache::get_for_app(&app, &key))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// 读缓存：单个模组详情
+#[tauri::command]
+async fn online_cache_detail(app: tauri::AppHandle, mod_id: i64) -> Option<cache::CacheHit> {
+    let key = cache::detail_key(mod_id);
+    tauri::async_runtime::spawn_blocking(move || cache::get_for_app(&app, &key))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// 清理在线缓存（设置 → 网络 → 「清理在线缓存」）：直接删除 online_cache.json
+#[tauri::command]
+async fn online_cache_clear(app: tauri::AppHandle) -> Result<cache::ClearReport, String> {
+    tauri::async_runtime::spawn_blocking(move || cache::clear_for_app(&app))
+        .await
+        .map_err(|e| format!("清理任务异常：{e}"))?
+}
+
+/// 缓存概览（条目数 / 体积 / 时间范围），设置页展示用
+#[tauri::command]
+async fn online_cache_stat(app: tauri::AppHandle) -> cache::CacheStat {
+    tauri::async_runtime::spawn_blocking(move || cache::stat_for_app(&app))
+        .await
+        .unwrap_or(cache::CacheStat {
+            path: String::new(),
+            entries: 0,
+            bytes: 0,
+            oldest_ms: None,
+            newest_ms: None,
+            ttl_ms: cache::TTL_MS,
+            max_entries: cache::MAX_ENTRIES,
+            max_bytes: cache::MAX_BYTES,
+        })
 }
 
 
@@ -1525,6 +1626,25 @@ async fn update_mod_priority(
     .map_err(|e| format!("排序任务执行失败：{e}"))?
 }
 
+// ---------------- v0.5：模组收藏与自定义备注（user_data.json） ----------------
+
+/// 读取收藏 / 备注。key 是 WorkshopID，与模组是否安装无关（卸载后保留）。
+#[tauri::command]
+fn load_user_data(app: tauri::AppHandle) -> user_data::Store {
+    user_data::load_for_app(&app)
+}
+
+/// 覆盖式保存整份 user_data.json：写前先备份旧文件（backups\user_data-<ms>.json）。
+#[tauri::command]
+fn save_user_data(
+    app: tauri::AppHandle,
+    data: user_data::Store,
+) -> Result<user_data::SaveReport, String> {
+    let path = user_data::path_for(&app)?;
+    let backup_dir = presets::backups_dir_for(&app)?;
+    user_data::save(&path, &backup_dir, &data)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 
 pub fn run() {
@@ -1568,6 +1688,11 @@ pub fn run() {
             reveal_mod_folder,
             online_installed,
             online_detail,
+            online_cache_find,
+            online_cache_installed,
+            online_cache_detail,
+            online_cache_clear,
+            online_cache_stat,
             online_install,
             online_cancel_install,
             online_uninstall,
@@ -1580,6 +1705,8 @@ pub fn run() {
             preset_apply,
             toggle_mod_enabled,
             update_mod_priority,
+            load_user_data,
+            save_user_data,
             open_external
         ])
         .run(tauri::generate_context!())

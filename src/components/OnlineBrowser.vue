@@ -33,10 +33,38 @@ import {
   sessionStatus,
   uiLog,
 } from "../online/service";
+import {
+  readDetailCache,
+  readFindCache,
+  readInstalledCache,
+  usableDetailCache,
+  usableListCache,
+} from "../online/cache";
+import {
+  ensureSession,
+  markOnline,
+  markUnauthenticated,
+  sessionEpoch,
+  sessionError as sharedSessionError,
+  sessionInfo,
+  sessionPhase,
+  setStatusMessage,
+} from "../sessionState";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { deleteModFiles, installedLocalIndex } from "../api";
 import { sourceLabel, translateBackendMessage } from "../format";
+import {
+  customNameOf,
+  displayTitle,
+  ensureUserData,
+  favoriteCount,
+  isFavorite,
+  setCustomName,
+  setFavorite,
+} from "../userData";
+import RenameDialog from "./RenameDialog.vue";
 import type { InstalledIndexEntry } from "../types";
+import type { CacheHit, FindResult } from "../online/types";
 
 /** 每批加载数量：本地网格每行 6 个（约 197px 列宽），24 = 4 行 */
 const PAGE_SIZE = 24;
@@ -44,11 +72,26 @@ const PAGE_SIZE = 24;
 const { t, te } = useI18n();
 
 const session = ref<SessionStatus | null>(null);
-const sessionLoading = ref(true);
 const sessionError = ref<string | null>(null);
 const waitingLogin = ref(false);
 const probing = ref(false);
 const probeResult = ref<string | null>(null);
+
+/**
+ * 共享会话状态（底栏同源）的镜像：
+ * 本组件绝不再发起第二份探测，只把 sessionState 的结果同步到本地 ref，
+ * 原有的 session?.xxx 判断全部保持不变。
+ *
+ * immediate 必须为 true：本组件被 KeepAlive 缓存，用户可能在 App.vue 已完成静默校验
+ * 之后才第一次切到在线页——此时 sessionInfo 早已有值，普通 watch 永远收不到。
+ */
+watch(
+  sessionInfo,
+  (info) => {
+    session.value = info;
+  },
+  { immediate: true },
+);
 
 /** 登录平台（Steam / 微软 / PSN），由 Rust 侧提供 URL */
 const platforms = ref<LoginTarget[]>([]);
@@ -97,6 +140,8 @@ onUnmounted(() => {
 defineExpose({ refresh: manualRefresh });
 
 const onlySubscribed = ref(false);
+/** v0.5：只看收藏（按 WorkshopID 匹配 user_data.json；只过滤已加载的条目） */
+const favoritesOnly = ref(false);
 
 /** 左侧分类（官方 /api/v4/mods/Tags） */
 const tags = ref<ModTag[]>([]);
@@ -123,6 +168,53 @@ const toast = ref<{ text: string; kind: "ok" | "error" } | null>(null);
 let toastTimer: number | null = null;
 const openingWeb = ref(false);
 
+// ---------------- v0.5：收藏 / 备注名（在线侧，只和 modId 绑定） ----------------
+const canFavorite = computed(() => (selected.value?.modId ?? 0) > 0);
+const favorited = computed(() => isFavorite(selected.value?.modId));
+const customName = computed(() => customNameOf(selected.value?.modId));
+const favBusy = ref(false);
+const favError = ref<string | null>(null);
+const renameOpen = ref(false);
+const renameBusy = ref(false);
+const renameError = ref<string | null>(null);
+
+async function toggleFavorite() {
+  const mod = selected.value;
+  if (!mod || favBusy.value) return;
+  favBusy.value = true;
+  favError.value = null;
+  try {
+    const next = await setFavorite(mod.modId, !favorited.value);
+    showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
+  } catch (e) {
+    favError.value = messageOf(e);
+  } finally {
+    favBusy.value = false;
+  }
+}
+
+function openRename() {
+  if (!selected.value) return;
+  renameError.value = null;
+  renameOpen.value = true;
+}
+
+async function applyRename(name: string) {
+  const mod = selected.value;
+  if (!mod || renameBusy.value) return;
+  renameBusy.value = true;
+  renameError.value = null;
+  try {
+    await setCustomName(mod.modId, name);
+    renameOpen.value = false;
+    showToast(t("favorites.savedToast"));
+  } catch (e) {
+    renameError.value = messageOf(e);
+  } finally {
+    renameBusy.value = false;
+  }
+}
+
 /** 本机已安装索引：WorkshopID → 目录/来源（磁盘事实，与服务器订阅标记无关） */
 const localIndex = ref<Record<number, InstalledIndexEntry>>({});
 const localIndexError = ref<string | null>(null);
@@ -141,9 +233,15 @@ let observer: IntersectionObserver | null = null;
 let seq = 0;
 
 const heading = computed(() => {
+  if (favoritesOnly.value) return t("favorites.heading");
   if (onlySubscribed.value) return t("online.headingSubscribed");
   return query.value.trim() ? t("online.headingSearch") : t("online.headingAll");
 });
+
+/** 收藏过滤后的可见列表（列表按页加载，只过滤已加载条目，绝不重新请求） */
+const visibleItems = computed<OnlineMod[]>(() =>
+  favoritesOnly.value ? items.value.filter((m) => isFavorite(m.modId)) : items.value,
+);
 
 const activeTagName = computed(() => {
   if (activeTag.value === null) return t("sidebar.allContent");
@@ -305,24 +403,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
   });
 }
 
+/** 手动「重新检查登录状态」：强制再探一次；成功后由 sessionEpoch 统一触发刷新 */
 async function refreshSession() {
-  sessionLoading.value = true;
   sessionError.value = null;
-  try {
-    const status = await withTimeout(sessionStatus(), 20000, t("online.sessionCheckingTitle"));
-    session.value = status;
-    if (status.error) sessionError.value = status.error;
-  } catch (e) {
-    session.value = null;
-    sessionError.value = messageOf(e);
-  } finally {
-    sessionLoading.value = false;
-  }
+  await ensureSession(true);
+  session.value = sessionInfo.value;
+  sessionError.value = sharedSessionError.value;
 }
 
 /** 分类字典：GET /api/v4/mods/Tags（匿名可读）；失败时用内置 17 项兜底 */
 async function loadTags() {
   tagsError.value = null;
+  // 离线 / 未登录：官方字典接口需要登录态，直接用内置 17 项兜底，不打网络
+  if (sessionPhase.value !== "online") {
+    tags.value = FALLBACK_TAGS;
+    return;
+  }
   try {
     const list = await withTimeout(modTags(), 20000, t("sidebar.officialTags"));
     if (list.length) {
@@ -407,7 +503,9 @@ async function startLogin(target = platform.value) {
         if (pollTimer) window.clearInterval(pollTimer);
         pollTimer = null;
         await closeLoginWindow();
-        await reload();
+        // 不在这里直接 reload：bump epoch 后由 handleSessionEpoch 统一刷新，避免重复请求
+        markOnline(status);
+        setStatusMessage(t("statusbar.loginDone"));
       } catch (e) {
         const text = messageOf(e);
         sessionError.value = t("online.cookieButFailed", { text });
@@ -470,10 +568,11 @@ async function silentReauth(reason: string) {
         stopSilentTimer();
         silentAuth.value = false;
         silentAuthNote.value = null;
-        session.value = status;
         sessionError.value = null;
         await closeLoginWindow();
-        await reload();
+        // markOnline 会 bump sessionEpoch → handleSessionEpoch 统一负责刷新列表
+        markOnline(status);
+        setStatusMessage(t("statusbar.loginDone"));
       }
     } catch (e) {
       void uiLog("info", `后台免密登录第 ${ticks} 次未完成：${messageOf(e)}`);
@@ -535,20 +634,116 @@ function mergeChunk(list: OnlineMod[]): number {
 }
 
 /** 首屏 / 切换筛选：清空后从第 1 条重新加载 */
-/** 手动刷新入口：缓存后不会自动重载，只有用户点“刷新”才重新检查登录并拉数据 */
 async function manualRefresh() {
-  if (loading.value || sessionLoading.value) return;
+  // 手动刷新：强制重探登录态，成功后由 sessionEpoch 统一触发 reload
   await refreshSession();
-  if (session.value?.loggedIn) await reload();
 }
 
+// ---------------- v0.6：缓存优先（SWR 秒开） ----------------
+
+/** 缓存最多连续重放几页（把上次看到的列表拼回来） */
+const CACHE_PAGE_LIMIT = 4;
+
+/** 底栏中间提示用的 HH:mm */
+function clockText(ms: number): string {
+  const date = new Date(ms);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * 读一页缓存。未命中 / 超过 24 小时（expired）/ 空页都返回 null。
+ * key 由 Rust 侧统一计算，这里只传原始参数。
+ */
+async function readCachePage(start: number): Promise<OnlineMod[] | null> {
+  let hit: CacheHit<FindResult> | null = null;
+  try {
+    hit = onlySubscribed.value
+      ? await readInstalledCache(start, PAGE_SIZE)
+      : await readFindCache({
+          query: query.value.trim(),
+          start,
+          count: PAGE_SIZE,
+          sort: sort.value,
+          order: order.value,
+          tags: activeTag.value === null ? [] : [activeTag.value],
+        });
+  } catch {
+    // 缓存命令不可用（例如还跑着旧的后端二进制）时静默降级为“没有缓存”，绝不拖垮列表
+    return null;
+  }
+  if (!usableListCache(hit)) return null;
+  if (hit.value.totalCount !== null) totalCount.value = hit.value.totalCount;
+  const list = (hit.value.items ?? []).filter((m) => typeof m?.modId === "number");
+  return list.length ? list : null;
+}
+
+/**
+ * 把缓存重放成当前列表：命中任意一页就返回 true。
+ * 只改 items / cursor / hasMore，不动 loading（要不要转圈由调用方决定）。
+ */
+async function showFromCache(): Promise<boolean> {
+  const pages: OnlineMod[] = [];
+  let start = 1;
+  let exhausted = false;
+  for (let page = 0; page < CACHE_PAGE_LIMIT; page += 1) {
+    const chunk = await readCachePage(start);
+    if (!chunk) break;
+    // /Installed 不支持 tags 过滤，缓存里是全集，这里按官方 tagIds 在本地筛
+    const usable = onlySubscribed.value ? chunk.filter(exceedsTagFilter) : chunk;
+    const fresh = usable.filter((m) => !pages.some((seen) => seen.modId === m.modId));
+    pages.push(...fresh);
+    start += chunk.length;
+    if (chunk.length < PAGE_SIZE) {
+      exhausted = true;
+      break;
+    }
+  }
+  if (!pages.length) return false;
+  items.value = pages;
+  cursor.value = start;
+  hasMore.value = !exhausted;
+  return true;
+}
+
+/** 离线翻页：只用缓存里的下一页；没有就当作到底（重新登录后 reload 会整体替换） */
+async function appendCachePage(): Promise<boolean> {
+  const chunk = await readCachePage(cursor.value);
+  if (!chunk) return false;
+  cursor.value += chunk.length;
+  if (chunk.length < PAGE_SIZE) hasMore.value = false;
+  return mergeChunk(chunk) > 0;
+}
+
+/**
+ * 列表加载的唯一入口。顺序固定：
+ * ① 清空 → ② 缓存铺屏（不看登录态，秒开）→ ③ 离线到此为止 → ④ 在线静默刷新并平滑替换。
+ */
 async function reload() {
-  if (!session.value?.loggedIn) return;
   seq += 1;
   const mySeq = seq;
-  loading.value = true;
   loadingMore.value = false;
   resetList();
+
+  // ② 缓存优先
+  const cached = await showFromCache();
+  if (mySeq !== seq) return;
+  if (cached) {
+    setStatusMessage(t("statusbar.cacheLoaded"));
+    if (items.value.length) await selectMod(items.value[0]);
+    if (mySeq !== seq) return;
+  }
+
+  // ③ 离线：有缓存就看缓存，没缓存就交给模板显示登录面板
+  if (sessionPhase.value !== "online") {
+    loading.value = false;
+    if (!cached) setStatusMessage(t("statusbar.offlineHint"));
+    return;
+  }
+
+  // ④ 在线：静默刷新（有缓存时不亮骨架，实现无闪烁替换）
+  loading.value = !cached;
+  setStatusMessage(cached ? t("statusbar.refreshing") : t("statusbar.fetching"));
   try {
     let guard = 0;
     while (mySeq === seq && guard < 4) {
@@ -562,13 +757,17 @@ async function reload() {
       const added = mergeChunk(result.items);
       if (added > 0 || !hasMore.value || result.items.length === 0) break;
     }
+    if (mySeq !== seq) return;
+    setStatusMessage(t("statusbar.freshAt", { time: clockText(Date.now()) }));
     if (items.value.length) await selectMod(items.value[0]);
   } catch (e) {
     if (mySeq === seq) {
       items.value = [];
       error.value = messageOf(e);
       if (kindOf(e) === "unauthenticated") {
-        session.value = session.value ? { ...session.value, loggedIn: false } : null;
+        session.value = null;
+        // 底栏立刻变灰，避免继续显示“已登录”
+        markUnauthenticated(messageOf(e));
         // 缓存的会话 Cookie 已失效（会话 Cookie 不跨进程）：后台静默重新走一次 SSO
         void silentReauth(t("online.reasonUnauthorized"));
       }
@@ -581,10 +780,15 @@ async function reload() {
 /** 滚动到底部：追加下一批 */
 async function loadMore() {
   if (loading.value || loadingMore.value || !hasMore.value) return;
-  if (!session.value?.loggedIn || error.value || !items.value.length) return;
+  if (error.value || !items.value.length) return;
+  const mySeq = seq;
+  // v0.6：离线只用缓存里的下一页，不再打网络
+  if (sessionPhase.value !== "online") {
+    if (!(await appendCachePage())) hasMore.value = false;
+    return;
+  }
   loadingMore.value = true;
   moreError.value = null;
-  const mySeq = seq;
   try {
     let guard = 0;
     while (mySeq === seq && hasMore.value && guard < 4) {
@@ -667,18 +871,36 @@ async function selectMod(mod: OnlineMod) {
   selected.value = mod;
   detail.value = null;
   detailError.value = null;
-  detailLoading.value = true;
+  detailLoading.value = sessionPhase.value === "online";
   installError.value = null;
   installNote.value = null;
   needForce.value = false;
   actionMessage.value = null;
   measuredBytes.value = null;
+  favError.value = null;
+  renameOpen.value = false;
+
+  // ① 详情同样缓存优先：秒开上次看过的内容
+  try {
+    const hit = await readDetailCache(mod.modId);
+    if (selected.value?.modId !== mod.modId) return;
+    if (usableDetailCache(hit)) detail.value = hit.value;
+  } catch {
+    /* 缓存读失败不影响后续网络请求 */
+  }
+
+  // ② 离线：只用缓存，不发请求（避免 401 把详情刷成错误）
+  if (sessionPhase.value !== "online") {
+    detailLoading.value = false;
+    return;
+  }
+
   try {
     detail.value = await modDetail(mod.modId);
   } catch (e) {
-    detailError.value = messageOf(e);
+    if (selected.value?.modId === mod.modId) detailError.value = messageOf(e);
   } finally {
-    detailLoading.value = false;
+    if (selected.value?.modId === mod.modId) detailLoading.value = false;
   }
 }
 
@@ -792,6 +1014,11 @@ function installNoteText(outcome: InstallOutcome): string {
 async function downloadAndInstall() {
   const mod = selected.value;
   if (!mod || subscribeBusy.value) return;
+  // v0.6：离线拦截（本地收藏 / 备注不受影响，只有下载被挡）
+  if (sessionPhase.value !== "online") {
+    showToast(t("online.offlineBlocked"), "error");
+    return;
+  }
   actionBusy.value = true;
   actionMessage.value = null;
   installError.value = null;
@@ -854,6 +1081,11 @@ async function openWebpage() {
 async function doInstall() {
   const mod = selected.value;
   if (!mod || installing.value) return;
+  // v0.6：离线拦截（重新安装 / 覆盖安装同样需要登录态去取签名下载地址）
+  if (sessionPhase.value !== "online") {
+    showToast(t("online.offlineBlocked"), "error");
+    return;
+  }
   installing.value = true;
   installError.value = null;
   installNote.value = null;
@@ -906,8 +1138,25 @@ function rawEntries(): { key: string; value: string }[] {
 
 watch([scrollEl, sentinel], attachObserver, { flush: "post" });
 
-/** 首次挂载只跑一次网络请求；被 KeepAlive 缓存后不会再触发 */
+/** 首次挂载只跑一次；被 KeepAlive 缓存后不会再触发 */
 let booted = false;
+
+/**
+ * 登录态确认有效的统一刷新入口。
+ * boot 与 watch(sessionEpoch) 都走它，用 epoch 去重，保证同一个信号只刷一次。
+ */
+let handledEpoch = 0;
+async function handleSessionEpoch() {
+  const current = sessionEpoch.value;
+  if (current === handledEpoch) return;
+  handledEpoch = current;
+  if (sessionPhase.value !== "online") return;
+  await loadTags();
+  await reload();
+}
+watch(sessionEpoch, () => {
+  void handleSessionEpoch();
+});
 
 async function boot() {
   if (booted) return;
@@ -916,6 +1165,17 @@ async function boot() {
     progress.value = payload;
     if (payload.total > 0) measuredBytes.value = payload.total;
   });
+  // v0.5：收藏 / 备注只读一次磁盘（失败不阻塞在线页）
+  void ensureUserData().catch(() => undefined);
+
+  // ① 缓存优先：没登录也要能秒开上次的列表
+  const cached = await showFromCache();
+  if (cached) {
+    setStatusMessage(t("statusbar.cacheLoaded"));
+    if (items.value.length) void selectMod(items.value[0]);
+  }
+
+  // ② 平台清单（后端本地常量，不走网络）
   try {
     platforms.value = await loginTargets();
     if (!platforms.value.some((p) => p.key === platform.value)) {
@@ -924,15 +1184,18 @@ async function boot() {
   } catch (e) {
     netError.value = t("online.loginTargetsFailed", { msg: messageOf(e) });
   }
-  // 代理设置在 SettingsModal 里，这里不再拉取；只加载标签与会话
-  await loadTags();
-  await refreshSession();
-  if (session.value?.loggedIn) {
-    await reload();
-  } else {
-    // 启动时没有可用会话：后台静默尝试（隐藏窗口 + 平台 SSO 持久 Cookie），不阻塞首屏
-    void silentReauth(t("online.reasonNoSession"));
+
+  // ③ 静默校验登录态：App.vue 启动时已发起，这里复用同一个 Promise（并发去重）
+  const online = await ensureSession();
+  if (online) {
+    await handleSessionEpoch();
+    return;
   }
+
+  // ④ 离线：分类字典用内置兜底，并后台静默尝试一次 SSO（隐藏窗口，不阻塞）
+  await loadTags();
+  setStatusMessage(t("statusbar.offlineHint"));
+  void silentReauth(t("online.reasonNoSession"));
 }
 
 onMounted(() => {
@@ -1027,6 +1290,22 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <!-- v0.5：我的收藏（只过滤 isFavorite，按 modId 匹配 user_data.json） -->
+      <div class="side-group">
+        <div class="side-title">{{ t("favorites.groupTitle") }}</div>
+        <button
+          type="button"
+          class="side-item"
+          :class="{ active: favoritesOnly }"
+          :title="t('favorites.noteOnline')"
+          @click="favoritesOnly = !favoritesOnly"
+        >
+          <span class="label">⭐ {{ t("favorites.label") }}</span>
+          <span class="count">{{ favoriteCount }}</span>
+        </button>
+        <div class="side-note note">{{ t("favorites.noteOnline") }}</div>
+      </div>
+
       <div class="side-group">
         <div class="side-title">{{ t("sidebar.officialTags") }}</div>
         <button
@@ -1095,15 +1374,15 @@ onUnmounted(() => {
 
       <!-- 搜索 / 排序 / 刷新已统一到 App.vue 的顶栏，这里只保留标题条与列表 -->
       <div ref="scrollEl" class="grid-scroll">
-        <div v-if="sessionLoading" class="state-panel">
-          <h2><span class="spinner"></span>{{ t("online.sessionCheckingTitle") }}</h2>
-          <p class="note">{{ t("online.sessionCheckingBody") }}</p>
-        </div>
-
-        <div v-else-if="!session?.loggedIn" class="state-panel">
+        <!-- v0.6：已删除全屏「正在检查登录状态」蒙层。有缓存就直接出列表；
+             既没缓存又没登录才显示登录面板，校验进行中只在面板里加一行 🟡 提示。 -->
+        <div v-if="!items.length && !session?.loggedIn" class="state-panel">
           <h2>{{ t("online.sessionConnectTitle") }}</h2>
           <p>{{ t("online.sessionConnectBody") }}</p>
-          <p v-if="silentAuth" class="online-silent">
+          <p v-if="sessionPhase === 'checking'" class="online-silent">
+            <span class="spinner"></span>{{ t("statusbar.checking") }}
+          </p>
+          <p v-else-if="silentAuth" class="online-silent">
             <span class="spinner"></span>{{ silentAuthNote }}
           </p>
           <p v-else-if="silentAuthNote" class="online-silent note">{{ silentAuthNote }}</p>
@@ -1159,9 +1438,19 @@ onUnmounted(() => {
           </div>
 
           <template v-else>
-            <div class="card-grid">
+            <!-- 离线 + 有缓存：列表照常展示，只在上方加一条不可下载的提示 -->
+            <div v-if="!session?.loggedIn" class="offline-strip">
+              ⚪ {{ t("online.offlineCacheNotice") }}
+            </div>
+
+            <div v-if="favoritesOnly && !visibleItems.length" class="state-panel">
+              <h2>⭐ {{ t("favorites.empty") }}</h2>
+              <p>{{ t("favorites.loadingOnline") }}</p>
+            </div>
+
+            <div v-else class="card-grid">
               <OnlineModCard
-                v-for="mod in items"
+                v-for="mod in visibleItems"
                 :key="mod.modId"
                 :mod="mod"
                 :active="selected?.modId === mod.modId"
@@ -1201,7 +1490,36 @@ onUnmounted(() => {
         <img v-if="selected.thumbnail" class="detail-cover" :src="selected.thumbnail" alt="" />
         <div v-else class="no-cover-box">{{ t("online.noThumbnail") }}</div>
 
-        <h3 class="detail-title">{{ selected.title }}</h3>
+        <h3 class="detail-title">{{ displayTitle(selected.modId, selected.title) }}</h3>
+        <div v-if="customName" class="detail-title-orig">
+          {{ t("favorites.originalTitle") }}: {{ selected.title }}
+        </div>
+
+        <!-- v0.5：收藏 / 备注名 -->
+        <div class="fav-row">
+          <button
+            type="button"
+            class="fav-btn"
+            :class="{ active: favorited }"
+            :disabled="!canFavorite || favBusy"
+            :title="t('favorites.favoriteTitle')"
+            @click="toggleFavorite"
+          >
+            <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
+            {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
+          </button>
+          <button
+            type="button"
+            class="fav-btn"
+            :disabled="!canFavorite || renameBusy"
+            :title="t('favorites.renameTitle')"
+            @click="openRename"
+          >
+            <span class="fav-star">📝</span>
+            {{ t("favorites.rename") }}
+          </button>
+        </div>
+        <div v-if="favError" class="online-error">{{ favError }}</div>
 
         <div v-if="detailTags.length" class="detail-badges">
           <span v-for="name in detailTags" :key="name" class="badge">{{ localizedTagName(name) }}</span>
@@ -1340,6 +1658,17 @@ onUnmounted(() => {
     <!-- 右下角轻提示：局部状态变更的即时反馈，不触发列表重载 -->
     <div v-if="toast" class="online-toast" :class="toast.kind">{{ toast.text }}</div>
 
+    <!-- v0.5：备注名弹窗 -->
+    <RenameDialog
+      v-if="renameOpen && selected"
+      :original="selected.title"
+      :initial="customName"
+      :busy="renameBusy"
+      :error="renameError"
+      @save="applyRename"
+      @cancel="renameOpen = false"
+    />
+
     <!-- 删除本地文件前的二次确认 -->
     <ConfirmDialog
       v-if="confirmDeleteOpen"
@@ -1404,6 +1733,17 @@ onUnmounted(() => {
 .side-item .caret {
   color: var(--gold-dim);
   font-size: 10px;
+}
+.offline-strip {
+  margin: 10px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--gold-dim);
+  border-radius: 3px;
+  background: rgba(201, 162, 77, 0.06);
+  color: var(--gold);
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 .scroll-foot {
   display: flex;

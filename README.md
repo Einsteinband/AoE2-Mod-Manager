@@ -38,8 +38,8 @@ Stop waiting for the game client to sync. Browse, download, and manage your 40,0
 
 Go to the [Releases](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) page and download the latest version:
 
-- **Installer (Recommended)**: Download `AoE2 Mod Manager_0.1.0_x64-setup.exe` and run it. You can choose any installation directory.
-- **Portable**: Download `AoE2ModManager-0.1.0-win-x64-portable.zip`, extract it anywhere, and run `aoe2-mod-manager.exe`.
+- **Installer (Recommended)**: Download `AoE2 Mod Manager_x.x.x_x64-setup.exe` and run it.
+- **Portable**: Download `AoE2ModManager-x.x.x-win-x64-portable.zip`, extract it anywhere, and run `aoe2-mod-manager.exe`.
 
 > **Note**: The app is currently unsigned. Windows SmartScreen may show a warning. Click "More info" -> "Run anyway".
 
@@ -52,7 +52,8 @@ Go to the [Releases](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) 
 ## 🛠️ Building from Source
 
 1. Install [Node.js](https://nodejs.org/) (v22+) and [Rust](https://www.rust-lang.org/).
-2. Clone the repository:
+2. Clone the repository and install dependencies:
    ```bash
    git clone https://github.com/Einsteinband/AoE2-Mod-Manager.git
    cd AoE2-Mod-Manager
+   npm install

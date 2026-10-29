@@ -38,8 +38,8 @@
 
 前往 [Releases](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) 页面下载最新版本：
 
-- **安装版（推荐）**：下载 `AoE2 Mod Manager_0.1.0_x64-setup.exe` 并运行，支持自定义安装目录。
-- **免安装版**：下载 `AoE2ModManager-0.1.0-win-x64-portable.zip`，解压到任意位置，双击 `aoe2-mod-manager.exe` 即可运行。
+- **安装版（推荐）**：下载 `AoE2 Mod Manager_x.x.x_x64-setup.exe` 并运行，支持自定义安装目录。
+- **免安装版**：下载 `AoE2ModManager-x.x.x-win-x64-portable.zip`，解压到任意位置，双击运行 `aoe2-mod-manager.exe`。
 
 > **注意**：软件目前未购买数字签名，Windows 安装时可能会弹出 SmartScreen 拦截，点击“更多信息” -> “仍要运行”即可。
 
@@ -49,22 +49,11 @@
 - **后端**：Rust + Tauri 2
 - **UI**：纯手工打造的暗黑中世纪风格
 
-## 🌍 贡献与翻译
+## 🛠️ 从源码编译
 
-欢迎提交 PR！如果你想帮忙添加新语言：
-1. 复制 `src/i18n/locales/en.ts` 为 `src/i18n/locales/<你的语言代码>.ts`（例如 `de.ts`）。
-2. 翻译内容，并导出 `const label = "Deutsch";`。
-3. 提交 Pull Request！
-
-## ⚠️ 免责声明
-
-本工具为非官方第三方软件，与 Microsoft、Xbox Game Studios 及 Forgotten Empires 无关。Age of Empires 为其各自权利人的商标。请自行承担使用风险。
-
-## 📄 开源协议
-
-本项目基于 MIT 许可证开源 - 详见 [LICENSE](LICENSE) 文件。
-
----
-<div align="center">
-  <i>由 <a href="https://github.com/Einsteinband">Einsteinband</a> 开发</i>
-</div>
+1. 安装 [Node.js](https://nodejs.org/) (v22+) 和 [Rust](https://www.rust-lang.org/)。
+2. 克隆仓库并安装依赖：
+   ```bash
+   git clone https://github.com/Einsteinband/AoE2-Mod-Manager.git
+   cd AoE2-Mod-Manager
+   npm install

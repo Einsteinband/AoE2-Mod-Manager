@@ -146,7 +146,7 @@ export interface ApiFailure {
 
 // ---------------- v0.6：离线缓存（%APPDATA%\com.aoe2.modmanager\online_cache.json） ----------------
 
-/** 一条缓存命中（Rust cache::CacheHit）。expired=true 表示已超过 24 小时，应直接走网络。 */
+/** 一条缓存命中（Rust cache::CacheHit）。v0.7 起**不再有过期**，expired 恒为 false。 */
 export interface CacheHit<T> {
   /** find | installed | detail */
   kind: string;
@@ -154,8 +154,18 @@ export interface CacheHit<T> {
   key: string;
   value: T;
   savedAtMs: number;
-  ageMs: number;
+  usedAtMs: number;
+  /** 恒为 false（无 TTL）；保留字段兼容旧判断 */
   expired: boolean;
+}
+
+/** 一页缓存（online_cache_pages 的返回项）：一次 invoke 可以拿回好几页 */
+export interface CachedPage {
+  start: number;
+  totalCount: number | null;
+  items: OnlineMod[];
+  /** 这一页的写入时间：前端据此判断缓存有多新，决定要不要联网刷新 */
+  savedAtMs: number;
 }
 
 /** 缓存概览（设置页展示） */
@@ -165,16 +175,27 @@ export interface CacheStat {
   bytes: number;
   oldestMs: number | null;
   newestMs: number | null;
-  /** 有效期（毫秒），当前为 24 小时 */
+  /** 0 = 永久保存 */
   ttlMs: number;
   maxEntries: number;
   maxBytes: number;
 }
 
-/** 清理结果：removed=false 表示本来就没有缓存文件 */
+/** JSON 缓存 + 图片缓存的总览 */
+export interface CacheOverview extends CacheStat {
+  imageDir: string;
+  imageEntries: number;
+  imageBytes: number;
+  imageMaxBytes: number;
+}
+
+/** 清理结果：同时清理 online_cache.json 与 image_cache */
 export interface ClearCacheReport {
   removed: boolean;
   path: string;
+  entriesRemoved: number;
+  imagesRemoved: number;
+  imagesBytes: number;
 }
 
 export interface SessionStatus {

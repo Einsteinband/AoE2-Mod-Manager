@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { noteRequestFailure, noteRequestSuccess } from "./networkError";
 import type {
   DownloadProgress,
   FindResult,
@@ -69,6 +70,24 @@ export function resetLoginView(): Promise<void> {
   return invoke<void>("online_reset_login_view");
 }
 
+/**
+ * 所有「真网络」请求的统一出口：
+ * - 成功 → 自动清除全局断网标志（网络恢复）
+ * - 失败 → 若是 DNS / 传输层 / 超时，点亮全局断网标志（底栏变 🔴）
+ */
+function tracked<T>(promise: Promise<T>): Promise<T> {
+  return promise.then(
+    (value) => {
+      noteRequestSuccess();
+      return value;
+    },
+    (error) => {
+      noteRequestFailure(error);
+      throw error;
+    },
+  );
+}
+
 export interface FindParams {
   query: string;
   start: number;
@@ -79,27 +98,29 @@ export interface FindParams {
 }
 
 export function findMods(params: FindParams): Promise<FindResult> {
-  return invoke<FindResult>("online_find", {
-    query: params.query,
-    start: params.start,
-    count: params.count,
-    sort: params.sort,
-    order: params.order,
-    tags: params.tags ?? [],
-  });
+  return tracked(
+    invoke<FindResult>("online_find", {
+      query: params.query,
+      start: params.start,
+      count: params.count,
+      sort: params.sort,
+      order: params.order,
+      tags: params.tags ?? [],
+    }),
+  );
 }
 
 export function installedMods(start: number, count: number): Promise<FindResult> {
-  return invoke<FindResult>("online_installed", { start, count });
+  return tracked(invoke<FindResult>("online_installed", { start, count }));
 }
 
 export function modDetail(modId: number): Promise<Record<string, unknown>> {
-  return invoke<Record<string, unknown>>("online_detail", { modId });
+  return tracked(invoke<Record<string, unknown>>("online_detail", { modId }));
 }
 
 /** 官方分类字典（Rust 侧 GET /api/v4/mods/Tags，已按 gameTitleId=2 过滤） */
 export function modTags(): Promise<ModTag[]> {
-  return invoke<ModTag[]>("online_tags");
+  return tracked(invoke<ModTag[]>("online_tags"));
 }
 
 export function installMod(

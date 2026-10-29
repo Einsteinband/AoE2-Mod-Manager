@@ -350,11 +350,6 @@ watch(
         <li v-for="issue in mod.issues" :key="issue">{{ translateBackendMessage(issue) }}</li>
       </ul>
     </div>
-
-    <div class="section">
-      <h3>{{ t("detail.notes") }}</h3>
-      <div class="note">{{ t("detail.notesBody") }}</div>
-    </div>
   </div>
 
   <!-- 二次确认：按来源给出不同后果的提示（羊皮纸浮层，不阻塞主线程） -->

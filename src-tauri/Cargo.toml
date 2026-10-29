@@ -1,6 +1,6 @@
 [package]
 name = "aoe2-mod-manager"
-version = "0.2.0"
+version = "0.2.1"
 description = "AoE2 DE Mod Manager (read-only prototype)"
 authors = ["AoE2 Mod Manager"]
 edition = "2021"

@@ -11,21 +11,6 @@ A modern, open-source desktop mod manager for **Age of Empires II: Definitive Ed
 
 Stop waiting for the game client to sync. Browse, download, and manage your 40,000+ mods directly from your desktop.
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="./docs/screenshot-online.png" alt="Online Mod Browser" width="100%">
-      <br>
-      <sub><b>Browse & Download Mods Online</b></sub>
-    </td>
-    <td align="center" width="50%">
-      <img src="./docs/screenshot-local.png" alt="Local Mod Manager" width="100%">
-      <br>
-      <sub><b>Manage Local Mods & Presets</b></sub>
-    </td>
-  </tr>
-</table>
-
 ## ✨ Why use this?
 
 - **No Game Launch Required**: Search and download mods directly into your `local` folder. The app automatically handles the `info.json` and `mod-status.json` so the game recognizes them instantly.
@@ -43,12 +28,6 @@ Go to the [Releases](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) 
 
 > **Note**: The app is currently unsigned. Windows SmartScreen may show a warning. Click "More info" -> "Run anyway".
 
-## 💻 Tech Stack
-
-- **Frontend**: Vue 3 + TypeScript + Vite
-- **Backend**: Rust + Tauri 2
-- **UI**: Custom dark medieval style
-
 ## 🛠️ Building from Source
 
 1. Install [Node.js](https://nodejs.org/) (v22+) and [Rust](https://www.rust-lang.org/).
@@ -57,3 +36,23 @@ Go to the [Releases](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) 
    git clone https://github.com/Einsteinband/AoE2-Mod-Manager.git
    cd AoE2-Mod-Manager
    npm install
+Run in development mode:
+
+bash
+npm run tauri dev
+Build for production:
+
+bash
+npm run tauri build
+☕ Support the Development
+If this tool has helped you, consider buying me a coffee! Your support keeps the project alive.
+
+https://img.shields.io/badge/%E2%98%95-%E7%88%B1%E5%8F%91%E7%94%B5%E6%94%AF%E6%8C%81%E5%BC%80%E5%8F%91-orange
+
+⚠️ Disclaimer
+This is an unofficial tool and is not affiliated with Microsoft, Xbox Game Studios, or Forgotten Empires. Age of Empires is a trademark of its respective owners. Use at your own risk.
+
+📄 License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+<div align="center"> <i>Developed by <a href="https://github.com/Einsteinband">Einsteinband</a></i> </div> ```

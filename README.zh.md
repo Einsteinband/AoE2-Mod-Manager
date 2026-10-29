@@ -57,3 +57,23 @@
    git clone https://github.com/Einsteinband/AoE2-Mod-Manager.git
    cd AoE2-Mod-Manager
    npm install
+运行开发模式：
+
+bash
+npm run tauri dev
+编译生产环境：
+
+bash
+npm run tauri build
+☕ 支持开发
+如果这个工具帮到了你，欢迎请我喝杯咖啡！你的支持是我持续更新的最大动力。
+
+https://img.shields.io/badge/%E2%98%95-%E7%88%B1%E5%8F%91%E7%94%B5%E6%94%AF%E6%8C%81%E5%BC%80%E5%8F%91-orange
+
+⚠️ 免责声明
+本工具为非官方第三方软件，与 Microsoft、Xbox Game Studios 及 Forgotten Empires 无关。Age of Empires 为其各自权利人的商标。请自行承担使用风险。
+
+📄 开源协议
+本项目基于 MIT 许可证开源 - 详见 LICENSE 文件。
+
+<div align="center"> <i>由 <a href="https://github.com/Einsteinband">Einsteinband</a> 开发</i> </div> ```

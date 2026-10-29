@@ -272,6 +272,24 @@ pub fn install_dir_name(mod_id: i64, title: &str) -> String {
     format!("{mod_id}_{}", sanitize_component(title))
 }
 
+/// local 目录下应该用的目录名：去掉 `{modId}_` 前缀（`155009_Weeb` → `Weeb`）。
+///
+/// 游戏只把“带数字前缀 + mod-status.json 里 WorkshopID 相同”的目录当成 workshop 模组；
+/// 放进 local 却保留前缀/ID，游戏启动时会该模组反向同步成“已订阅”。
+pub fn strip_id_prefix(folder_name: &str, mod_id: i64) -> String {
+    let prefix = format!("{mod_id}_");
+    let name = folder_name.trim();
+    let rest = name
+        .strip_prefix(&prefix)
+        .map(str::trim)
+        .unwrap_or(name);
+    if !rest.is_empty() {
+        return rest.to_string();
+    }
+    // 极端情况：标题为空导致只剩 `{id}_`，退回到清洗后的名字，绝不返回空目录名
+    sanitize_component(name)
+}
+
 /// mod-status.json 里 `Path` 字段的形态：`subscribed//2035_xxx`。
 /// 双斜杠是游戏自己的写法，写入时必须原样保留（比对时才用 `scan::normalize_key` 归一化）。
 pub fn status_rel_path(kind: &str, folder_name: &str) -> String {
@@ -433,6 +451,7 @@ pub fn resolve_uninstall_target(
         return Err("WorkshopID 无效，拒绝卸载".to_string());
     }
     let prefix = format!("{mod_id}_");
+    let hint = folder_hint.map(str::trim).filter(|h| !h.is_empty());
 
     // 1) 先在 subscribed（游戏下载位置）找；没有再看 local（本工具兜底转过去的位置）
     let mut chosen: Option<(String, Vec<String>)> = None;
@@ -441,7 +460,19 @@ pub fn resolve_uninstall_target(
         if !base.is_dir() {
             continue;
         }
-        let names = candidate_dirs(&base, &prefix, folder_hint);
+        let mut names = candidate_dirs(&base, &prefix, hint);
+        // 转入 local 时目录名已去掉 `{modId}_` 前缀（`Weeb` 而不是 `155009_Weeb`），
+        // 所以 local 下还要按“精确目录名”再认一次 —— WorkshopID=0 的记录只能靠目录名定位
+        if kind == "local" {
+            if let Some(hint) = hint {
+                if !hint.contains(".bak-")
+                    && !names.iter().any(|n| n.eq_ignore_ascii_case(hint))
+                    && base.join(hint).is_dir()
+                {
+                    names.push(hint.to_string());
+                }
+            }
+        }
         if !names.is_empty() {
             chosen = Some((kind.to_string(), names));
             break;
@@ -681,7 +712,12 @@ pub struct LocalizeTarget {
     pub from: PathBuf,
     pub to: PathBuf,
     pub local_root: PathBuf,
+    /// 最终 local 下的目录名（已去掉 `{modId}_` 前缀）
     pub folder_name: String,
+    /// 源目录名（subscribed 下带 `{modId}_` 前缀），回滚时用
+    pub source_folder_name: String,
+    /// local 下同名旧目录的备份路径（覆盖安装时才有）
+    pub backup: Option<PathBuf>,
 }
 
 /// 通用同卷改名，成功后做双向校验
@@ -709,10 +745,14 @@ pub fn move_dir(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// 校验并解析“把 subscribed/<id>_* 挪到 local/” 的目标；任何异常直接拒绝。
+///
+/// `folder_name` 会去掉 `{modId}_` 前缀；`allow_replace` 为真时才允许覆盖 local 下同名旧目录
+/// （覆盖前先改名为 `<名字>.bak-<时间戳>` 保留，不删除）。
 pub fn resolve_localize_target(
     mods_root: &Path,
     mod_id: i64,
     folder_hint: Option<&str>,
+    allow_replace: bool,
 ) -> Result<LocalizeTarget, String> {
     let resolved = resolve_uninstall_target(mods_root, mod_id, folder_hint)?;
     if resolved.kind == "local" {
@@ -725,27 +765,80 @@ pub fn resolve_localize_target(
     fs::create_dir_all(&local).map_err(|e| format!("无法创建 local 目录：{e}"))?;
     let real_local =
         fs::canonicalize(&local).map_err(|e| format!("无法规范化 {}：{e}", local.display()))?;
-    let to = real_local.join(&resolved.folder_name);
+
+    // 关键：local 下的目录名不带 `{modId}_`，否则游戏会把目录认成 workshop 模组
+    let folder_name = strip_id_prefix(&resolved.folder_name, mod_id);
+    let to = real_local.join(&folder_name);
+    let mut backup: Option<PathBuf> = None;
     if to.exists() {
-        return Err(format!(
-            "local 下已存在同名文件夹，已中止：{}",
-            to.display()
-        ));
+        if !allow_replace {
+            return Err(format!(
+                "local 下已存在同名文件夹，已中止：{}",
+                to.display()
+            ));
+        }
+        backup = Some(real_local.join(format!(
+            "{folder_name}.bak-{}",
+            crate::scan::now_ms()
+        )));
     }
     Ok(LocalizeTarget {
         from: resolved.dir,
         to,
         local_root: real_local,
-        folder_name: resolved.folder_name,
+        folder_name,
+        source_folder_name: resolved.folder_name,
+        backup,
     })
 }
 
-/// 执行移动（subscribed → local）
-pub fn move_to_local(target: &LocalizeTarget) -> Result<(), String> {
+/// 执行移动（subscribed → local）。返回被覆盖的旧 local 目录备份路径（没有覆盖时为 None）
+pub fn move_to_local(target: &LocalizeTarget) -> Result<Option<PathBuf>, String> {
     if target.to.parent() != Some(target.local_root.as_path()) {
         return Err("目标目录不在 local 下，拒绝移动".to_string());
     }
-    move_dir(&target.from, &target.to)
+    if let Some(backup) = target.backup.as_ref() {
+        if backup.exists() {
+            return Err(format!("备份目录已存在，已中止：{}", backup.display()));
+        }
+        if target.to.exists() {
+            fs::rename(&target.to, backup).map_err(|e| {
+                format!(
+                    "无法备份 local 下的同名旧目录（{}）：{e}",
+                    target.to.display()
+                )
+            })?;
+        }
+    }
+    match move_dir(&target.from, &target.to) {
+        Ok(()) => Ok(target.backup.clone()),
+        Err(e) => {
+            // 移动失败：把刚备份的旧目录还原，不能因为一次失败让用户的旧版本消失
+            if let Some(backup) = target.backup.as_ref() {
+                if backup.exists() && !target.to.exists() {
+                    let _ = fs::rename(backup, &target.to);
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 回滚一次 `move_to_local`：新目录挪回 subscribed（恢复带前缀的原名），并还原被覆盖的旧 local 目录
+pub fn revert_localize(target: &LocalizeTarget) -> Result<(), String> {
+    move_dir(&target.to, &target.from).map_err(|e| {
+        format!(
+            "{} → {} 回滚失败：{e}",
+            target.folder_name, target.source_folder_name
+        )
+    })?;
+    if let Some(backup) = target.backup.as_ref() {
+        if backup.exists() {
+            fs::rename(backup, &target.to)
+                .map_err(|e| format!("旧版本目录未能还原到 {}：{e}", target.to.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn dir_usage(root: &Path) -> (u64, u64) {
@@ -1055,26 +1148,36 @@ mod tests {
         fs::create_dir_all(root.join("local")).unwrap();
         let src = make_mod_dir(&root, "subscribed", "313131_Probe");
 
-        let target = resolve_localize_target(&root, 313131, None).unwrap();
-        assert_eq!(target.folder_name, "313131_Probe");
-        move_to_local(&target).unwrap();
+        let target = resolve_localize_target(&root, 313131, None, false).unwrap();
+        assert_eq!(target.folder_name, "Probe", "local 下的目录名必须去掉 ID 前缀");
+        assert_eq!(target.source_folder_name, "313131_Probe");
+        let backup = move_to_local(&target).unwrap();
+        assert!(backup.is_none());
 
         assert!(!src.exists(), "subscribed 下的目录应已移走");
-        assert!(root.join("local").join("313131_Probe").join("info.json").is_file());
+        assert!(root.join("local").join("Probe").join("info.json").is_file());
 
-        // 已经在 local：不允许重复转换
-        let err = resolve_localize_target(&root, 313131, None).unwrap_err();
-        assert!(err.contains("已经在 local"), "实际错误：{err}");
+        // 只给 local 目录名（无前缀）也能定位到（WorkshopID=0 的记录靠这个卸载）
+        let resolved = resolve_uninstall_target(&root, 313131, Some("Probe")).unwrap();
+        assert_eq!(resolved.kind, "local");
+        assert_eq!(resolved.folder_name, "Probe");
 
-        // local 下已有同名目录：拒绝且不移动任何东西
+        // local 下已有同名目录、不允许覆盖：拒绝且不移动任何东西
         make_mod_dir(&root, "subscribed", "313132_Probe");
-        fs::create_dir_all(root.join("local").join("313132_Probe")).unwrap();
-        let err = resolve_localize_target(&root, 313132, None).unwrap_err();
+        let err = resolve_localize_target(&root, 313132, None, false).unwrap_err();
         assert!(err.contains("已存在同名文件夹"), "实际错误：{err}");
         assert!(
             root.join("subscribed").join("313132_Probe").is_dir(),
             "拒绝时不得移动任何东西"
         );
+
+        // 允许覆盖：旧目录改名 .bak- 保留，新目录到位
+        make_mod_dir(&root, "local", "Probe");
+        let overwrite = resolve_localize_target(&root, 313132, None, true).unwrap();
+        assert!(overwrite.backup.is_some(), "覆盖前必须先备份旧目录");
+        let backup = move_to_local(&overwrite).unwrap().expect("覆盖安装必须返回备份路径");
+        assert!(backup.is_dir(), "旧目录备份必须保留");
+        assert!(root.join("local").join("Probe").is_dir());
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -12,7 +12,6 @@ import {
   type InstallOutcome,
   type LoginTarget,
   type ModTag,
-  type NetworkSettingsView,
   type OnlineMod,
   type SessionStatus,
 } from "../online/types";
@@ -21,7 +20,6 @@ import {
   clearLoginCache,
   closeLoginWindow,
   findMods,
-  getNetworkSettings,
   installMod,
   installedMods,
   loginTargets,
@@ -33,7 +31,6 @@ import {
   openModWebpage,
   probeAccountWindow,
   sessionStatus,
-  setNetworkSettings,
   uiLog,
 } from "../online/service";
 import ConfirmDialog from "./ConfirmDialog.vue";
@@ -57,13 +54,7 @@ const probeResult = ref<string | null>(null);
 const platforms = ref<LoginTarget[]>([]);
 const platform = ref("microsoft");
 
-/** 高级网络设置（折叠在左侧边栏底部） */
-const netOpen = ref(false);
-const net = ref<NetworkSettingsView | null>(null);
-const netAuto = ref(true);
-const netUrl = ref("");
-const netRemember = ref(true);
-const netSaving = ref(false);
+/** 会话 / 退出登录的临时提示（代理与登录项已迁到 SettingsModal） */
 const netClearing = ref(false);
 const netError = ref<string | null>(null);
 const netMessage = ref<string | null>(null);
@@ -158,23 +149,6 @@ const activeTagName = computed(() => {
   if (activeTag.value === null) return t("sidebar.allContent");
   const hit = tags.value.find((item) => item.modTypeId === activeTag.value);
   return hit ? tagLabel(hit) : t("online.tagFallback", { id: activeTag.value });
-});
-
-/** 折叠状态下也要能一眼看到“当前到底走哪条链路” */
-const netSummary = computed(() => {
-  if (!net.value) return t("online.netReading");
-  if (net.value.error) return t("online.netConfigError");
-  const proxy = net.value.effectiveProxy;
-  switch (net.value.source) {
-    case "manual":
-      return t("online.netManual", { proxy: proxy ?? t("online.netNotSet") });
-    case "system":
-      return t("online.netSystem", { proxy: proxy ?? t("online.netDirectWord") });
-    case "env":
-      return t("online.netEnv", { proxy: proxy ?? t("online.netUnknownWord") });
-    default:
-      return t("online.netDirect");
-  }
 });
 
 const detailTags = computed<string[]>(() => selected.value?.tagNames ?? []);
@@ -374,48 +348,6 @@ async function runProbe() {
     probeResult.value = t("online.probeFailed", { msg: messageOf(e) });
   } finally {
     probing.value = false;
-  }
-}
-
-async function loadNetwork() {
-  netError.value = null;
-  try {
-    const view = await withTimeout(getNetworkSettings(), 8000, t("online.network"));
-    net.value = view;
-    netAuto.value = view.auto;
-    netRemember.value = view.rememberLogin;
-    netUrl.value = view.auto ? "" : (view.proxyUrl ?? view.effectiveProxy ?? "");
-    if (view.error) netError.value = view.error;
-  } catch (e) {
-    netError.value = messageOf(e);
-  }
-}
-
-async function saveNetwork() {
-  if (netSaving.value) return;
-  netSaving.value = true;
-  netError.value = null;
-  netMessage.value = null;
-  try {
-    const view = await withTimeout(
-      setNetworkSettings({
-        auto: netAuto.value,
-        proxyUrl: netAuto.value ? null : netUrl.value.trim(),
-        rememberLogin: netRemember.value,
-      }),
-      15000,
-      t("online.save"),
-    );
-    net.value = view;
-    netUrl.value = view.auto ? "" : (view.proxyUrl ?? "");
-    netMessage.value = view.error
-      ? null
-      : t("online.netSaved", { proxy: view.effectiveProxy ?? t("online.netDirectWord") });
-    await refreshSession();
-  } catch (e) {
-    netError.value = messageOf(e);
-  } finally {
-    netSaving.value = false;
   }
 }
 
@@ -992,7 +924,8 @@ async function boot() {
   } catch (e) {
     netError.value = t("online.loginTargetsFailed", { msg: messageOf(e) });
   }
-  await Promise.all([loadNetwork(), loadTags()]);
+  // 代理设置在 SettingsModal 里，这里不再拉取；只加载标签与会话
+  await loadTags();
   await refreshSession();
   if (session.value?.loggedIn) {
     await reload();
@@ -1132,41 +1065,14 @@ onUnmounted(() => {
         <button type="button" class="side-item" :disabled="netClearing" @click="doLogout">
           <span class="label">{{ netClearing ? t("online.clearing") : t("online.clearCache") }}</span>
         </button>
+        <div v-if="netError" class="side-msg error">{{ netError }}</div>
+        <div v-else-if="netMessage" class="side-msg">{{ netMessage }}</div>
       </div>
 
+      <!-- 代理 / 记住登录已迁到顶栏齿轮里的设置弹窗（SettingsModal → 网络） -->
       <div class="side-group">
-        <div class="side-title">{{ t("online.network") }}</div>
-        <button type="button" class="side-item" @click="netOpen = !netOpen">
-          <span class="label">{{ netSummary }}</span>
-          <span class="caret">{{ netOpen ? "▾" : "▸" }}</span>
-        </button>
-        <div v-if="netOpen" class="side-form">
-          <label class="side-check">
-            <input v-model="netAuto" type="checkbox" :disabled="netSaving" />
-            {{ t("online.followSystem") }}
-          </label>
-          <input
-            v-if="!netAuto"
-            v-model="netUrl"
-            class="side-input"
-            type="text"
-            placeholder="http://127.0.0.1:7897"
-            spellcheck="false"
-            :disabled="netSaving"
-          />
-          <label class="side-check">
-            <input v-model="netRemember" type="checkbox" :disabled="netSaving" />
-            {{ t("online.rememberLogin") }}
-          </label>
-          <div class="side-btns">
-            <button type="button" :disabled="netSaving" @click="saveNetwork">
-              {{ netSaving ? t("online.saving") : t("online.save") }}
-            </button>
-            <button type="button" :disabled="netSaving" @click="loadNetwork">{{ t("online.detect") }}</button>
-          </div>
-          <div v-if="netError" class="side-msg error">{{ netError }}</div>
-          <div v-if="netMessage" class="side-msg">{{ netMessage }}</div>
-        </div>
+        <div class="side-title">{{ t("settings.tabNetwork") }}</div>
+        <div class="side-note note">{{ t("settings.networkMoved") }}</div>
       </div>
 
       <div class="side-group">

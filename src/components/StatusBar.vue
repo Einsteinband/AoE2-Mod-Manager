@@ -12,9 +12,11 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { getNetworkSettings, loginTargets, openLogin } from "../online/service";
+import { isNetworkError } from "../online/networkError";
 import {
   ensureSession,
   lastCheckedMs,
+  requestManualRefresh,
   sessionError,
   sessionInfo,
   sessionPhase,
@@ -37,12 +39,15 @@ const POLL_INTERVAL_MS = 2500;
 const POLL_TRIES = 24;
 
 const dot = computed(() => {
+  // 网络层失败优先于登录态：Cookie 还在但网断了，不能继续显示绿灯
+  if (isNetworkError.value) return "🔴";
   if (sessionPhase.value === "online") return "🟢";
   if (sessionPhase.value === "checking") return "🟡";
   return "⚪";
 });
 
 const accountText = computed(() => {
+  if (isNetworkError.value) return t("statusbar.networkDown");
   if (sessionPhase.value === "online") return t("statusbar.onlineShort");
   if (sessionPhase.value === "checking") return t("statusbar.checkingShort");
   return t("statusbar.offline");
@@ -50,6 +55,7 @@ const accountText = computed(() => {
 
 /** 悬停显示来源 + Cookie 数（按需求不抓 Xbox 名字，避免官网改版失效） */
 const accountTitle = computed(() => {
+  if (isNetworkError.value) return t("statusbar.networkDownTitle");
   const info = sessionInfo.value;
   if (sessionPhase.value !== "online" || !info) return t("statusbar.loginHint");
   return t("statusbar.source", {
@@ -59,6 +65,8 @@ const accountTitle = computed(() => {
 });
 
 const middleText = computed(() => {
+  // 断网时这条信息比“已从缓存加载 / 数据已刷新”更重要
+  if (isNetworkError.value) return t("statusbar.networkDownHint");
   if (statusMessage.value) return statusMessage.value;
   if (sessionPhase.value === "checking") return t("statusbar.checking");
   const ms = lastCheckedMs.value;
@@ -111,11 +119,14 @@ async function toggleMenu() {
   }
 }
 
-/** 用户点击「重新校验」：强制再探一次（会 bump epoch，在线页自动刷新） */
+/** 用户点击「立即重新校验」：强制再探一次，成功后推一次手工刷新信号 */
 async function recheck() {
   menuOpen.value = false;
   const ok = await ensureSession(true);
-  if (ok) setStatusMessage(t("statusbar.loginDone"));
+  if (ok) {
+    setStatusMessage(t("statusbar.loginDone"));
+    requestManualRefresh();
+  }
 }
 
 /**
@@ -176,7 +187,7 @@ onBeforeUnmount(() => {
     <button
       type="button"
       class="sb-account"
-      :class="sessionPhase"
+      :class="[sessionPhase, { 'network-error': isNetworkError }]"
       :title="accountTitle"
       @click="toggleMenu"
     >
@@ -266,6 +277,9 @@ onBeforeUnmount(() => {
 }
 .sb-account.offline {
   color: var(--muted);
+}
+.sb-account.network-error {
+  color: #d98a72;
 }
 .sb-dot {
   font-size: 9px;

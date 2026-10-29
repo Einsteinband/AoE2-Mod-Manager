@@ -36,9 +36,6 @@ impl ApiFailure {
     pub fn parse(msg: impl Into<String>) -> Self {
         Self::new("parse", format!("服务端返回内容无法解析：{}", msg.into()), None)
     }
-    pub fn timeout() -> Self {
-        Self::new("timeout", "请求超时，请检查网络后重试", None)
-    }
 }
 
 /// 代理由 [`crate::net`] 统一决定（手动 > 系统注册表 > 环境变量 > 直连），
@@ -123,11 +120,9 @@ impl ApiClient {
             Err(ureq::Error::Transport(t)) => {
                 let msg = t.to_string();
                 log::error!(target: "http", "传输层错误（{url}）：{msg}");
-                if msg.to_lowercase().contains("timed out") {
-                    Err(ApiFailure::timeout())
-                } else {
-                    Err(ApiFailure::network(msg))
-                }
+                // DNS / 连接 / TLS / 超时 一律归为 kind="network"：
+                // 前端据此点亮全局「网络已断开」，并在断网时停止一切后续请求。
+                Err(transport_failure(msg))
             }
         }
     }
@@ -272,6 +267,28 @@ impl ApiClient {
     }
 }
 
+/// 传输层错误归一化。
+///
+/// 之前超时被单独归为 `timeout`、其余归为 `network`，前端要分别判断；
+/// 现在统一成 `network` 并给出人话提示，前端只要看到 kind=network 就点亮断网标志。
+fn transport_failure(msg: String) -> ApiFailure {
+    let lower = msg.to_lowercase();
+    let friendly = if lower.contains("dns")
+        || lower.contains("lookup")
+        || lower.contains("name or service")
+        || lower.contains("failed to resolve")
+    {
+        format!("网络不可用：域名解析失败（{msg}）")
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        format!("网络超时（{msg}）")
+    } else if lower.contains("refused") || lower.contains("unreachable") || lower.contains("reset") {
+        format!("网络连接被拒绝或中断（{msg}）")
+    } else {
+        format!("网络请求失败：{msg}")
+    };
+    ApiFailure::new("network", friendly, None)
+}
+
 fn snippet(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= max {
@@ -291,6 +308,31 @@ mod tests {
         assert_eq!(failure.kind, "unauthenticated");
         assert_eq!(failure.status, Some(401));
         assert!(failure.message.contains("重新登录"));
+    }
+
+    /// DNS 失败必须归为 kind="network"：前端靠这个点亮「网络已断开」并停止后续请求。
+    #[test]
+    fn dns_error_maps_to_network_kind() {
+        let failure = transport_failure(
+            "dns error: failed to lookup address information: No such host is known".to_string(),
+        );
+        assert_eq!(failure.kind, "network");
+        assert_eq!(failure.status, None);
+        assert!(failure.message.contains("域名解析失败"), "{}", failure.message);
+    }
+
+    #[test]
+    fn timeout_error_maps_to_network_kind() {
+        let failure = transport_failure("timed out reading response".to_string());
+        assert_eq!(failure.kind, "network", "超时也要算网络不可用");
+        assert!(failure.message.contains("网络超时"));
+    }
+
+    #[test]
+    fn other_transport_errors_still_network_kind() {
+        let failure = transport_failure("connection refused".to_string());
+        assert_eq!(failure.kind, "network");
+        assert!(failure.message.contains("拒绝"));
     }
 
     #[test]

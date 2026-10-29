@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import OnlineModCard from "./OnlineModCard.vue";
 import {
@@ -34,12 +34,13 @@ import {
   uiLog,
 } from "../online/service";
 import {
+  allCachedItems,
+  readCachedPages,
   readDetailCache,
-  readFindCache,
-  readInstalledCache,
   usableDetailCache,
-  usableListCache,
 } from "../online/cache";
+import { assetUrl, fetchImages, localImages, onImagesReady, type LocalImage } from "../online/images";
+import { isNetworkError, isNetworkFailure } from "../online/networkError";
 import {
   ensureSession,
   markOnline,
@@ -49,6 +50,7 @@ import {
   sessionInfo,
   sessionPhase,
   setStatusMessage,
+  manualRefreshNonce,
 } from "../sessionState";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { deleteModFiles, installedLocalIndex } from "../api";
@@ -58,13 +60,13 @@ import {
   displayTitle,
   ensureUserData,
   favoriteCount,
+  favoriteIdSet,
   isFavorite,
   setCustomName,
   setFavorite,
 } from "../userData";
 import RenameDialog from "./RenameDialog.vue";
 import type { InstalledIndexEntry } from "../types";
-import type { CacheHit, FindResult } from "../online/types";
 
 /** 每批加载数量：本地网格每行 6 个（约 197px 列宽），24 = 4 行 */
 const PAGE_SIZE = 24;
@@ -140,13 +142,29 @@ onUnmounted(() => {
 defineExpose({ refresh: manualRefresh });
 
 const onlySubscribed = ref(false);
-/** v0.5：只看收藏（按 WorkshopID 匹配 user_data.json；只过滤已加载的条目） */
+/** v0.7：只看收藏（纯本地：user_data.json 的收藏 ID × 缓存池，绝不发网络请求） */
 const favoritesOnly = ref(false);
+
+/** v0.7：本地封面映射（modId → asset URL），命中就直接读本机 jpg，零网络 */
+const localThumbs = reactive<Record<number, string>>({});
+/** 收藏视图的本地候选池（online_cache.json 里的全部条目，只读一次） */
+const favoritePool = ref<OnlineMod[] | null>(null);
+/** true = 断网且该分类无缓存：显示“暂无本地缓存”的空态，不发任何请求 */
+const noCacheOffline = ref(false);
+/** 当前列表的筛选签名：变了说明是「另一个列表」，数据整体替换而不是合并 */
+let listSignature = "";
 
 /** 左侧分类（官方 /api/v4/mods/Tags） */
 const tags = ref<ModTag[]>([]);
 const tagsError = ref<string | null>(null);
 const activeTag = ref<number | null>(null);
+
+/**
+ * 实际生效的分类：收藏视图下一律为 null。
+ * 单一出口 —— 请求参数、缓存 key、前端过滤全部只读它，
+ * 避免「收藏 + 官方分类」叠加导致侧栏计数与列表条数对不上（如 3 收藏却只剩 48/1037）。
+ */
+const effectiveTag = computed<number | null>(() => (favoritesOnly.value ? null : activeTag.value));
 
 const selected = ref<OnlineMod | null>(null);
 const detail = ref<Record<string, unknown> | null>(null);
@@ -227,6 +245,8 @@ const scrollEl = ref<HTMLElement | null>(null);
 const sentinel = ref<HTMLElement | null>(null);
 
 let unlisten: (() => void) | null = null;
+/** 封面图落地事件 */
+let unlistenImages: (() => void) | null = null;
 let pollTimer: number | null = null;
 let observer: IntersectionObserver | null = null;
 /** 请求序号：筛选条件变化时自增，丢弃过期响应 */
@@ -244,9 +264,11 @@ const visibleItems = computed<OnlineMod[]>(() =>
 );
 
 const activeTagName = computed(() => {
-  if (activeTag.value === null) return t("sidebar.allContent");
-  const hit = tags.value.find((item) => item.modTypeId === activeTag.value);
-  return hit ? tagLabel(hit) : t("online.tagFallback", { id: activeTag.value });
+  // 收藏视图：分类已让位，标题栏直接说明作用域
+  if (favoritesOnly.value) return t("favorites.scopeHint");
+  if (effectiveTag.value === null) return t("sidebar.allContent");
+  const hit = tags.value.find((item) => item.modTypeId === effectiveTag.value);
+  return hit ? tagLabel(hit) : t("online.tagFallback", { id: effectiveTag.value });
 });
 
 const detailTags = computed<string[]>(() => selected.value?.tagNames ?? []);
@@ -456,8 +478,10 @@ async function doLogout() {
     const text = await withTimeout(clearLoginCache(), 30000, t("online.clearCache"));
     netMessage.value = text;
     session.value = null;
-    resetList();
+    favoritePool.value = null;
     await refreshSession();
+    // 退出登录不清空列表：直接用缓存重绘，离线也能继续看
+    await reload(false);
   } catch (e) {
     netError.value = messageOf(e);
   } finally {
@@ -555,34 +579,30 @@ async function silentReauth(reason: string) {
     ticks += 1;
     let ok = false;
     try {
+      // 只查会话状态（读 Cookie，**不发任何 Find 请求**）：
+      // 旧实现每次都打一次 /Find 探测，是“每 2 秒一个 POST”的罪魁祸首之一。
       const status = await withTimeout(sessionStatus(), 15000, t("online.recheck"));
       if (status.loggedIn) {
-        // Cookie 存在不代表有权限，必须真的调通一次 Find
-        const probe = await withTimeout(
-          findMods({ query: "", start: 1, count: 1, sort: SORT_OPTIONS[0].value, order: "DESC" }),
-          20000,
-          t("online.probe"),
-        );
         ok = true;
-        void uiLog("info", `后台免密登录成功（返回 ${probe.items.length} 条）`);
+        void uiLog("info", "后台免密登录成功（会话 Cookie 已就绪）");
         stopSilentTimer();
         silentAuth.value = false;
         silentAuthNote.value = null;
         sessionError.value = null;
         await closeLoginWindow();
-        // markOnline 会 bump sessionEpoch → handleSessionEpoch 统一负责刷新列表
+        // 只在 离线→在线 这一跳 bump epoch；重复探测不会反复触发列表刷新
         markOnline(status);
         setStatusMessage(t("statusbar.loginDone"));
       }
     } catch (e) {
       void uiLog("info", `后台免密登录第 ${ticks} 次未完成：${messageOf(e)}`);
     }
-    if (!ok && ticks >= 12) {
+    if (!ok && ticks >= 6) {
       stopSilentTimer();
       silentAuth.value = false;
       silentAuthNote.value = t("online.silentFailed");
     }
-  }, 2000);
+  }, 2500);
 }
 
 async function stopWaiting() {
@@ -594,9 +614,9 @@ async function stopWaiting() {
 }
 
 function exceedsTagFilter(mod: OnlineMod): boolean {
-  if (activeTag.value === null) return true;
+  if (effectiveTag.value === null) return true;
   // 已订阅接口不支持 tags 过滤，这里按官方 modTagIds 前端过滤
-  return mod.tagIds.includes(activeTag.value);
+  return mod.tagIds.includes(effectiveTag.value);
 }
 
 function requestChunk(start: number) {
@@ -607,143 +627,310 @@ function requestChunk(start: number) {
     count: PAGE_SIZE,
     sort: sort.value,
     order: order.value,
-    tags: activeTag.value === null ? [] : [activeTag.value],
+    tags: effectiveTag.value === null ? [] : [effectiveTag.value],
   });
 }
 
-function resetList() {
-  items.value = [];
-  totalCount.value = null;
-  error.value = null;
-  moreError.value = null;
-  hasMore.value = true;
-  cursor.value = 1;
-  selected.value = null;
-  detail.value = null;
-  measuredBytes.value = null;
-  // 列表被清空重建，旧的滚动位置已无意义
-  savedScrollTop = 0;
-  restorePending = false;
-}
-
-function mergeChunk(list: OnlineMod[]): number {
-  const known = new Set(items.value.map((m) => m.modId));
-  const fresh = list.filter((m) => !known.has(m.modId) && exceedsTagFilter(m));
-  if (fresh.length) items.value = [...items.value, ...fresh];
-  return fresh.length;
-}
-
-/** 首屏 / 切换筛选：清空后从第 1 条重新加载 */
+/** 首屏 / 手动刷新入口 */
 async function manualRefresh() {
-  // 手动刷新：强制重探登录态，成功后由 sessionEpoch 统一触发 reload
   await refreshSession();
+  // 用户点了刷新：明确意图，走手工通道（仍受单飞 + 5s/30s 闸门保护）
+  await reload(true);
 }
 
-// ---------------- v0.6：缓存优先（SWR 秒开） ----------------
+// ---------------- v0.7：缓存优先 · 无痕静默刷新 ----------------
 
-/** 缓存最多连续重放几页（把上次看到的列表拼回来） */
-const CACHE_PAGE_LIMIT = 4;
+/** 一次 invoke 最多读回几页缓存（每页 24 条 → 最多 192 条，覆盖一屏 + 多次翻页） */
+const CACHE_PAGE_LIMIT = 8;
+
+/**
+ * 缓存过期阈值：只有缓存超过 24 小时，才允许「自动」补一次网络请求。
+ * 其余情况（切分类 / 启动 / 登录态变化）命中缓存就彻底断网。
+ */
+const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
+
+/** 滚动加载最小间隔：连续滚轮 / 惯性滚动不会触发连环请求 */
+const MIN_LOAD_MORE_GAP_MS = 900;
+/** 滚动停下多久才判定「真的到底了」 */
+const SCROLL_IDLE_MS = 200;
+/** 详情请求冷却：同一个 modId 3 秒内绝不重复请求 */
+const DETAIL_COOLDOWN_MS = 3_000;
+/** 正在请求详情的 modId（单飞） */
+const pendingDetailIds = new Set<number>();
+/** modId → 上次真正发详情请求的时间 */
+const lastDetailMs = new Map<number, number>();
+/** 上次 loadMore 的时间 */
+let lastLoadMoreMs = 0;
+
+/** signature → 上次真正发网络请求的时间 */
+const lastFetchMsBySignature = new Map<string, number>();
+/** 用户手动刷新时同一筛选的最小间隔（防连点，但不会被 30 秒闸门挡住） */
+const USER_MIN_GAP_MS = 2_000;
+/** 当前正在飞的请求属于哪个筛选（单飞，防叠加） */
+let fetchSignature: string | null = null;
 
 /** 底栏中间提示用的 HH:mm */
 function clockText(ms: number): string {
   const date = new Date(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return pad(date.getHours()) + ":" + pad(date.getMinutes());
+}
+
+/** 当前筛选条件的签名：变了 = 另一个列表（整体替换），没变 = 同一列表（逐条比对） */
+function signatureOf(): string {
+  return [
+    favoritesOnly.value ? "fav" : onlySubscribed.value ? "sub" : "all",
+    query.value.trim().toLowerCase(),
+    sort.value,
+    order.value,
+    effectiveTag.value === null ? "" : String(effectiveTag.value),
+  ].join("|");
 }
 
 /**
- * 读一页缓存。未命中 / 超过 24 小时（expired）/ 空页都返回 null。
- * key 由 Rust 侧统一计算，这里只传原始参数。
+ * 读缓存并拼成列表。**一次 invoke**（Rust 侧是纯内存查找，微秒级），绝不逐页往返。
+ * 返回空 items = 完全没有缓存，调用方这时才允许去发网络请求 / 显示骨架。
  */
-async function readCachePage(start: number): Promise<OnlineMod[] | null> {
-  let hit: CacheHit<FindResult> | null = null;
+async function loadCachePages(
+  from = 1,
+): Promise<{
+  hit: boolean;
+  items: OnlineMod[];
+  nextStart: number;
+  complete: boolean;
+  savedAtMs: number;
+}> {
   try {
-    hit = onlySubscribed.value
-      ? await readInstalledCache(start, PAGE_SIZE)
-      : await readFindCache({
-          query: query.value.trim(),
-          start,
-          count: PAGE_SIZE,
-          sort: sort.value,
-          order: order.value,
-          tags: activeTag.value === null ? [] : [activeTag.value],
-        });
+    const pages = await readCachedPages({
+      query: query.value.trim(),
+      start: from,
+      count: PAGE_SIZE,
+      sort: sort.value,
+      order: order.value,
+      tags: effectiveTag.value === null ? [] : [effectiveTag.value],
+      installed: onlySubscribed.value,
+      maxPages: CACHE_PAGE_LIMIT,
+    });
+    const merged: OnlineMod[] = [];
+    let total: number | null = null;
+    let nextStart = from;
+    let complete = false;
+    let savedAtMs = 0;
+    for (const page of pages) {
+      if (!savedAtMs && page.savedAtMs) savedAtMs = page.savedAtMs;
+      if (total === null && page.totalCount !== null) total = page.totalCount;
+      for (const raw of page.items) {
+        const mod = raw as unknown as OnlineMod;
+        if (typeof mod?.modId !== "number") continue;
+        if (onlySubscribed.value && !exceedsTagFilter(mod)) continue;
+        if (!merged.some((seen) => seen.modId === mod.modId)) merged.push(mod);
+      }
+      nextStart = page.start + page.items.length;
+      if (page.items.length < PAGE_SIZE) {
+        complete = true;
+        break;
+      }
+    }
+    if (total !== null) totalCount.value = total;
+    // hit = 这个「分类 + 搜索词 + 排序 + 页码」的 key 在缓存里真实存在（哪怕结果是 0 条）
+    return { hit: pages.length > 0, items: merged, nextStart, complete, savedAtMs };
   } catch {
-    // 缓存命令不可用（例如还跑着旧的后端二进制）时静默降级为“没有缓存”，绝不拖垮列表
-    return null;
+    return { hit: false, items: [], nextStart: from, complete: false, savedAtMs: 0 };
   }
-  if (!usableListCache(hit)) return null;
-  if (hit.value.totalCount !== null) totalCount.value = hit.value.totalCount;
-  const list = (hit.value.items ?? []).filter((m) => typeof m?.modId === "number");
-  return list.length ? list : null;
 }
 
-/**
- * 把缓存重放成当前列表：命中任意一页就返回 true。
- * 只改 items / cursor / hasMore，不动 loading（要不要转圈由调用方决定）。
- */
-async function showFromCache(): Promise<boolean> {
-  const pages: OnlineMod[] = [];
-  let start = 1;
-  let exhausted = false;
-  for (let page = 0; page < CACHE_PAGE_LIMIT; page += 1) {
-    const chunk = await readCachePage(start);
-    if (!chunk) break;
-    // /Installed 不支持 tags 过滤，缓存里是全集，这里按官方 tagIds 在本地筛
-    const usable = onlySubscribed.value ? chunk.filter(exceedsTagFilter) : chunk;
-    const fresh = usable.filter((m) => !pages.some((seen) => seen.modId === m.modId));
-    pages.push(...fresh);
-    start += chunk.length;
-    if (chunk.length < PAGE_SIZE) {
-      exhausted = true;
+/** 只有字段真的变了才写回：避免无意义的响应式更新让卡片重绘（“不闪”的关键） */
+function patchIfChanged(current: OnlineMod, fresh: OnlineMod): void {
+  let changed = false;
+  for (const key of Object.keys(fresh) as (keyof OnlineMod)[]) {
+    if (key === "raw") continue;
+    const a = current[key];
+    const b = fresh[key];
+    if (Array.isArray(a) && Array.isArray(b)) {
+      if (a.length !== b.length || a.some((value, index) => value !== b[index])) {
+        changed = true;
+        break;
+      }
+      continue;
+    }
+    if (a !== b) {
+      changed = true;
       break;
     }
   }
-  if (!pages.length) return false;
-  items.value = pages;
-  cursor.value = start;
-  hasMore.value = !exhausted;
-  return true;
-}
-
-/** 离线翻页：只用缓存里的下一页；没有就当作到底（重新登录后 reload 会整体替换） */
-async function appendCachePage(): Promise<boolean> {
-  const chunk = await readCachePage(cursor.value);
-  if (!chunk) return false;
-  cursor.value += chunk.length;
-  if (chunk.length < PAGE_SIZE) hasMore.value = false;
-  return mergeChunk(chunk) > 0;
+  if (changed) Object.assign(current, fresh);
 }
 
 /**
- * 列表加载的唯一入口。顺序固定：
- * ① 清空 → ② 缓存铺屏（不看登录态，秒开）→ ③ 离线到此为止 → ④ 在线静默刷新并平滑替换。
+ * 把数据写进列表，两种模式：
+ * - merge：同一筛选的静默刷新 / 翻页 → 逐条比对，只有真变的卡片被 patch，新条目追加；
+ * - replace：换了筛选（分类 / 搜索 / 排序 / 来源 / 收藏）→ 整体替换，但**复用已存在的对象**，
+ *   一次赋值完成，中间不出现空白帧，selected 引用也不失效（详情面板不闪）。
  */
-async function reload() {
+function applyList(next: OnlineMod[], mode: "merge" | "replace"): void {
+  if (mode === "replace") {
+    const existing = new Map(items.value.map((mod) => [mod.modId, mod]));
+    const reused = next.map((fresh) => {
+      const current = existing.get(fresh.modId);
+      if (!current) return fresh;
+      patchIfChanged(current, fresh);
+      return current;
+    });
+    items.value = reused;
+    // 选中项必须属于新列表：换了分类还对着一张不存在的卡片，详情面板就会挂错模组
+    const kept = selected.value ? reused.find((m) => m.modId === selected.value?.modId) : null;
+    selected.value = kept ?? null;
+    if (!kept) {
+      detail.value = null;
+      detailError.value = null;
+      detailLoading.value = false;
+    }
+    return;
+  }
+  const existing = new Map(items.value.map((mod) => [mod.modId, mod]));
+  const appended: OnlineMod[] = [];
+  for (const fresh of next) {
+    const current = existing.get(fresh.modId);
+    if (!current) {
+      appended.push(fresh);
+      continue;
+    }
+    patchIfChanged(current, fresh);
+  }
+  if (appended.length) items.value = [...items.value, ...appended];
+}
+
+/**
+ * 换筛选时把滚动容器归零（在替换数据之前调用）。
+ * 新分类的卡片数量/高度都不同，等 applyList 之后再让浏览器纠正会导致「先弹顶再乱窜」。
+ */
+function resetScrollToTop(): void {
+  savedScrollTop = 0;
+  restorePending = false;
+  const el = scrollEl.value;
+  if (el) el.scrollTop = 0;
+}
+
+/**
+ * 「⭐ 我的收藏」：纯本地视图。
+ * 数据源 = user_data.json 的收藏 ID ×（缓存池 + 当前列表），
+ * **绝不调用 Find / Installed**，断网也完全可用。
+ */
+async function loadFavorites(mode: "merge" | "replace"): Promise<void> {
+  if (!favoritePool.value) {
+    try {
+      const cached = await allCachedItems();
+      favoritePool.value = cached.filter((mod) => typeof mod?.modId === "number");
+    } catch {
+      favoritePool.value = [];
+    }
+  }
+  const byId = new Map<number, OnlineMod>();
+  for (const mod of favoritePool.value ?? []) byId.set(mod.modId, mod);
+  // 当前列表可能比缓存更新（刚装过 / 刚翻到），以它为准
+  for (const mod of items.value) byId.set(mod.modId, mod);
+
+  await ensureUserData().catch(() => undefined);
+  const favorites = favoriteIdSet.value;
+  const matched = [...byId.values()]
+    .filter((mod) => favorites.has(mod.modId))
+    .sort((a, b) => (b.installs ?? 0) - (a.installs ?? 0));
+
+  totalCount.value = matched.length;
+  hasMore.value = false;
+  cursor.value = 1;
+  error.value = null;
+  loading.value = false;
+  loadingMore.value = false;
+  applyList(matched, mode);
+  setStatusMessage(t("favorites.localHint", { n: matched.length }));
+  void syncImages();
+}
+
+/**
+ * 列表加载唯一入口（v1.0）。
+ *
+ * 规则（严格按需求）：
+ * 1. 先查缓存。**命中就立刻渲染并彻底断网** —— 即使是空列表（0 条）也算命中；
+ * 2. 只有两种情况允许发 Find：
+ *    a) 该「分类 + 搜索词 + 排序 + 页码」从未缓存过；
+ *    b) 用户手动点了刷新（或顶栏重试），且距上次请求 ≥ 2 秒（防连点）；
+ *    c) 缓存已超过 24 小时（软件放了一整天没开，才允许自动补一次）；
+ * 3. 静默刷新（SWR）已删除：缓存命中后不再有任何后台后台请求；
+ * 4. 换筛选时强制 scrollTop = 0，避免列表高度变化让滚动条乱窜；
+ * 5. 收藏视图完全不发网络请求。
+ */
+async function reload(forceNetwork = false): Promise<void> {
   seq += 1;
   const mySeq = seq;
-  loadingMore.value = false;
-  resetList();
+  const signature = signatureOf();
+  const mode: "merge" | "replace" = signature === listSignature ? "merge" : "replace";
 
-  // ② 缓存优先
-  const cached = await showFromCache();
-  if (mySeq !== seq) return;
-  if (cached) {
-    setStatusMessage(t("statusbar.cacheLoaded"));
-    if (items.value.length) await selectMod(items.value[0]);
-    if (mySeq !== seq) return;
-  }
+  // 换筛选：先归零（在替换数据之前，避免高度变化导致跳动）
+  if (mode === "replace") resetScrollToTop();
 
-  // ③ 离线：有缓存就看缓存，没缓存就交给模板显示登录面板
-  if (sessionPhase.value !== "online") {
-    loading.value = false;
-    if (!cached) setStatusMessage(t("statusbar.offlineHint"));
+  // 收藏：纯本地，直接返回（不发任何网络请求）
+  if (favoritesOnly.value) {
+    listSignature = signature;
+    await loadFavorites(mode);
     return;
   }
 
-  // ④ 在线：静默刷新（有缓存时不亮骨架，实现无闪烁替换）
-  loading.value = !cached;
-  setStatusMessage(cached ? t("statusbar.refreshing") : t("statusbar.fetching"));
+  const cached = await loadCachePages(1);
+  if (mySeq !== seq) return;
+
+  const cacheAge = cached.savedAtMs ? Date.now() - cached.savedAtMs : Number.MAX_SAFE_INTEGER;
+  const lastFetch = lastFetchMsBySignature.get(signature) ?? 0;
+  const sinceFetch = Date.now() - lastFetch;
+
+  if (cached.hit) {
+    // ① 命中缓存：立刻渲染（哪怕 0 条），然后断网
+    noCacheOffline.value = false;
+    listSignature = signature;
+    applyList(cached.items, mode);
+    cursor.value = cached.nextStart;
+    hasMore.value = !cached.complete;
+    error.value = null;
+    loading.value = false;
+    loadingMore.value = false;
+    setStatusMessage(t("statusbar.cacheLoaded"));
+    void syncImages();
+
+    // 自动触发（切分类 / 启动 / 登录态变化 / 退出）：缓存未过 24 小时 → 一个请求都不发
+    if (!forceNetwork && cacheAge < CACHE_STALE_MS) return;
+    // 手动刷新：2 秒防连点
+    if (sinceFetch < USER_MIN_GAP_MS) return;
+  } else {
+    // ② 从未缓存过
+    listSignature = signature;
+    cursor.value = 1;
+    hasMore.value = true;
+    // 已知断网：一个请求都不发，直接空态（避免终端满屏 Dns Failed）
+    if (isNetworkError.value && !forceNetwork) {
+      items.value = [];
+      loading.value = false;
+      noCacheOffline.value = true;
+      setStatusMessage(t("statusbar.networkDownHint"));
+      return;
+    }
+    noCacheOffline.value = false;
+    loading.value = items.value.length === 0;
+    // 同一个筛选连点（且上一次请求还没落盘）时，2 秒内不重复请求
+    if (sinceFetch < USER_MIN_GAP_MS) return;
+  }
+
+  if (sessionPhase.value !== "online") {
+    loading.value = false;
+    if (!cached.hit) setStatusMessage(t("statusbar.offlineHint"));
+    return;
+  }
+
+  // 同一筛选已经有一个请求在飞：绝不叠加
+  if (fetchSignature === signature) return;
+
+  fetchSignature = signature;
+  lastFetchMsBySignature.set(signature, Date.now());
+  setStatusMessage(cached.hit ? t("statusbar.refreshing") : t("statusbar.fetching"));
   try {
     let guard = 0;
     while (mySeq === seq && guard < 4) {
@@ -751,47 +938,122 @@ async function reload() {
       const result = await requestChunk(cursor.value);
       if (mySeq !== seq) return;
       if (result.totalCount !== null) totalCount.value = result.totalCount;
-      if (result.serverMessage && result.items.length === 0) error.value = result.serverMessage;
+      if (result.serverMessage && result.items.length === 0 && !items.value.length) {
+        error.value = result.serverMessage;
+      }
       cursor.value += result.items.length;
       if (result.items.length < PAGE_SIZE) hasMore.value = false;
-      const added = mergeChunk(result.items);
-      if (added > 0 || !hasMore.value || result.items.length === 0) break;
+      const usableItems = onlySubscribed.value
+        ? result.items.filter(exceedsTagFilter)
+        : result.items;
+      applyList(usableItems, guard === 1 ? mode : "merge");
+      if (result.items.length === 0) break;
+      if (guard === 1) break;
+      if (!hasMore.value) break;
     }
     if (mySeq !== seq) return;
+    error.value = null;
+    noCacheOffline.value = false;
     setStatusMessage(t("statusbar.freshAt", { time: clockText(Date.now()) }));
-    if (items.value.length) await selectMod(items.value[0]);
+    void syncImages();
   } catch (e) {
     if (mySeq === seq) {
-      items.value = [];
-      error.value = messageOf(e);
+      if (isNetworkFailure(e)) {
+        // 断网 / DNS / 超时：不把技术性报错抛到脸上，只给“请检查网络”
+        noCacheOffline.value = !items.value.length;
+        error.value = null;
+        setStatusMessage(t("statusbar.networkDownHint"));
+      } else {
+        if (!items.value.length) error.value = messageOf(e);
+        setStatusMessage(t("statusbar.offlineHint"));
+      }
       if (kindOf(e) === "unauthenticated") {
         session.value = null;
-        // 底栏立刻变灰，避免继续显示“已登录”
         markUnauthenticated(messageOf(e));
-        // 缓存的会话 Cookie 已失效（会话 Cookie 不跨进程）：后台静默重新走一次 SSO
         void silentReauth(t("online.reasonUnauthorized"));
       }
     }
   } finally {
     if (mySeq === seq) loading.value = false;
+    if (fetchSignature === signature) fetchSignature = null;
   }
 }
 
-/** 滚动到底部：追加下一批 */
-async function loadMore() {
+/** 本次会话已排队下载过的 modId：避免每次重渲染都重复排队 */
+const requestedThumbs = new Set<number>();
+
+/**
+ * 封面图：本地优先。
+ * 1. 一次 invoke 批量问 Rust 本地有没有对应 jpg；
+ * 2. 有就转成 asset: URL 直接渲染（零网络、零流量）；
+ * 3. 缺的交给 Rust 后台线程下载，下完通过事件推回来再补 UI。
+ */
+async function syncImages(): Promise<void> {
+  const list = visibleItems.value;
+  if (!list.length) return;
+  try {
+    const locals = await localImages(list.map((mod) => mod.modId));
+    for (const [id, url] of Object.entries(locals)) localThumbs[Number(id)] = url;
+  } catch {
+    /* 图片缓存不可用时退回官网 URL */
+  }
+  const missing = list
+    .filter((mod) => !!mod.thumbnail && !localThumbs[mod.modId] && !requestedThumbs.has(mod.modId))
+    .slice(0, 60)
+    .map((mod) => ({ modId: mod.modId, url: mod.thumbnail as string }));
+  if (!missing.length) return;
+  // 断网时不要把一批封面下载请求全部撞上去（终端会满屏 DNS 失败）
+  if (isNetworkError.value) return;
+  for (const task of missing) requestedThumbs.add(task.modId);
+  void fetchImages(missing).catch(() => undefined);
+}
+
+/** 卡片 / 详情封面：本地 jpg 优先，其次官网 CDN */
+function thumbOf(mod: OnlineMod | null): string | null {
+  if (!mod) return null;
+  return localThumbs[mod.modId] ?? mod.thumbnail;
+}
+
+/** 滚动到底部：追加下一批（同样缓存优先，只显示底部小 spinner，绝不整屏转圈） */
+async function loadMore(): Promise<void> {
   if (loading.value || loadingMore.value || !hasMore.value) return;
-  if (error.value || !items.value.length) return;
+  // 收藏视图纯本地：不翻页、不发请求
+  if (favoritesOnly.value || error.value || !items.value.length) return;
+  // 连续滚轮 / 惯性滚动：两次加载之间至少间隔 900ms
+  const now = Date.now();
+  if (now - lastLoadMoreMs < MIN_LOAD_MORE_GAP_MS) return;
+  lastLoadMoreMs = now;
   const mySeq = seq;
-  // v0.6：离线只用缓存里的下一页，不再打网络
+
+  // 缓存里还有下一页就直接用，不碰网络
+  const cached = await loadCachePages(cursor.value);
+  if (mySeq !== seq) return;
+  if (cached.items.length) {
+    const before = items.value.length;
+    applyList(cached.items, "merge");
+    cursor.value = cached.nextStart;
+    hasMore.value = !cached.complete;
+    if (items.value.length > before) {
+      void syncImages();
+      return;
+    }
+  }
+
   if (sessionPhase.value !== "online") {
-    if (!(await appendCachePage())) hasMore.value = false;
+    hasMore.value = false;
     return;
   }
+  // 已知断网：不再尝试翻页（否则滑动一次就多一条 DNS 报错）
+  if (isNetworkError.value) {
+    hasMore.value = false;
+    return;
+  }
+
   loadingMore.value = true;
   moreError.value = null;
   try {
     let guard = 0;
-    while (mySeq === seq && hasMore.value && guard < 4) {
+    while (mySeq === seq && hasMore.value && guard < 3) {
       guard += 1;
       const result = await requestChunk(cursor.value);
       if (mySeq !== seq) return;
@@ -799,8 +1061,14 @@ async function loadMore() {
       cursor.value += result.items.length;
       if (result.items.length < PAGE_SIZE) hasMore.value = false;
       if (result.items.length === 0) break;
-      if (mergeChunk(result.items) > 0) break;
+      const usableItems = onlySubscribed.value
+        ? result.items.filter(exceedsTagFilter)
+        : result.items;
+      const before = items.value.length;
+      applyList(usableItems, "merge");
+      if (items.value.length > before) break;
     }
+    void syncImages();
   } catch (e) {
     if (mySeq === seq) moreError.value = messageOf(e);
   } finally {
@@ -815,17 +1083,27 @@ async function loadMore() {
 function keepFilling() {
   const el = scrollEl.value;
   const marker = sentinel.value;
+  // 收藏视图不补页：保持视口不变量只会变成无意义的循环请求
+  if (favoritesOnly.value) return;
   if (!el || !marker || !hasMore.value || moreError.value) return;
   const box = el.getBoundingClientRect();
   const markerBox = marker.getBoundingClientRect();
   if (markerBox.top - box.bottom < 400) {
-    window.setTimeout(() => void loadMore(), 0);
+    // 视口没被填满：等节流窗口过去再补一页，避免与 loadMore 的冷却互相卡死
+    const wait = Math.max(0, MIN_LOAD_MORE_GAP_MS - (Date.now() - lastLoadMoreMs));
+    window.setTimeout(() => void loadMore(), wait + 30);
   }
 }
 
 let scrollHandler: (() => void) | null = null;
+/** 滚动停止检测：滚动过程中不请求，停稳 SCROLL_IDLE_MS 后才判断是否到底 */
+let scrollIdleTimer: number | null = null;
 
 function detachObserver() {
+  if (scrollIdleTimer !== null) {
+    window.clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = null;
+  }
   if (observer) {
     observer.disconnect();
     observer = null;
@@ -850,57 +1128,113 @@ function attachObserver() {
   observer.observe(marker);
   scrollHandler = () => {
     rememberScroll();
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 600) void loadMore();
+    // 连续滚轮期间不发请求：等停稳后再判断，避免一次长滚动触发多次 loadMore
+    if (scrollIdleTimer !== null) window.clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = window.setTimeout(() => {
+      scrollIdleTimer = null;
+      const node = scrollEl.value;
+      if (!node) return;
+      if (node.scrollHeight - node.scrollTop - node.clientHeight < 600) void loadMore();
+    }, SCROLL_IDLE_MS);
   };
   el.addEventListener("scroll", scrollHandler, { passive: true });
 }
 
 function pickTag(id: number | null) {
-  if (activeTag.value === id) return;
+  // 分类与收藏视图互斥：选了分类就必然要退出收藏视图
+  const wasFavorites = favoritesOnly.value;
+  if (wasFavorites) favoritesOnly.value = false;
+  if (activeTag.value === id && !wasFavorites) return;
   activeTag.value = id;
   void reload();
 }
 
 function pickSubscribed(value: boolean) {
+  // 来源与收藏视图互斥：在收藏视图里点来源，先退出收藏再按来源重查
+  const wasFavorites = favoritesOnly.value;
+  if (wasFavorites) favoritesOnly.value = false;
   if (onlySubscribed.value === value) return;
   onlySubscribed.value = value;
   void reload();
 }
 
+/**
+ * 「⭐ 我的收藏」开关（v0.7：纯本地）。
+ * 切换后 reload() 内部会直接走 loadFavorites()：
+ * 只用 user_data.json 的收藏 ID 匹配「缓存池 + 当前列表」，
+ * **不会调用 Find / Installed**，断网也可用；哨兵被 v-if 移除后自动翻页也会停掉。
+ */
+function toggleFavorites() {
+  favoritesOnly.value = !favoritesOnly.value;
+  void reload();
+}
+
+/**
+ * 选中模组并加载详情。
+ *
+ * **只有用户点击卡片才会走到这里**（不再自动选第一条 —— 自动选中会在切分类/刷新时
+ * 顺带发 Detail 请求，这正是“同一模组几秒内被请求三四次”的来源之一）。
+ *
+ * 三道拦截，按顺序：
+ * 1. 本地已有 Detail 缓存 → 直接渲染，**一个请求都不发**；
+ * 2. 同一个 modId 正在请求中（单飞）→ 直接返回；
+ * 3. 同一个 modId 2 秒内请求过 → 直接返回（防连点 / 滚轮误触）。
+ */
 async function selectMod(mod: OnlineMod) {
+  const id = mod.modId;
+  const same = selected.value?.modId === id;
+
+  // 重复点同一张卡：什么都不做（不重复请求，也不清空已看到的内容）
+  if (same && (detail.value !== null || detailLoading.value || pendingDetailIds.has(id))) return;
+
   selected.value = mod;
-  detail.value = null;
-  detailError.value = null;
-  detailLoading.value = sessionPhase.value === "online";
-  installError.value = null;
-  installNote.value = null;
-  needForce.value = false;
-  actionMessage.value = null;
-  measuredBytes.value = null;
-  favError.value = null;
-  renameOpen.value = false;
+  if (!same) {
+    detail.value = null;
+    detailError.value = null;
+    installError.value = null;
+    installNote.value = null;
+    needForce.value = false;
+    actionMessage.value = null;
+    measuredBytes.value = null;
+    favError.value = null;
+    renameOpen.value = false;
+  }
+  detailLoading.value = false;
 
-  // ① 详情同样缓存优先：秒开上次看过的内容
+  // ① 本地缓存优先
   try {
-    const hit = await readDetailCache(mod.modId);
-    if (selected.value?.modId !== mod.modId) return;
-    if (usableDetailCache(hit)) detail.value = hit.value;
+    const hit = await readDetailCache(id);
+    if (selected.value?.modId !== id) return;
+    if (usableDetailCache(hit)) {
+      detail.value = hit.value;
+      return;
+    }
   } catch {
-    /* 缓存读失败不影响后续网络请求 */
+    /* 缓存不可用：继续走网络 */
   }
 
-  // ② 离线：只用缓存，不发请求（避免 401 把详情刷成错误）
-  if (sessionPhase.value !== "online") {
-    detailLoading.value = false;
-    return;
-  }
+  // ② 离线：只用缓存，绝不发请求
+  if (sessionPhase.value !== "online") return;
 
+  // ③ 单飞 + 冷却
+  if (pendingDetailIds.has(id)) return;
+  const last = lastDetailMs.get(id) ?? 0;
+  if (Date.now() - last < DETAIL_COOLDOWN_MS) return;
+
+  pendingDetailIds.add(id);
+  lastDetailMs.set(id, Date.now());
+  detailLoading.value = true;
   try {
-    detail.value = await modDetail(mod.modId);
+    const value = await modDetail(id);
+    if (selected.value?.modId === id) {
+      detail.value = value;
+      detailError.value = null;
+    }
   } catch (e) {
-    if (selected.value?.modId === mod.modId) detailError.value = messageOf(e);
+    if (selected.value?.modId === id) detailError.value = messageOf(e);
   } finally {
-    if (selected.value?.modId === mod.modId) detailLoading.value = false;
+    pendingDetailIds.delete(id);
+    if (selected.value?.modId === id) detailLoading.value = false;
   }
 }
 
@@ -1152,10 +1486,16 @@ async function handleSessionEpoch() {
   handledEpoch = current;
   if (sessionPhase.value !== "online") return;
   await loadTags();
-  await reload();
+  // 自动触发：受 30 秒闸门约束，缓存命中时不会再打网络
+  await reload(false);
 }
 watch(sessionEpoch, () => {
   void handleSessionEpoch();
+});
+// 底栏「立即重新校验」成功后推一次手工刷新信号（这属于用户明确意图）
+watch(manualRefreshNonce, (value) => {
+  if (!value) return;
+  void reload(true);
 });
 
 async function boot() {
@@ -1168,12 +1508,13 @@ async function boot() {
   // v0.5：收藏 / 备注只读一次磁盘（失败不阻塞在线页）
   void ensureUserData().catch(() => undefined);
 
-  // ① 缓存优先：没登录也要能秒开上次的列表
-  const cached = await showFromCache();
-  if (cached) {
-    setStatusMessage(t("statusbar.cacheLoaded"));
-    if (items.value.length) void selectMod(items.value[0]);
-  }
+  // ① 先渲染缓存（内部就是一次 invoke，命中就立刻出卡片，绝不转圈；缓存命中不联网）
+  await reload(false);
+
+  // ①b 订阅「封面已落地」事件：后台下完一批就把本地 asset URL 补进映射
+  unlistenImages = await onImagesReady((images: LocalImage[]) => {
+    for (const item of images) localThumbs[item.modId] = assetUrl(item.path);
+  });
 
   // ② 平台清单（后端本地常量，不走网络）
   try {
@@ -1261,6 +1602,7 @@ onUnmounted(() => {
   detachObserver();
   stopSilentTimer();
   if (unlisten) unlisten();
+  if (unlistenImages) unlistenImages();
   if (pollTimer) window.clearInterval(pollTimer);
 });
 </script>
@@ -1275,7 +1617,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="side-item"
-          :class="{ active: !onlySubscribed }"
+          :class="{ active: !onlySubscribed && !favoritesOnly }"
           @click="pickSubscribed(false)"
         >
           <span class="label">{{ t("sidebar.allMods") }}</span>
@@ -1283,7 +1625,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="side-item"
-          :class="{ active: onlySubscribed }"
+          :class="{ active: onlySubscribed && !favoritesOnly }"
           @click="pickSubscribed(true)"
         >
           <span class="label">{{ t("sidebar.subscribed") }}</span>
@@ -1298,7 +1640,7 @@ onUnmounted(() => {
           class="side-item"
           :class="{ active: favoritesOnly }"
           :title="t('favorites.noteOnline')"
-          @click="favoritesOnly = !favoritesOnly"
+          @click="toggleFavorites"
         >
           <span class="label">⭐ {{ t("favorites.label") }}</span>
           <span class="count">{{ favoriteCount }}</span>
@@ -1311,7 +1653,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="side-item"
-          :class="{ active: activeTag === null }"
+          :class="{ active: !favoritesOnly && activeTag === null }"
           @click="pickTag(null)"
         >
           <span class="label">{{ t("sidebar.allContent") }}</span>
@@ -1321,7 +1663,7 @@ onUnmounted(() => {
           :key="item.modTypeId"
           type="button"
           class="side-item"
-          :class="{ active: activeTag === item.modTypeId }"
+          :class="{ active: !favoritesOnly && activeTag === item.modTypeId }"
           :title="item.modTypeName"
           @click="pickTag(item.modTypeId)"
         >
@@ -1365,10 +1707,17 @@ onUnmounted(() => {
       <div class="content-head">
         <h2>{{ heading }}</h2>
         <span class="hint">
-          {{ activeTagName }} ·
-          {{ items.length
-          }}<template v-if="totalCount !== null">{{ t("online.totalSuffix", { n: totalCount }) }}</template>
-          <template v-if="loading">{{ t("online.loadingSuffix") }}</template>
+          <!-- 收藏视图：不展示官方「共 N 条」总数（那是查询总数，与收藏无关），只报本地命中数 -->
+          <template v-if="favoritesOnly">
+            {{ t("favorites.scopeHint") }} ·
+            {{ t("favorites.localHint", { n: visibleItems.length }) }}
+          </template>
+          <template v-else>
+            {{ activeTagName }} ·
+            {{ items.length
+            }}<template v-if="totalCount !== null">{{ t("online.totalSuffix", { n: totalCount }) }}</template>
+            <template v-if="loading">{{ t("online.loadingSuffix") }}</template>
+          </template>
         </span>
       </div>
 
@@ -1415,11 +1764,26 @@ onUnmounted(() => {
         </div>
 
         <template v-else>
-          <div v-if="error" class="state-panel">
+          <!-- 收藏视图的空态必须排在前面：它是纯本地结果，
+               不能报“官方接口没返回”这种误导文案 -->
+          <div v-if="favoritesOnly && !visibleItems.length" class="state-panel">
+            <h2>⭐ {{ t("favorites.empty") }}</h2>
+            <p>{{ t("favorites.localEmpty") }}</p>
+          </div>
+
+          <div v-else-if="noCacheOffline" class="state-panel">
+            <h2>{{ t("online.offlineNoCacheTitle") }}</h2>
+            <p>{{ t("online.offlineNoCacheBody") }}</p>
+            <div class="login-actions">
+              <button type="button" @click="reload(true)">{{ t("online.retry") }}</button>
+            </div>
+          </div>
+
+          <div v-else-if="error" class="state-panel">
             <h2>{{ t("online.requestFailedTitle") }}</h2>
             <p>{{ error }}</p>
             <div class="login-actions">
-              <button type="button" @click="reload()">{{ t("online.retry") }}</button>
+              <button type="button" @click="reload(true)">{{ t("online.retry") }}</button>
               <button type="button" @click="startLogin()">{{ t("online.signInAgain") }}</button>
             </div>
           </div>
@@ -1433,7 +1797,7 @@ onUnmounted(() => {
             <h2>{{ t("online.listEmptyTitle") }}</h2>
             <p>{{ t("online.listEmptyBody") }}</p>
             <div class="login-actions">
-              <button type="button" @click="reload()">{{ t("online.reload") }}</button>
+              <button type="button" @click="reload(true)">{{ t("online.reload") }}</button>
             </div>
           </div>
 
@@ -1443,22 +1807,23 @@ onUnmounted(() => {
               ⚪ {{ t("online.offlineCacheNotice") }}
             </div>
 
-            <div v-if="favoritesOnly && !visibleItems.length" class="state-panel">
-              <h2>⭐ {{ t("favorites.empty") }}</h2>
-              <p>{{ t("favorites.loadingOnline") }}</p>
-            </div>
-
-            <div v-else class="card-grid">
+            <div class="card-grid">
               <OnlineModCard
                 v-for="mod in visibleItems"
                 :key="mod.modId"
                 :mod="mod"
+                :thumb="thumbOf(mod)"
                 :active="selected?.modId === mod.modId"
                 @select="selectMod"
               />
             </div>
 
-            <div ref="sentinel" class="scroll-foot">
+            <!-- 收藏视图不挂哨兵：sentinel 为 null 后 watch([scrollEl, sentinel]) 会自动解绑
+                 IntersectionObserver 与滚动监听，从根上停掉自动翻页（双保险：loadMore 内还有一道 guard） -->
+            <div v-if="favoritesOnly" class="scroll-foot">
+              {{ t("favorites.footerLoaded", { fav: visibleItems.length, loaded: items.length }) }}
+            </div>
+            <div v-else ref="sentinel" class="scroll-foot">
               <template v-if="moreError">
                 <span class="err">{{ moreError }}</span>
                 <button type="button" @click="loadMore()">{{ t("online.retry") }}</button>
@@ -1487,7 +1852,12 @@ onUnmounted(() => {
       </div>
 
       <div v-else class="detail-body">
-        <img v-if="selected.thumbnail" class="detail-cover" :src="selected.thumbnail" alt="" />
+        <img
+          v-if="thumbOf(selected)"
+          class="detail-cover"
+          :src="thumbOf(selected) ?? ''"
+          alt=""
+        />
         <div v-else class="no-cover-box">{{ t("online.noThumbnail") }}</div>
 
         <h3 class="detail-title">{{ displayTitle(selected.modId, selected.title) }}</h3>

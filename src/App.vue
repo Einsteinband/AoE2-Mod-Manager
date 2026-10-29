@@ -104,13 +104,21 @@ const statusCounts = computed(() => {
 
 const filtered = computed<ModEntry[]>(() => {
   const q = search.value.trim().toLowerCase();
+  /**
+   * 收藏视图与「来源 / 状态 / 官方分类」互斥：
+   * 两套条件叠加时侧栏计数（3 个收藏）与列表条数（48/1037）必然对不上，
+   * 所以收藏视图下只按 isFavorite 过滤（外加搜索关键字）。
+   */
+  const fav = favoritesOnly.value;
   return mods.value.filter((m) => {
-    if (favoritesOnly.value && !isFavorite(m.workshopId)) return false;
-    if (source.value !== "all" && m.kind !== source.value) return false;
-    if (status.value === "enabled" && m.enabled !== true) return false;
-    if (status.value === "disabled" && m.enabled !== false) return false;
-    if (status.value === "unknown" && m.enabled !== null) return false;
-    if (activeTag.value && !m.contentTags.includes(activeTag.value)) return false;
+    if (fav && !isFavorite(m.workshopId)) return false;
+    if (!fav) {
+      if (source.value !== "all" && m.kind !== source.value) return false;
+      if (status.value === "enabled" && m.enabled !== true) return false;
+      if (status.value === "disabled" && m.enabled !== false) return false;
+      if (status.value === "unknown" && m.enabled !== null) return false;
+      if (activeTag.value && !m.contentTags.includes(activeTag.value)) return false;
+    }
     if (!q) return true;
     const haystack = [
       displayTitle(m.workshopId, m.displayName),
@@ -181,6 +189,41 @@ const statusText = computed(() => {
   if (status.value === "unknown") return t("content.statusUnknown");
   return t("content.statusAll");
 });
+
+/** 内容区副标题：收藏视图下明确说明「分类已让位」，避免用户以为分类还在生效 */
+const contentHint = computed(() =>
+  favoritesOnly.value
+    ? t("favorites.scopeHint")
+    : `${activeTagLabel.value} · ${statusText.value}`,
+);
+
+/**
+ * 侧栏「⭐ 我的收藏」开关。
+ * 进入收藏视图时把来源 / 状态 / 分类全部复位：只按收藏过滤，计数与列表条数才一致。
+ */
+function toggleFavorites() {
+  favoritesOnly.value = !favoritesOnly.value;
+  if (!favoritesOnly.value) return;
+  source.value = "all";
+  status.value = "all";
+  activeTag.value = null;
+}
+
+/** 点来源 / 状态 / 分类：先退出收藏视图，否则条件叠加又会出现计数错位 */
+function pickSource(next: SourceFilter) {
+  favoritesOnly.value = false;
+  source.value = next;
+}
+
+function pickStatus(next: StatusFilter) {
+  favoritesOnly.value = false;
+  status.value = next;
+}
+
+function pickTag(next: string | null) {
+  favoritesOnly.value = false;
+  activeTag.value = next;
+}
 
 function normalizeError(e: unknown): string {
   if (typeof e === "string") return translateBackendMessage(e);
@@ -915,24 +958,24 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="side-item"
-            :class="{ active: source === 'all' }"
-            @click="source = 'all'"
+            :class="{ active: source === 'all' && !favoritesOnly }"
+            @click="pickSource('all')"
           >
             <span class="label">{{ t("sidebar.allMods") }}</span>
           </button>
           <button
             type="button"
             class="side-item"
-            :class="{ active: source === 'local' }"
-            @click="source = 'local'"
+            :class="{ active: source === 'local' && !favoritesOnly }"
+            @click="pickSource('local')"
           >
             <span class="label">{{ t("sidebar.local") }}</span>
           </button>
           <button
             type="button"
             class="side-item"
-            :class="{ active: source === 'subscribed' }"
-            @click="source = 'subscribed'"
+            :class="{ active: source === 'subscribed' && !favoritesOnly }"
+            @click="pickSource('subscribed')"
           >
             <span class="label">{{ t("sidebar.subscribed") }}</span>
           </button>
@@ -947,7 +990,7 @@ onBeforeUnmount(() => {
             :class="{ active: favoritesOnly }"
             :disabled="sortMode"
             :title="t('favorites.note')"
-            @click="favoritesOnly = !favoritesOnly"
+            @click="toggleFavorites"
           >
             <span class="label">⭐ {{ t("favorites.label") }}</span>
             <span class="count">{{ favoriteLocalCount }}</span>
@@ -960,8 +1003,8 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="side-item"
-            :class="{ active: activeTag === null }"
-            @click="activeTag = null"
+            :class="{ active: activeTag === null && !favoritesOnly }"
+            @click="pickTag(null)"
           >
             <span class="label">{{ t("sidebar.allContent") }}</span>
           </button>
@@ -970,9 +1013,9 @@ onBeforeUnmount(() => {
             :key="item.name"
             type="button"
             class="side-item"
-            :class="{ active: activeTag === item.name }"
+            :class="{ active: activeTag === item.name && !favoritesOnly }"
             :title="t('sidebar.tagCount', { name: localizedTagName(item.name), n: item.count })"
-            @click="activeTag = item.name"
+            @click="pickTag(item.name)"
           >
             <span class="label">{{ localizedTagName(item.name) }}</span>
           </button>
@@ -988,9 +1031,9 @@ onBeforeUnmount(() => {
             :key="item.name"
             type="button"
             class="side-item"
-            :class="{ active: activeTag === item.name }"
+            :class="{ active: activeTag === item.name && !favoritesOnly }"
             :title="t('sidebar.inferredCount', { name: localizedTagName(item.name), n: item.count })"
-            @click="activeTag = item.name"
+            @click="pickTag(item.name)"
           >
             <span class="label">{{ localizedTagName(item.name) }}</span>
           </button>
@@ -1004,32 +1047,32 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="side-item"
-            :class="{ active: status === 'all' }"
-            @click="status = 'all'"
+            :class="{ active: status === 'all' && !favoritesOnly }"
+            @click="pickStatus('all')"
           >
             <span class="label">{{ t("sidebar.all") }}</span><span class="count">{{ sourceCounts.all }}</span>
           </button>
           <button
             type="button"
             class="side-item"
-            :class="{ active: status === 'enabled' }"
-            @click="status = 'enabled'"
+            :class="{ active: status === 'enabled' && !favoritesOnly }"
+            @click="pickStatus('enabled')"
           >
             <span class="label">{{ t("sidebar.enabled") }}</span><span class="count">{{ statusCounts.enabled }}</span>
           </button>
           <button
             type="button"
             class="side-item"
-            :class="{ active: status === 'disabled' }"
-            @click="status = 'disabled'"
+            :class="{ active: status === 'disabled' && !favoritesOnly }"
+            @click="pickStatus('disabled')"
           >
             <span class="label">{{ t("sidebar.disabled") }}</span><span class="count">{{ statusCounts.disabled }}</span>
           </button>
           <button
             type="button"
             class="side-item"
-            :class="{ active: status === 'unknown' }"
-            @click="status = 'unknown'"
+            :class="{ active: status === 'unknown' && !favoritesOnly }"
+            @click="pickStatus('unknown')"
           >
             <span class="label">{{ t("sidebar.unknown") }}</span><span class="count">{{ statusCounts.unknown }}</span>
           </button>
@@ -1053,7 +1096,7 @@ onBeforeUnmount(() => {
 
         <div class="content-head">
           <h2>{{ heading }}</h2>
-          <span class="hint">{{ activeTagLabel }} · {{ statusText }}</span>
+          <span class="hint">{{ contentHint }}</span>
         </div>
 
         <div ref="localScrollEl" class="grid-scroll">
@@ -1153,6 +1196,18 @@ onBeforeUnmount(() => {
                   @select="selectMod"
                 />
               </div>
+            </div>
+          </div>
+
+          <!-- 收藏视图专用空态：计数 > 0 却看不到，说明是搜索没命中，必须说清楚 -->
+          <div v-else-if="!sorted.length && favoritesOnly" class="state-panel">
+            <h2>⭐ {{ t("favorites.empty") }}</h2>
+            <p>{{ favoriteLocalCount ? t("favorites.emptyLocalHint", { n: favoriteLocalCount }) : t("favorites.emptyNone") }}</p>
+            <div class="actions">
+              <button v-if="search" type="button" @click="search = ''">
+                {{ t("search.clear") }}
+              </button>
+              <button type="button" @click="toggleFavorites">{{ t("favorites.exit") }}</button>
             </div>
           </div>
 

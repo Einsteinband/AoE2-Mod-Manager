@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, revealModFolder, toggleModEnabled } from "../api";
@@ -64,12 +64,33 @@ const renameOpen = ref(false);
 const renameBusy = ref(false);
 const renameError = ref<string | null>(null);
 
+/**
+ * 收藏 / 备注的即时反馈。
+ * 关键：只改 userData 的全局单例（响应式），卡片与详情页的 ⭐ 会自己重算，
+ * 不调 scanMods、不重扫目录，所以列表不会闪、滚动条不跳。
+ */
+const toast = ref<{ text: string; kind: "ok" | "error" } | null>(null);
+let toastTimer: number | null = null;
+function showToast(text: string, kind: "ok" | "error" = "ok") {
+  toast.value = { text, kind };
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast.value = null;
+    toastTimer = null;
+  }, 3200);
+}
+
+onBeforeUnmount(() => {
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
+});
+
 async function toggleFavorite() {
   if (!canFavorite.value || favBusy.value) return;
   favBusy.value = true;
   favError.value = null;
   try {
-    await setFavorite(props.mod.workshopId, !favorited.value);
+    const next = await setFavorite(props.mod.workshopId, !favorited.value);
+    showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
   } catch (e) {
     favError.value = errorText(e, "favorites.failSave");
   } finally {
@@ -90,6 +111,7 @@ async function applyRename(name: string) {
   try {
     await setCustomName(props.mod.workshopId, name);
     renameOpen.value = false;
+    showToast(t("favorites.savedToast"));
   } catch (e) {
     renameError.value = errorText(e, "favorites.failSave");
   } finally {
@@ -460,4 +482,7 @@ watch(
     @confirm="confirmDelete"
     @cancel="confirmOpen = false"
   />
+
+  <!-- 收藏 / 备注成功后的轻提示（固定右下角，不参与三栏布局） -->
+  <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
 </template>

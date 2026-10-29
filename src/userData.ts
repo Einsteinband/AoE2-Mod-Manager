@@ -55,6 +55,24 @@ export const favoriteCount = computed(
   () => Object.values(state.mods).filter((m) => m.isFavorite).length,
 );
 
+/**
+ * 所有收藏的 WorkshopID 集合（O(1) 查询）。
+ * 在线页「我的收藏」靠它做**纯本地**过滤：不调 Find / Installed，
+ * 直接拿这些 ID 去匹配当前列表与本地缓存池。
+ */
+export const favoriteIdSet = computed<Set<number>>(() => {
+  const set = new Set<number>();
+  for (const [key, value] of Object.entries(state.mods)) {
+    if (!value.isFavorite) continue;
+    const id = Number(key);
+    if (Number.isFinite(id) && id > 0) set.add(id);
+  }
+  return set;
+});
+
+/** 收藏 ID 数组（用于日志 / 计数） */
+export const favoriteIdList = computed<number[]>(() => [...favoriteIdSet.value]);
+
 /** 幂等加载：多个组件同时调用只会读一次磁盘 */
 export function ensureUserData(): Promise<void> {
   if (loaded) return Promise.resolve();

@@ -5,6 +5,7 @@ use tauri::Manager;
 
 mod cache;
 mod download;
+mod images;
 mod install;
 mod metadata;
 mod models;
@@ -761,20 +762,82 @@ async fn online_cache_detail(app: tauri::AppHandle, mod_id: i64) -> Option<cache
         .flatten()
 }
 
-/// 清理在线缓存（设置 → 网络 → 「清理在线缓存」）：直接删除 online_cache.json
+/// 一次性读多页缓存（全部在内存里完成）：切分类 / 翻页 / 搜索都只发这一个 invoke，
+/// 且**不会触发任何 Loading** —— 有数据就立刻渲染。
 #[tauri::command]
-async fn online_cache_clear(app: tauri::AppHandle) -> Result<cache::ClearReport, String> {
-    tauri::async_runtime::spawn_blocking(move || cache::clear_for_app(&app))
-        .await
-        .map_err(|e| format!("清理任务异常：{e}"))?
+async fn online_cache_pages(
+    app: tauri::AppHandle,
+    query: String,
+    start: i64,
+    count: i64,
+    sort: String,
+    order: String,
+    tags: Vec<i64>,
+    installed: Option<bool>,
+    max_pages: Option<u32>,
+) -> Vec<cache::CachedPage> {
+    let start = start.max(1);
+    let count = count.clamp(1, 50);
+    let max_pages = max_pages.unwrap_or(8).clamp(1, 30) as usize;
+    let installed = installed.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        cache::pages_for_app(
+            &app,
+            cache::PageQuery {
+                query: &query,
+                start,
+                count,
+                sort: &sort,
+                order: &order,
+                tags: &tags,
+                installed,
+            },
+            max_pages,
+        )
+    })
+    .await
+    .unwrap_or_default()
 }
 
-/// 缓存概览（条目数 / 体积 / 时间范围），设置页展示用
+/// 缓存里出现过的所有列表项（去重、按订阅数降序）：
+/// 「我的收藏」纯本地浏览的数据源，让没加载过的收藏项也能显示。
 #[tauri::command]
-async fn online_cache_stat(app: tauri::AppHandle) -> cache::CacheStat {
-    tauri::async_runtime::spawn_blocking(move || cache::stat_for_app(&app))
+async fn online_cache_items(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || cache::all_items_for_app(&app))
         .await
-        .unwrap_or(cache::CacheStat {
+        .unwrap_or_default()
+}
+
+/// 缓存总览：JSON 缓存 + 图片缓存
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheOverview {
+    #[serde(flatten)]
+    cache: cache::CacheStat,
+    image_dir: String,
+    image_entries: usize,
+    image_bytes: u64,
+    image_max_bytes: u64,
+}
+
+#[tauri::command]
+async fn online_cache_stat(app: tauri::AppHandle) -> CacheOverview {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stat = cache::stat_for_app(&app);
+        let (image_entries, image_bytes) = images::stat(&app);
+        CacheOverview {
+            cache: stat,
+            image_dir: images::dir_for(&app)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            image_entries,
+            image_bytes,
+            image_max_bytes: images::MAX_BYTES,
+        }
+    })
+    .await
+    .unwrap_or_else(|_| CacheOverview {
+        cache: cache::CacheStat {
             path: String::new(),
             entries: 0,
             bytes: 0,
@@ -783,7 +846,75 @@ async fn online_cache_stat(app: tauri::AppHandle) -> cache::CacheStat {
             ttl_ms: cache::TTL_MS,
             max_entries: cache::MAX_ENTRIES,
             max_bytes: cache::MAX_BYTES,
+        },
+        image_dir: String::new(),
+        image_entries: 0,
+        image_bytes: 0,
+        image_max_bytes: images::MAX_BYTES,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearEverything {
+    removed: bool,
+    path: String,
+    entries_removed: usize,
+    images_removed: usize,
+    images_bytes: u64,
+}
+
+/// 清理在线缓存：online_cache.json + image_cache 整个目录（设置 → 网络）
+#[tauri::command]
+async fn online_cache_clear(app: tauri::AppHandle) -> Result<ClearEverything, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = cache::clear_for_app(&app)?;
+        let (images_removed, images_bytes) = images::clear(&app);
+        Ok(ClearEverything {
+            removed: report.removed,
+            path: report.path,
+            entries_removed: report.entries_removed,
+            images_removed,
+            images_bytes,
         })
+    })
+    .await
+    .map_err(|e| format!("清理任务异常：{e}"))?
+}
+
+/// 批量查询本地是否已有封面：返回 modId → 绝对路径
+/// （前端用 @tauri-apps/api 的 convertFileSrc 转成 asset URL 给 <img>）
+#[tauri::command]
+async fn online_images_local(
+    app: tauri::AppHandle,
+    mod_ids: Vec<i64>,
+) -> Vec<images::LocalImage> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for id in mod_ids {
+            if let Some(path) = images::local_for(&app, id) {
+                out.push(images::LocalImage { mod_id: id, path });
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 后台补齐缺失封面：立即返回排队数量；全部下载完后发 online://images-ready 事件。
+#[tauri::command]
+async fn online_images_fetch(app: tauri::AppHandle, tasks: Vec<images::FetchTask>) -> usize {
+    let queued: Vec<images::FetchTask> = tasks
+        .into_iter()
+        .filter(|t| t.url.trim().starts_with("https://"))
+        .collect();
+    if queued.is_empty() {
+        return 0;
+    }
+    let count = queued.len();
+    std::thread::spawn(move || images::download_batch(app, queued));
+    count
 }
 
 
@@ -1661,6 +1792,13 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        // 封面图缓存在 %APPDATA% 下的 image_cache 目录；
+        // tauri.conf.json 的 assetProtocol.scope 是空的，必须在运行时显式放行，
+        // 否则前端 asset: URL 读本地 jpg 会被拒绝。
+        .setup(|app| {
+            images::allow_scope(app.handle());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ui_log,
             get_settings,
@@ -1691,8 +1829,12 @@ pub fn run() {
             online_cache_find,
             online_cache_installed,
             online_cache_detail,
+            online_cache_pages,
+            online_cache_items,
             online_cache_clear,
             online_cache_stat,
+            online_images_local,
+            online_images_fetch,
             online_install,
             online_cancel_install,
             online_uninstall,

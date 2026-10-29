@@ -20,8 +20,10 @@ export const sessionPhase = ref<SessionPhase>("checking");
 /** 最近一次探测到的完整会话信息（Cookie 数 / 来源 / 错误） */
 export const sessionInfo = ref<SessionStatus | null>(null);
 export const sessionError = ref<string | null>(null);
-/** 登录态确认有效的次数；在线页 watch 它触发静默刷新 */
+/** 登录态确认有效的次数；**只在 离线/校验中 → 在线 这一跳 +1**，在线页 watch 它静默刷新 */
 export const sessionEpoch = ref(0);
+/** 用户明确要求重刷列表时 +1（底栏「立即重新校验」成功后推一次） */
+export const manualRefreshNonce = ref(0);
 /** 底栏中间那行动态提示（“已从缓存加载” / “正在请求网络数据…” 等） */
 export const statusMessage = ref("");
 export const lastCheckedMs = ref(0);
@@ -55,14 +57,26 @@ export function setStatusMessage(text: string): void {
   statusMessage.value = text;
 }
 
-/** 登录态有效：点亮绿灯，并给在线页一个刷新信号 */
+/** 用户明确意图：要求在线页重刷（不受自动刷新的 30 秒闸门限制） */
+export function requestManualRefresh(): void {
+  manualRefreshNonce.value += 1;
+}
+
+/**
+ * 登录态有效：点亮绿灯。
+ *
+ * 关键：**只有从未登录/校验中变成在线时才 bump sessionEpoch**。
+ * 否则登录轮询（2.5 秒一次）每次都会把整个在线列表重刷一遗，
+ * 表现就是“登录后列表疯狂转圈 + 每 2 秒一个 POST /Find”。
+ */
 export function markOnline(status?: SessionStatus | null): void {
   if (status) {
     sessionInfo.value = status;
     sessionError.value = status.error ?? null;
   }
+  const wasOnline = sessionPhase.value === "online";
   sessionPhase.value = "online";
-  sessionEpoch.value += 1;
+  if (!wasOnline) sessionEpoch.value += 1;
   lastCheckedMs.value = Date.now();
 }
 

@@ -47,7 +47,7 @@ npm run tauri build
 ☕ Support the Development
 If this tool has helped you, consider buying me a coffee! Your support keeps the project alive.
 
-https://img.shields.io/badge/%E2%98%95-%E7%88%B1%E5%8F%91%E7%94%B5%E6%94%AF%E6%8C%81%E5%BC%80%E5%8F%91-orange
+https://img.shields.io/badge/Sponsor_Afdian-%E2%98%95-orange
 
 ⚠️ Disclaimer
 This is an unofficial tool and is not affiliated with Microsoft, Xbox Game Studios, or Forgotten Empires. Age of Empires is a trademark of its respective owners. Use at your own risk.

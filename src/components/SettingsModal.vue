@@ -6,7 +6,7 @@
  * - 语言：applyLocale 立即生效，再 setLocale 写 settings.json（失败只报错，不回滚 UI）
  * - 代理：复用 set_network_settings（Rust 侧会重建登录窗口让它立即生效）
  *
- * 60 秒冷却：lastCheckMs 放在模块作用域，关掉弹窗再打开也绕不过去。
+ * 15 秒冷却：lastCheckMs 放在模块作用域，关掉弹窗再打开也绕不过去。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -71,8 +71,8 @@ async function changeLocale(event: Event) {
 const version = ref("—");
 const currentVersionText = computed(() => t("settings.currentVersion", { version: version.value }));
 
-/** 冷却时长：60 秒内不允许再次请求 GitHub（同时防止 403 限流） */
-const COOLDOWN_MS = 60_000;
+/** 冷却时长：15 秒内不允许再次请求 GitHub（同时防止 403 限流） */
+const COOLDOWN_MS = 15_000;
 /** 模块作用域：弹窗关闭再打开仍然记住上次检查时间 */
 let lastCheckMs = 0;
 

@@ -7,7 +7,7 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    taglinePrefix: "v0.2.0 · by ",
+    taglinePrefix: "v0.2.1 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -247,9 +247,6 @@ export default {
     description: "Description",
     descriptionMissing: "This mod provides no description (no Description field in info.json).",
     dataIssues: "Data notices",
-    notes: "Notes",
-    notesBody:
-      "Enabled state comes from mod-status.json, written by the game. Toggling first verifies the game is not running, backs up the original file, changes only that record's Enabled field, then reads the file back — a failed check rolls everything back. Backups are kept in the app config folder under backups\\. \"Uninstall mod\" deletes only this one local folder (and its mod-status.json record) and never changes your official subscription. To really unsubscribe, use \"View on website\"; this app sends no unsubscribe requests.",
     confirmTitle: "Delete local mod",
     confirmTool: "Delete this mod permanently? Its files will be removed from disk.",
     confirmOfficial:

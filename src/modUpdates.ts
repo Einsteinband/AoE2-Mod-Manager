@@ -3,7 +3,7 @@
  *
  * 为什么放在模块作用域而不是组件里：
  * - 结果要同时被 SettingsModal（按钮 / 状态）和 App.vue（卡片角标 / 详情页按钮）使用；
- * - 60 秒冷却必须跨「关掉设置弹窗再打开」依然生效，组件内的 ref 会被销毁重来。
+ * - 15 秒冷却必须跨「关掉设置弹窗再打开」依然生效，组件内的 ref 会被销毁重来。
  *
  * 触发方式是唯一的：用户点设置里的按钮 → runModUpdateCheck()。
  * 绝不在后台轮询。
@@ -13,8 +13,8 @@ import { checkModUpdates } from "./api";
 import { translateBackendMessage } from "./format";
 import type { ModUpdateItem, ModUpdateReport } from "./types";
 
-/** 冷却时长：60 秒内禁止再次请求 /Installed */
-const COOLDOWN_MS = 60_000;
+/** 冷却时长：15 秒内禁止再次请求 /Installed */
+const COOLDOWN_MS = 15_000;
 let lastCheckMs = 0;
 let timer: number | null = null;
 
@@ -79,7 +79,7 @@ export function resumeCooldown() {
   if (lastCheckMs > 0 && Date.now() - lastCheckMs < COOLDOWN_MS) startTimer();
 }
 
-/** 用户点击「检查本地模组更新」：成功或失败都会进入 60 秒冷却 */
+/** 用户点击「检查本地模组更新」：成功或失败都会进入 15 秒冷却 */
 export async function runModUpdateCheck(): Promise<ModUpdateReport | null> {
   if (!canCheck.value) return null;
   checking.value = true;

@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { ModEntry } from "../types";
 import { fileUrl } from "../api";
 import { initials, sourceHint, sourceLabel, statusLabel } from "../format";
+import { customNameOf, displayTitle, isFavorite } from "../userData";
 
 const props = defineProps<{
   mod: ModEntry;
@@ -36,6 +37,11 @@ const statusClass = computed(() => {
   if (props.mod.enabled === false) return "off";
   return "unknown";
 });
+
+// v0.5：有备注名时主标题用备注名，副标题小字回显原英文标题
+const title = computed(() => displayTitle(props.mod.workshopId, props.mod.displayName));
+const custom = computed(() => customNameOf(props.mod.workshopId));
+const favorited = computed(() => isFavorite(props.mod.workshopId));
 </script>
 
 <template>
@@ -48,6 +54,7 @@ const statusClass = computed(() => {
     <div class="card-thumb">
       <img v-if="coverUrl" :src="coverUrl" alt="" draggable="false" @error="imgFailed = true" />
       <div v-else class="placeholder">{{ initials(mod.displayName) }}</div>
+      <span v-if="favorited" class="fav-badge" :title="t('favorites.badgeTitle')">⭐</span>
       <span v-if="!coverUrl" class="no-cover">{{ t("card.noCover") }}</span>
       <span v-if="order !== undefined" class="order-badge" :title="`#${order}`">{{ order }}</span>
       <span v-if="hasUpdate" class="update-badge" :title="t('card.updateBadgeHint')">
@@ -58,7 +65,8 @@ const statusClass = computed(() => {
       </span>
     </div>
     <div class="card-body">
-      <div class="card-title" :title="mod.displayName">{{ mod.displayName }}</div>
+      <div class="card-title" :title="title">{{ title }}</div>
+      <div v-if="custom" class="card-sub" :title="mod.displayName">📝 {{ mod.displayName }}</div>
       <div class="card-meta status-row">
         <span class="status-chip" :class="statusClass" :title="statusLabel(mod.enabled)">
           <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">

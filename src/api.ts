@@ -12,8 +12,10 @@ import type {
   PresetItem,
   RootCandidate,
   ScanReport,
+  SaveUserDataReport,
   ToggleOutcome,
   UpdateInfo,
+  UserDataStore,
 } from "./types";
 
 export function getSettings(): Promise<AppSettings> {
@@ -170,4 +172,16 @@ export function toggleModEnabled(
     folderName,
     enabled,
   });
+}
+
+// ---------------- v0.5：模组收藏与自定义备注 ----------------
+
+/** 读取 %APPDATA%\com.aoe2.modmanager\user_data.json（不存在时返回空表） */
+export function loadUserData(): Promise<UserDataStore> {
+  return invoke<UserDataStore>("load_user_data");
+}
+
+/** 覆盖写入整份 user_data.json；Rust 侧写前会备份旧文件 */
+export function saveUserData(data: UserDataStore): Promise<SaveUserDataReport> {
+  return invoke<SaveUserDataReport>("save_user_data", { data });
 }

@@ -7,6 +7,7 @@ import FirstRunWizard from "./components/FirstRunWizard.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
 import PresetManager from "./components/PresetManager.vue";
 import SettingsModal from "./components/SettingsModal.vue";
+import StatusBar from "./components/StatusBar.vue";
 import { useI18n } from "vue-i18n";
 import {
   checkUpdate,
@@ -25,6 +26,8 @@ import { formatDateTime, translateBackendMessage } from "./format";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
 import { installMod } from "./online/service";
 import { itemsById, markUpdated, updateIds } from "./modUpdates";
+import { ensureSession, sessionPhase } from "./sessionState";
+import { customNameOf, displayTitle, ensureUserData, isFavorite } from "./userData";
 import { TAG_ZH, SORT_OPTIONS, localizedTagName } from "./online/types";
 import type { ModEntry, ModStats, ScanReport, SortKey, SourceFilter, StatusFilter } from "./types";
 
@@ -51,6 +54,8 @@ const error = ref<string | null>(null);
 const search = ref("");
 const source = ref<SourceFilter>("all");
 const status = ref<StatusFilter>("all");
+/** v0.5：只看收藏（只过滤 isFavorite === true，按 WorkshopID 匹配） */
+const favoritesOnly = ref(false);
 const sortKey = ref<SortKey>("name");
 const selectedId = ref<string | null>(null);
 const candidates = ref<string[]>([]);
@@ -100,6 +105,7 @@ const statusCounts = computed(() => {
 const filtered = computed<ModEntry[]>(() => {
   const q = search.value.trim().toLowerCase();
   return mods.value.filter((m) => {
+    if (favoritesOnly.value && !isFavorite(m.workshopId)) return false;
     if (source.value !== "all" && m.kind !== source.value) return false;
     if (status.value === "enabled" && m.enabled !== true) return false;
     if (status.value === "disabled" && m.enabled !== false) return false;
@@ -107,6 +113,8 @@ const filtered = computed<ModEntry[]>(() => {
     if (activeTag.value && !m.contentTags.includes(activeTag.value)) return false;
     if (!q) return true;
     const haystack = [
+      displayTitle(m.workshopId, m.displayName),
+      customNameOf(m.workshopId) ?? "",
       m.displayName,
       m.nameFromFolder,
       m.folderName,
@@ -137,7 +145,10 @@ const sorted = computed<ModEntry[]>(() => {
         return collator.compare(a.folderName, b.folderName);
       case "name":
       default:
-        return collator.compare(a.displayName, b.displayName);
+        return collator.compare(
+          displayTitle(a.workshopId, a.displayName),
+          displayTitle(b.workshopId, b.displayName),
+        );
     }
   });
   return list;
@@ -152,10 +163,16 @@ const lastScanText = computed(() =>
 );
 
 const heading = computed(() => {
+  if (favoritesOnly.value) return t("favorites.heading");
   if (source.value === "local") return t("content.localMods");
   if (source.value === "subscribed") return t("content.subscribedMods");
   return t("content.allMods");
 });
+
+/** v0.5：本地列表里的收藏数（侧栏计数） */
+const favoriteLocalCount = computed(
+  () => mods.value.filter((m) => isFavorite(m.workshopId)).length,
+);
 
 /** 内容区副标题右侧的状态文案 */
 const statusText = computed(() => {
@@ -274,6 +291,7 @@ let sortSnapshot: {
   status: StatusFilter;
   activeTag: string | null;
   sortKey: SortKey;
+  favoritesOnly: boolean;
 } | null = null;
 /** 本次排序是否真的改过顺序（决定退出后是否停在“按加载优先级”） */
 let orderChanged = false;
@@ -315,6 +333,11 @@ async function openAuthorPage() {
 async function handleUpdateMod(mod: ModEntry) {
   const modId = mod.workshopId ?? 0;
   if (modId <= 0 || updatingEntryId.value) return;
+  // v0.6：离线状态下必须拦截下载（本地收藏/备注仍然可用）
+  if (sessionPhase.value !== "online") {
+    showToast(t("online.offlineBlocked"), "error");
+    return;
+  }
   if (sortMode.value && sortDirty.value) {
     showToast(t("sort.unsavedBlock"), "error");
     return;
@@ -362,7 +385,12 @@ function compareByPriority(a: ModEntry, b: ModEntry): number {
   const collator = new Intl.Collator(collationLocale.value, { numeric: true, sensitivity: "base" });
   const av = a.priority ?? Number.MAX_SAFE_INTEGER;
   const bv = b.priority ?? Number.MAX_SAFE_INTEGER;
-  return av === bv ? collator.compare(a.displayName, b.displayName) : av - bv;
+  return av === bv
+    ? collator.compare(
+        displayTitle(a.workshopId, a.displayName),
+        displayTitle(b.workshopId, b.displayName),
+      )
+    : av - bv;
 }
 
 /**
@@ -379,11 +407,13 @@ async function enterSortMode() {
     status: status.value,
     activeTag: activeTag.value,
     sortKey: sortKey.value,
+    favoritesOnly: favoritesOnly.value,
   };
   search.value = "";
   source.value = "all";
   status.value = "all";
   activeTag.value = null;
+  favoritesOnly.value = false;
   sortKey.value = "priority";
 
   const byPriority = [...mods.value].sort(compareByPriority);
@@ -409,6 +439,7 @@ function exitSortMode() {
   source.value = snapshot.source;
   status.value = snapshot.status;
   activeTag.value = snapshot.activeTag;
+  favoritesOnly.value = snapshot.favoritesOnly;
   sortKey.value = orderChanged ? "priority" : snapshot.sortKey;
 }
 
@@ -567,6 +598,11 @@ watch(
 );
 
 onMounted(async () => {
+  // v0.6：启动即静默校验登录态——不 await、不阻塞首屏，
+  // 底栏自己从 🟡 变成 🟢/⚪；在线页通过 watch(sessionEpoch) 收到刷新信号
+  void ensureSession();
+  // v0.5：收藏/备注只读一次磁盘，失败不阻塞本地页
+  void ensureUserData().catch(() => undefined);
   // 启动即检查一次新版本（只此一次，失败静默）
   void runStartupUpdateCheck();
   try {
@@ -902,6 +938,23 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
+        <!-- v0.5：我的收藏（只过滤 isFavorite，按 WorkshopID 匹配 user_data.json） -->
+        <div class="side-group">
+          <div class="side-title">{{ t("favorites.groupTitle") }}</div>
+          <button
+            type="button"
+            class="side-item"
+            :class="{ active: favoritesOnly }"
+            :disabled="sortMode"
+            :title="t('favorites.note')"
+            @click="favoritesOnly = !favoritesOnly"
+          >
+            <span class="label">⭐ {{ t("favorites.label") }}</span>
+            <span class="count">{{ favoriteLocalCount }}</span>
+          </button>
+          <div class="side-note note" style="padding: 4px 10px">{{ t("favorites.note") }}</div>
+        </div>
+
         <div class="side-group">
           <div class="side-title">{{ t("sidebar.officialTags") }}</div>
           <button
@@ -1114,6 +1167,7 @@ onBeforeUnmount(() => {
                   source = 'all';
                   status = 'all';
                   activeTag = null;
+                  favoritesOnly = false;
                 "
               >
                 {{ t("state.clearFilters") }}
@@ -1182,6 +1236,9 @@ onBeforeUnmount(() => {
         @applied="handlePresetApplied"
       />
     </div>
+
+    <!-- v0.6：全局底部状态栏（账号灯 / 动态提示 / 代理与本地计数），始终显示 -->
+    <StatusBar :local-count="mods.length" :mode="mode" />
 
     <!-- 放弃未保存排序的二次确认 -->
     <ConfirmDialog

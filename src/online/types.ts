@@ -144,6 +144,39 @@ export interface ApiFailure {
   status: number | null;
 }
 
+// ---------------- v0.6：离线缓存（%APPDATA%\com.aoe2.modmanager\online_cache.json） ----------------
+
+/** 一条缓存命中（Rust cache::CacheHit）。expired=true 表示已超过 24 小时，应直接走网络。 */
+export interface CacheHit<T> {
+  /** find | installed | detail */
+  kind: string;
+  /** 由 Rust 侧统一计算的 key，前端只用于排查 */
+  key: string;
+  value: T;
+  savedAtMs: number;
+  ageMs: number;
+  expired: boolean;
+}
+
+/** 缓存概览（设置页展示） */
+export interface CacheStat {
+  path: string;
+  entries: number;
+  bytes: number;
+  oldestMs: number | null;
+  newestMs: number | null;
+  /** 有效期（毫秒），当前为 24 小时 */
+  ttlMs: number;
+  maxEntries: number;
+  maxBytes: number;
+}
+
+/** 清理结果：removed=false 表示本来就没有缓存文件 */
+export interface ClearCacheReport {
+  removed: boolean;
+  path: string;
+}
+
 export interface SessionStatus {
   loggedIn: boolean;
   cookieCount: number;

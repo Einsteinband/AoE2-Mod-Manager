@@ -15,6 +15,14 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import { openModWebpage } from "../online/service";
 import { localizedTagName } from "../online/types";
 import { translateBackendMessage } from "../format";
+import {
+  customNameOf,
+  displayTitle,
+  isFavorite,
+  setCustomName,
+  setFavorite,
+} from "../userData";
+import RenameDialog from "./RenameDialog.vue";
 
 const props = defineProps<{
   mod: ModEntry;
@@ -45,6 +53,49 @@ const deleting = ref(false);
 const deleteError = ref<string | null>(null);
 const openingWeb = ref(false);
 const webError = ref<string | null>(null);
+
+// v0.5：收藏 / 备注名（只和 WorkshopID 绑定，改完立即落盘 + 局部 Patch，不重扫）
+const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
+const favorited = computed(() => isFavorite(props.mod.workshopId));
+const customName = computed(() => customNameOf(props.mod.workshopId));
+const favBusy = ref(false);
+const favError = ref<string | null>(null);
+const renameOpen = ref(false);
+const renameBusy = ref(false);
+const renameError = ref<string | null>(null);
+
+async function toggleFavorite() {
+  if (!canFavorite.value || favBusy.value) return;
+  favBusy.value = true;
+  favError.value = null;
+  try {
+    await setFavorite(props.mod.workshopId, !favorited.value);
+  } catch (e) {
+    favError.value = errorText(e, "favorites.failSave");
+  } finally {
+    favBusy.value = false;
+  }
+}
+
+function openRename() {
+  if (!canFavorite.value) return;
+  renameError.value = null;
+  renameOpen.value = true;
+}
+
+async function applyRename(name: string) {
+  if (renameBusy.value) return;
+  renameBusy.value = true;
+  renameError.value = null;
+  try {
+    await setCustomName(props.mod.workshopId, name);
+    renameOpen.value = false;
+  } catch (e) {
+    renameError.value = errorText(e, "favorites.failSave");
+  } finally {
+    renameBusy.value = false;
+  }
+}
 
 const hasUpdate = computed(() => props.updateInfo?.hasUpdate === true);
 /** 服务端 vs 本地的时间对比文案（接口没给时间时只说“检测到新版本”） */
@@ -164,6 +215,8 @@ watch(
     toggleError.value = null;
     confirmOpen.value = false;
     deleteError.value = null;
+    favError.value = null;
+    renameOpen.value = false;
   },
 );
 </script>
@@ -184,7 +237,39 @@ watch(
       {{ t("detail.coverMissingDetail") }}
     </div>
 
-    <h3 class="detail-title">{{ mod.displayName }}</h3>
+    <h3 class="detail-title">{{ displayTitle(mod.workshopId, mod.displayName) }}</h3>
+    <div v-if="customName" class="detail-title-orig">
+      {{ t("favorites.originalTitle") }}: {{ mod.displayName }}
+    </div>
+
+    <!-- v0.5：收藏 / 备注名 -->
+    <div class="fav-row">
+      <button
+        type="button"
+        class="fav-btn"
+        :class="{ active: favorited }"
+        :disabled="!canFavorite || favBusy"
+        :title="canFavorite ? t('favorites.favoriteTitle') : t('favorites.noId')"
+        @click="toggleFavorite"
+      >
+        <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
+        {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
+      </button>
+      <button
+        type="button"
+        class="fav-btn"
+        :disabled="!canFavorite || renameBusy"
+        :title="canFavorite ? t('favorites.renameTitle') : t('favorites.noId')"
+        @click="openRename"
+      >
+        <span class="fav-star">📝</span>
+        {{ t("favorites.rename") }}
+      </button>
+      <span v-if="!canFavorite" class="note" style="margin: 0">{{ t("favorites.noId") }}</span>
+    </div>
+    <div v-if="favError" class="path-actions">
+      <span class="path-error">{{ favError }}</span>
+    </div>
 
     <div class="detail-badges">
       <span class="badge" :class="mod.enabled === null ? 'warn' : ''">{{ statusLabel(mod.enabled) }}</span>
@@ -351,6 +436,17 @@ watch(
       </ul>
     </div>
   </div>
+
+  <!-- v0.5：备注名弹窗 -->
+  <RenameDialog
+    v-if="renameOpen"
+    :original="mod.displayName"
+    :initial="customName"
+    :busy="renameBusy"
+    :error="renameError"
+    @save="applyRename"
+    @cancel="renameOpen = false"
+  />
 
   <!-- 二次确认：按来源给出不同后果的提示（羊皮纸浮层，不阻塞主线程） -->
   <ConfirmDialog

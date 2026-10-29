@@ -14,6 +14,7 @@ import { appVersion, checkUpdate, openExternalUrl, setLocale } from "../api";
 import { translateBackendMessage } from "../format";
 import { applyLocale, LOCALE_OPTIONS, type Locale } from "../i18n";
 import { getNetworkSettings, setNetworkSettings } from "../online/service";
+import { clearOnlineCache, onlineCacheStat } from "../online/cache";
 import {
   canCheck as modCanCheck,
   checking as modChecking,
@@ -23,7 +24,7 @@ import {
   resumeCooldown as resumeModCooldown,
   runModUpdateCheck,
 } from "../modUpdates";
-import type { NetworkSettingsView } from "../online/types";
+import type { CacheStat, NetworkSettingsView } from "../online/types";
 import type { UpdateInfo } from "../types";
 
 const emit = defineEmits<{ close: [] }>();
@@ -208,6 +209,60 @@ const netError = ref<string | null>(null);
 const netMessage = ref<string | null>(null);
 const netLoading = ref(false);
 
+// ---------------- 网络：在线数据缓存（v0.6） ----------------
+
+const cacheStat = ref<CacheStat | null>(null);
+const cacheBusy = ref(false);
+const cacheMessage = ref<string | null>(null);
+const cacheError = ref<string | null>(null);
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+/** 缓存概览文案：0 条时明确说“暂无缓存”，别显示 “0 条记录 · 0 B” 这种噪声 */
+const cacheStatusText = computed(() => {
+  const stat = cacheStat.value;
+  if (!stat) return t("cache.reading");
+  if (stat.entries <= 0) return t("cache.empty");
+  return t("cache.stat", { n: stat.entries, size: formatBytes(stat.bytes) });
+});
+
+async function loadCacheStat() {
+  try {
+    cacheStat.value = await onlineCacheStat();
+  } catch {
+    cacheStat.value = null;
+  }
+}
+
+/** 清理：Rust 直接删 online_cache.json，完成后重读概览 */
+async function doClearCache() {
+  if (cacheBusy.value) return;
+  cacheBusy.value = true;
+  cacheError.value = null;
+  cacheMessage.value = null;
+  try {
+    const before = cacheStat.value?.entries ?? 0;
+    const report = await clearOnlineCache();
+    cacheMessage.value =
+      report.removed && before > 0 ? t("cache.cleared", { n: before }) : t("cache.clearedEmpty");
+    await loadCacheStat();
+  } catch (e) {
+    cacheError.value = t("cache.error", { msg: describe(e) });
+  } finally {
+    cacheBusy.value = false;
+  }
+}
+
 /** 折叠面板里那句“当前走哪条链路” */
 const netSummary = computed(() => {
   const view = netView.value;
@@ -279,6 +334,7 @@ function onKeydown(event: KeyboardEvent) {
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   void loadNetwork();
+  void loadCacheStat();
   try {
     version.value = await appVersion();
   } catch {
@@ -463,6 +519,30 @@ onBeforeUnmount(() => {
             <p class="settings-hint">{{ t("settings.networkNote") }}</p>
             <div v-if="netError" class="settings-msg error">{{ netError }}</div>
             <div v-else-if="netMessage" class="settings-msg">{{ netMessage }}</div>
+
+            <!-- v0.6：在线数据缓存（SWR）清理入口 -->
+            <div class="settings-sep"></div>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("cache.sectionTitle") }}</span>
+                <span class="row-note">{{ cacheStatusText }}</span>
+              </div>
+              <button
+                type="button"
+                class="settings-check"
+                :disabled="cacheBusy"
+                :title="t('cache.clearButton')"
+                @click="doClearCache"
+              >
+                <span v-if="cacheBusy" class="spinner"></span>
+                {{ cacheBusy ? t("cache.clearing") : t("cache.clearButton") }}
+              </button>
+            </div>
+
+            <p class="settings-hint">{{ t("cache.note") }}</p>
+            <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
+            <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
           </section>
 
           <!-- 关于 -->

@@ -493,6 +493,9 @@ select {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* v0.9：封面图是懒加载的，高度回流会被浏览器的滚动锚定“修正”，
+     表现为滚动条自己乱弹。关掉锚定，位置只由我们自己的逻辑恢复。 */
+  overflow-anchor: none;
   padding: 6px 18px 26px;
 }
 .card-grid {

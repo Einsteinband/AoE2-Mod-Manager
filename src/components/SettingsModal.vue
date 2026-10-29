@@ -24,7 +24,7 @@ import {
   resumeCooldown as resumeModCooldown,
   runModUpdateCheck,
 } from "../modUpdates";
-import type { CacheStat, NetworkSettingsView } from "../online/types";
+import type { CacheOverview, NetworkSettingsView } from "../online/types";
 import type { UpdateInfo } from "../types";
 
 const emit = defineEmits<{ close: [] }>();
@@ -211,7 +211,7 @@ const netLoading = ref(false);
 
 // ---------------- 网络：在线数据缓存（v0.6） ----------------
 
-const cacheStat = ref<CacheStat | null>(null);
+const cacheStat = ref<CacheOverview | null>(null);
 const cacheBusy = ref(false);
 const cacheMessage = ref<string | null>(null);
 const cacheError = ref<string | null>(null);
@@ -228,12 +228,17 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
-/** 缓存概览文案：0 条时明确说“暂无缓存”，别显示 “0 条记录 · 0 B” 这种噪声 */
+/** 缓存概览文案：JSON 记录 + 封面图分开报，0 条时明确说“暂无缓存” */
 const cacheStatusText = computed(() => {
   const stat = cacheStat.value;
   if (!stat) return t("cache.reading");
-  if (stat.entries <= 0) return t("cache.empty");
-  return t("cache.stat", { n: stat.entries, size: formatBytes(stat.bytes) });
+  if (stat.entries <= 0 && stat.imageEntries <= 0) return t("cache.empty");
+  const json = t("cache.stat", { n: stat.entries, size: formatBytes(stat.bytes) });
+  const images = t("cache.imageLine", {
+    n: stat.imageEntries,
+    size: formatBytes(stat.imageBytes),
+  });
+  return `${json} · ${images}`;
 });
 
 async function loadCacheStat() {
@@ -244,17 +249,18 @@ async function loadCacheStat() {
   }
 }
 
-/** 清理：Rust 直接删 online_cache.json，完成后重读概览 */
+/** 清理：Rust 同时删 online_cache.json 与 image_cache，完成后重读概览 */
 async function doClearCache() {
   if (cacheBusy.value) return;
   cacheBusy.value = true;
   cacheError.value = null;
   cacheMessage.value = null;
   try {
-    const before = cacheStat.value?.entries ?? 0;
     const report = await clearOnlineCache();
-    cacheMessage.value =
-      report.removed && before > 0 ? t("cache.cleared", { n: before }) : t("cache.clearedEmpty");
+    const removed = report.entriesRemoved > 0 || report.imagesRemoved > 0 || report.removed;
+    cacheMessage.value = removed
+      ? t("cache.cleared", { n: report.entriesRemoved, images: report.imagesRemoved })
+      : t("cache.clearedEmpty");
     await loadCacheStat();
   } catch (e) {
     cacheError.value = t("cache.error", { msg: describe(e) });

@@ -434,7 +434,7 @@ fn collect_entry(
     parent_warnings: &mut Vec<String>,
 ) -> ModEntry {
     let mut issues: Vec<String> = Vec::new();
-    let (workshop_id, name_from_folder) = split_folder_name(folder_name);
+    let (folder_id, name_from_folder) = split_folder_name(folder_name);
 
     let info_read = read_info_json(dir);
     if info_read.info.is_none() {
@@ -460,7 +460,16 @@ fn collect_entry(
     };
 
     // 分类优先级：软件自己的元数据（官方 Tag） > 本地特征兜底扫描
-    let recorded = metadata::lookup(meta, workshop_id, folder_name);
+    let recorded = metadata::lookup(meta, folder_id, folder_name);
+    // local 模组的目录名不带 `{id}_` 前缀（防止游戏反向同步订阅），
+    // WorkshopID 只能从软件自己的元数据补回来，否则详情页/删除会当成“无 ID 的本地模组”
+    let workshop_id = folder_id
+        .filter(|id| *id > 0)
+        .or_else(|| {
+            recorded
+                .and_then(|m| u64::try_from(m.mod_id).ok())
+                .filter(|id| *id > 0)
+        });
     let metadata_recorded = recorded.is_some();
     let official_tags: Vec<String> = recorded.map(metadata::display_tags).unwrap_or_default();
     let official_categories: Vec<String> = recorded
@@ -653,8 +662,16 @@ pub fn installed_index(root: &Path, meta: &Store) -> Vec<InstalledIndexEntry> {
                 continue;
             }
             let (workshop_id, _) = split_folder_name(&name);
-            let Some(id) = workshop_id.filter(|id| *id > 0) else { continue };
-            let recorded = metadata::lookup(meta, workshop_id, &name).is_some();
+            let recorded = metadata::lookup(meta, workshop_id, &name);
+            // local 模组的目录名不带 `{id}_`（防止游戏反向同步订阅），
+            // WorkshopID 只能从软件自己的元数据补回，否则在线页会把它当成未安装
+            let id = workshop_id.filter(|id| *id > 0).or_else(|| {
+                recorded
+                    .and_then(|m| u64::try_from(m.mod_id).ok())
+                    .filter(|id| *id > 0)
+            });
+            let Some(id) = id else { continue };
+            let recorded = recorded.is_some();
             out.push(InstalledIndexEntry {
                 workshop_id: id,
                 kind: kind.to_string(),

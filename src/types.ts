@@ -166,3 +166,48 @@ export interface PriorityOutcome {
 
 export type StatusFilter = "all" | "enabled" | "disabled" | "unknown";
 export type SortKey = "name" | "updated" | "priority" | "folder";
+
+/** v0.4：GitHub 最新 Release 的检测结果（Rust 侧已比对好版本号） */
+export interface UpdateInfo {
+  /** 当前运行版本，如 0.1.1 */
+  currentVersion: string;
+  /** 服务器最新版本（已去掉前缀 v），如 0.2.0 */
+  latestVersion: string;
+  /** latestVersion 是否高于 currentVersion */
+  hasUpdate: boolean;
+  /** Release 页面地址（https://github.com/...） */
+  releaseUrl: string;
+  releaseName: string | null;
+  publishedAt: string | null;
+  /** 更新说明（后端已截断） */
+  notes: string | null;
+}
+
+// ---------------- v0.4：本地模组批量更新检测 ----------------
+
+/** 单个本地模组的版本比对结果（Rust 侧用 /Installed 分页批量得出） */
+export interface ModUpdateItem {
+  /** 与 ModEntry.id 一致：local:文件夹 / subscribed:文件夹 */
+  entryId: string;
+  /** 官方 WorkshopID（工具安装的模组也能拿到，来自 mod_metadata.json） */
+  modId: number;
+  folderName: string;
+  hasUpdate: boolean;
+  /** 本地 mod-status.json 里的 LastUpdate（毫秒） */
+  localLastUpdateMs: number | null;
+  /** 服务端 lastUpdate（已统一换算成毫秒；接口未提供时为 null） */
+  serverLastUpdateMs: number | null;
+  /** 服务端没返回这个模组（本地独有 / 未订阅） */
+  unknown: boolean;
+}
+
+export interface ModUpdateReport {
+  checkedAtMs: number;
+  totalLocal: number;
+  updateCount: number;
+  unknownCount: number;
+  serverTotal: number | null;
+  /** 实际请求了几页（每页 50 条） */
+  pages: number;
+  items: ModUpdateItem[];
+}

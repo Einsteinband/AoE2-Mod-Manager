@@ -243,40 +243,30 @@ select {
   gap: 8px;
 }
 
-/* 语言切换：羊皮纸风下拉，永远钉在顶栏最右侧一列（在线模式下搜索/工具栏消失也不移位） */
-.lang-switch {
+/* 设置入口：齿轮按钮，永远钉在顶栏最右侧一列（在线模式下搜索/工具栏消失也不移位） */
+.settings-entry {
   grid-column: 5;
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 6px 2px 9px;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 32px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: #0f0c08;
-}
-.lang-switch .glyph {
-  font-size: 12px;
-  line-height: 1;
-  opacity: 0.75;
-  pointer-events: none;
-}
-.lang-switch select {
-  padding: 5px 4px 5px 0;
-  border: none;
-  background: transparent;
-  font-family: var(--serif);
-  font-size: 12px;
-  letter-spacing: 0.6px;
   color: var(--parch-dim);
-  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  box-shadow: none;
 }
-.lang-switch select:hover {
+.settings-entry:hover {
   color: var(--gold-bright);
-}
-.lang-switch option {
+  border-color: var(--gold-dim);
   background: #171310;
-  color: var(--parch);
+}
+.settings-entry:active {
+  transform: rotate(35deg);
+  transition: transform 0.12s ease-out;
 }
 
 /* ---------- 路径条 ---------- */
@@ -1580,6 +1570,93 @@ button.delete-btn:disabled {
 .app-toast.error {
   border-color: rgba(180, 85, 63, 0.75);
   color: #e7bfb2;
+}
+
+/* v0.4：详情页“发现新版本”面板（红金配色，与卡片角标一致） */
+.update-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(180, 69, 59, 0.7);
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(120, 40, 32, 0.35), rgba(40, 18, 14, 0.55));
+  box-shadow: inset 0 0 0 1px rgba(240, 211, 200, 0.08);
+}
+.update-panel-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.update-panel-text strong {
+  font-family: var(--serif);
+  font-size: 12px;
+  letter-spacing: 0.6px;
+  color: #f3cdc4;
+}
+.update-panel-text .note {
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.update-btn {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-family: var(--serif);
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+.update-btn:disabled {
+  opacity: 0.6;
+}
+
+/* 启动更新提示：可点击 + 可关闭，叠在普通 toast 上方，避免两条互相遮挡 */
+.app-toast.update-toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px 9px 12px;
+  border-color: var(--gold);
+  background: linear-gradient(180deg, #2b2113, #1a1409);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(201, 162, 77, 0.18);
+}
+.app-toast.update-toast.stacked {
+  bottom: 78px;
+}
+.update-toast-body {
+  flex: 1 1 auto;
+  max-width: 300px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--gold-bright);
+  font-family: var(--serif);
+  font-size: 12px;
+  line-height: 1.55;
+  letter-spacing: 0.4px;
+  text-align: left;
+  cursor: pointer;
+}
+.update-toast-body:hover {
+  color: #f7e6bd;
+  background: transparent;
+  text-decoration: underline;
+}
+.update-toast-x {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+.update-toast-x:hover {
+  color: var(--gold);
+  background: transparent;
 }
 @keyframes app-toast-in {
   from {

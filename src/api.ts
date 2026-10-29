@@ -6,16 +6,43 @@ import type {
   DeleteReport,
   InstalledIndexEntry,
   ModStats,
+  ModUpdateReport,
   Preset,
   PriorityOutcome,
   PresetItem,
   RootCandidate,
   ScanReport,
   ToggleOutcome,
+  UpdateInfo,
 } from "./types";
 
 export function getSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("get_settings");
+}
+
+// ---- v0.4：软件更新检测 ----
+
+/** 当前软件版本（编译期 CARGO_PKG_VERSION，唯一来源 tauri.conf.json） */
+export function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}
+
+/**
+ * 检查 GitHub 最新 Release。
+ * 走 Rust（ureq）而不是前端 fetch：这样能复用用户设置的手动代理。
+ * 返回 hasUpdate 为 true 时，releaseUrl 是可以直接交给系统浏览器打开的页面。
+ */
+export function checkUpdate(): Promise<UpdateInfo> {
+  return invoke<UpdateInfo>("check_update");
+}
+
+/**
+ * 批量检查本地模组是否有新版本。
+ * 后端只用官方 /Installed（每页 50 条）翻页比对，绝不逐个请求 Detail，
+ * 需要已登录《帝国时代》账号。
+ */
+export function checkModUpdates(): Promise<ModUpdateReport> {
+  return invoke<ModUpdateReport>("check_mod_updates");
 }
 
 /** 保存界面语言（en / zh；空字符串 = 跟随系统） */

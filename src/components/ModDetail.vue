@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { ModEntry, ModStats } from "../types";
+import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, revealModFolder, toggleModEnabled } from "../api";
 import {
   formatBytes,
@@ -21,11 +21,16 @@ const props = defineProps<{
   stats: ModStats | null;
   statsLoading: boolean;
   statsError: string | null;
+  /** v0.4：批量更新检测结果（null = 未检测 / 服务端没这个模组） */
+  updateInfo?: ModUpdateItem | null;
+  /** 正在覆盖安装 */
+  updating?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: "toggled", payload: { enabled: boolean }): void;
   (e: "removed", payload: { id: string }): void;
+  (e: "update"): void;
 }>();
 
 const { t } = useI18n();
@@ -40,6 +45,18 @@ const deleting = ref(false);
 const deleteError = ref<string | null>(null);
 const openingWeb = ref(false);
 const webError = ref<string | null>(null);
+
+const hasUpdate = computed(() => props.updateInfo?.hasUpdate === true);
+/** 服务端 vs 本地的时间对比文案（接口没给时间时只说“检测到新版本”） */
+const updateTimeNote = computed(() => {
+  const info = props.updateInfo;
+  if (!info) return "";
+  if (!info.serverLastUpdateMs || !info.localLastUpdateMs) return t("detail.updateNoTime");
+  return t("detail.updateTimes", {
+    server: formatDateTime(info.serverLastUpdateMs),
+    local: formatDateTime(info.localLastUpdateMs),
+  });
+});
 
 /** 确认弹窗文案：三态分别说清楚删完会发生什么 */
 const confirmBody = computed(() => {
@@ -199,6 +216,22 @@ watch(
         </template>
       </span>
     </div>
+    <div v-if="hasUpdate" class="update-panel">
+      <div class="update-panel-text">
+        <strong>{{ t("detail.updateTitle") }}</strong>
+        <span class="note" style="margin: 0">{{ updateTimeNote }}</span>
+      </div>
+      <button
+        type="button"
+        class="primary update-btn"
+        :disabled="updating || deleting || toggling"
+        :title="t('detail.updateTitle')"
+        @click="emit('update')"
+      >
+        {{ updating ? t("detail.updating") : t("detail.updateNow") }}
+      </button>
+    </div>
+
     <div class="field">
       <span class="k">{{ t("detail.enabledState") }}</span>
       <span class="v toggle-row">

@@ -12,6 +12,8 @@ const props = defineProps<{
   order?: number;
   /** 排序模式：卡片可拖拽（光标与边框变化） */
   sortable?: boolean;
+  /** v0.4：服务端版本比本地新（右上角红底白字 [可更新]） */
+  hasUpdate?: boolean;
 }>();
 const emit = defineEmits<{ (event: "select", mod: ModEntry): void }>();
 
@@ -48,6 +50,9 @@ const statusClass = computed(() => {
       <div v-else class="placeholder">{{ initials(mod.displayName) }}</div>
       <span v-if="!coverUrl" class="no-cover">{{ t("card.noCover") }}</span>
       <span v-if="order !== undefined" class="order-badge" :title="`#${order}`">{{ order }}</span>
+      <span v-if="hasUpdate" class="update-badge" :title="t('card.updateBadgeHint')">
+        {{ t("card.updateBadge") }}
+      </span>
       <span class="source-badge" :class="mod.source" :title="sourceHint(mod.source)">
         {{ sourceLabel(mod.source) }}
       </span>
@@ -77,6 +82,26 @@ const statusClass = computed(() => {
 </template>
 
 <style scoped>
+/* v0.4：右上角「可更新」角标。排序模式的序号在左上，两者互不遮挡 */
+.update-badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  padding: 1px 6px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  line-height: 1.5;
+  border-radius: 3px;
+  border: 1px solid #f0d3c8;
+  background: linear-gradient(180deg, #b4453b, #8f2f28);
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* 卡片左上角来源角标：羊皮纸底 + 金框（本工具）/ 蓝框（官方）/ 朴素灰（未知） */
 .source-badge {
   position: absolute;

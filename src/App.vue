@@ -6,8 +6,10 @@ import ConfirmDialog from "./components/ConfirmDialog.vue";
 import FirstRunWizard from "./components/FirstRunWizard.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
 import PresetManager from "./components/PresetManager.vue";
+import SettingsModal from "./components/SettingsModal.vue";
 import { useI18n } from "vue-i18n";
 import {
+  checkUpdate,
   detectRootCandidates,
   getSettings,
   modStats,
@@ -20,7 +22,9 @@ import {
 } from "./api";
 import { attachDragSort, type DragEndPayload } from "./dragSort";
 import { formatDateTime, translateBackendMessage } from "./format";
-import { applyLocale, detectSystemLocale, LOCALE_OPTIONS, normalizeLocale, type Locale } from "./i18n";
+import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
+import { installMod } from "./online/service";
+import { itemsById, markUpdated, updateIds } from "./modUpdates";
 import { TAG_ZH, SORT_OPTIONS, localizedTagName } from "./online/types";
 import type { ModEntry, ModStats, ScanReport, SortKey, SourceFilter, StatusFilter } from "./types";
 
@@ -34,23 +38,12 @@ const onlineOrder = ref<"DESC" | "ASC">("DESC");
 const onlineRef = ref<InstanceType<typeof OnlineBrowser> | null>(null);
 
 const { t, locale } = useI18n();
-const localeOptions = LOCALE_OPTIONS;
-const currentLocale = computed<Locale>(() => String(locale.value));
+/** 当前界面语言（语言切换本身已迁到 SettingsModal，这里只用于排序区域） */
+const currentLocale = computed(() => String(locale.value));
 /** 排序/比较用的区域：中文按拼音，其他语言直接用自己的语言代码 */
 const collationLocale = computed(() =>
   currentLocale.value === "zh" ? "zh-Hans-CN" : currentLocale.value,
 );
-
-/** 切换界面语言：立即生效，再写回 settings.json（写失败只报错，不回滚 UI） */
-async function changeLocale(event: Event) {
-  const next = (event.target as HTMLSelectElement).value as Locale;
-  applyLocale(next);
-  try {
-    await persistLocale(next);
-  } catch (e) {
-    error.value = normalizeError(e);
-  }
-}
 
 const report = ref<ScanReport | null>(null);
 const loading = ref(false);
@@ -78,6 +71,12 @@ let presetApplying = false;
 const choosingRoot = ref(false);
 /** 首次启动引导：没有可用根目录时自动弹出 */
 const showWizard = ref(false);
+/** v0.4 独立设置弹窗（语言 / 网络 / 关于） */
+const showSettings = ref(false);
+/** 启动时检查到的版本更新提示（右下角常驻，可点击跳转、可手动关闭） */
+const updateNotice = ref<{ version: string; url: string } | null>(null);
+/** v0.4：正在覆盖安装的模组（ModEntry.id），用于禁用详情页按钮 */
+const updatingEntryId = ref<string | null>(null);
 
 const mods = computed<ModEntry[]>(() => report.value?.mods ?? []);
 const warnings = computed<string[]>(() => report.value?.warnings ?? []);
@@ -307,6 +306,58 @@ async function openAuthorPage() {
   }
 }
 
+/**
+ * v0.4：把本地模组覆盖安装到服务端最新版。
+ * 直接复用现有的 online_install 管线（下载 → 解压 → 原子更换 → 写 mod-status.json）；
+ * force=true 表示目标目录已存在时也允许覆盖（旧目录会先备份，不直接删）。
+ * 分类 Tag 不回传，由 Rust 从 mod_metadata.json 里沿用上次安装记录。
+ */
+async function handleUpdateMod(mod: ModEntry) {
+  const modId = mod.workshopId ?? 0;
+  if (modId <= 0 || updatingEntryId.value) return;
+  if (sortMode.value && sortDirty.value) {
+    showToast(t("sort.unsavedBlock"), "error");
+    return;
+  }
+  updatingEntryId.value = mod.id;
+  try {
+    await installMod(modId, mod.displayName, true);
+    markUpdated(mod.id);
+    showToast(t("update.modDoneToast"));
+    await refresh();
+  } catch (e) {
+    showToast(normalizeError(e), "error");
+  } finally {
+    updatingEntryId.value = null;
+  }
+}
+
+/**
+ * 启动时只跑一次版本检查（不轮询、不重试）。
+ * 失败静默：没网 / GitHub 限流不应该在界面上刷错误，用户仍可到设置里手动点“检查更新”。
+ */
+async function runStartupUpdateCheck() {
+  try {
+    const info = await checkUpdate();
+    if (!info.hasUpdate) return;
+    updateNotice.value = { version: info.latestVersion, url: info.releaseUrl };
+  } catch {
+    /* 静默失败 */
+  }
+}
+
+/** 点击右下角提示：拉系统浏览器到 Release 页面（不在 WebView 里跳转） */
+async function openUpdatePage() {
+  const url = updateNotice.value?.url;
+  if (!url) return;
+  try {
+    await openExternalUrl(url);
+    updateNotice.value = null;
+  } catch (e) {
+    showToast(normalizeError(e), "error");
+  }
+}
+
 function compareByPriority(a: ModEntry, b: ModEntry): number {
   const collator = new Intl.Collator(collationLocale.value, { numeric: true, sensitivity: "base" });
   const av = a.priority ?? Number.MAX_SAFE_INTEGER;
@@ -516,6 +567,8 @@ watch(
 );
 
 onMounted(async () => {
+  // 启动即检查一次新版本（只此一次，失败静默）
+  void runStartupUpdateCheck();
   try {
     candidates.value = (await detectRootCandidates()).map((c) => c.path);
     const settings = await getSettings();
@@ -784,19 +837,16 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <div class="lang-switch">
-        <span class="glyph">🌐</span>
-        <select
-          :value="currentLocale"
-          :title="t('lang.label')"
-          :aria-label="t('lang.label')"
-          @change="changeLocale"
-        >
-          <option v-for="option in localeOptions" :key="option.value" :value="option.value">
-            {{ option.label }}
-          </option>
-        </select>
-      </div>
+      <!-- v0.4：语言切换已迁入设置弹窗，顶栏只保留齿轮入口（占原语言下拉那一列） -->
+      <button
+        type="button"
+        class="settings-entry"
+        :title="t('settings.open')"
+        :aria-label="t('settings.open')"
+        @click="showSettings = true"
+      >
+        ⚙
+      </button>
     </header>
 
     <div class="rootbar">
@@ -1032,6 +1082,7 @@ onBeforeUnmount(() => {
                 :mod="mod"
                 :active="mod.id === selectedId"
                 :order="index + 1"
+                :has-update="updateIds.has(mod.id)"
                 sortable
                 @select="selectMod"
               />
@@ -1045,6 +1096,7 @@ onBeforeUnmount(() => {
                   :key="mod.id"
                   :mod="mod"
                   :active="mod.id === selectedId"
+                  :has-update="updateIds.has(mod.id)"
                   @select="selectMod"
                 />
               </div>
@@ -1075,6 +1127,7 @@ onBeforeUnmount(() => {
               :key="mod.id"
               :mod="mod"
               :active="mod.id === selectedId"
+              :has-update="updateIds.has(mod.id)"
               @select="selectMod"
             />
           </div>
@@ -1088,8 +1141,11 @@ onBeforeUnmount(() => {
           :stats="stats"
           :stats-loading="statsLoading"
           :stats-error="statsError"
+          :update-info="itemsById.get(selected.id) ?? null"
+          :updating="updatingEntryId === selected.id"
           @toggled="handleToggle"
           @removed="handleRemoved"
+          @update="handleUpdateMod(selected)"
         />
         <div v-else class="detail-empty">
           {{ t("state.detailEmpty") }}<br />
@@ -1137,7 +1193,26 @@ onBeforeUnmount(() => {
       @cancel="showDiscardConfirm = false"
     />
 
+    <!-- v0.4：独立设置弹窗（通用 / 网络 / 关于） -->
+    <SettingsModal v-if="showSettings" @close="showSettings = false" />
+
     <!-- 轻量提示（排序已保存等）：固定右下角，不挤压布局 -->
     <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
+
+    <!-- 启动时发现新版本：右下角常驻提示，点击跳 GitHub Release -->
+    <div v-if="updateNotice" class="app-toast update-toast" :class="{ stacked: !!toast }">
+      <button type="button" class="update-toast-body" @click="openUpdatePage">
+        🎉 {{ t("update.available", { version: updateNotice.version }) }}
+      </button>
+      <button
+        type="button"
+        class="update-toast-x"
+        :title="t('update.dismiss')"
+        :aria-label="t('update.dismiss')"
+        @click="updateNotice = null"
+      >
+        ✕
+      </button>
+    </div>
   </div>
 </template>

@@ -274,19 +274,25 @@ pub struct ModSelector {
     pub path: String,
 }
 
-/// 一条记录是否命中（双路匹配：WorkshopID 相等 或 Path 归一化后相等）
+/// 一条记录是否命中（双路匹配：Path 归一化后相等 优先，其次 WorkshopID 相等）。
+///
+/// Path 优先：local 模组的 WorkshopID 为 0，而旧记录可能仍带着真实 ID，
+/// 先比 Path 才不会误碰其它记录。
 fn matches_parts(record: &Value, workshop_id: Option<u64>, path: &str) -> bool {
-    if let (Some(a), Some(b)) = (workshop_id, record.get("WorkshopID").and_then(as_u64)) {
-        if a == b {
-            return true;
-        }
-    }
     let record_path = record
         .get("Path")
         .and_then(|p| p.as_str())
         .map(normalize_key)
         .unwrap_or_default();
-    !path.trim().is_empty() && !record_path.is_empty() && normalize_key(path) == record_path
+    if !path.trim().is_empty() && !record_path.is_empty() && normalize_key(path) == record_path {
+        return true;
+    }
+    if let (Some(a), Some(b)) = (workshop_id, record.get("WorkshopID").and_then(as_u64)) {
+        if a == b {
+            return true;
+        }
+    }
+    false
 }
 
 fn matches(record: &Value, sel: &ModSelector) -> bool {
@@ -589,13 +595,47 @@ pub struct LocalizeOutcome {
     pub path_updated: bool,
     /// 原来没有记录、本次新建了一条
     pub record_added: bool,
+    /// 是否把 WorkshopID 置为 0（local 模组必须为 0）
+    pub workshop_id_cleared: bool,
     /// Unsub 里是否有该 WorkshopID 被清掉
     pub unsub_cleared: bool,
     pub total_enabled_after: usize,
 }
 
+/// 覆盖安装成功后刷新某条记录的 `LastUpdate`（毫秒字符串）。
+///
+/// 为什么不揉进 `localize_record`：那个函数的“已就位就不动文件”行为已经被测试固定下来，
+/// 这里单独做一次事务性写入，工具自己的更新检测靠它判断“已经是最新”，
+/// 否则刚更新完的模组会被再次误报为可更新。
+pub fn touch_last_update(
+    status_path: &Path,
+    backup_dir: &Path,
+    sel: &ModSelector,
+    skip_process_check: bool,
+) -> Result<bool, String> {
+    let (_, changed) = update_status(status_path, backup_dir, skip_process_check, |root| {
+        let mods = mods_array_mut(root)?;
+        let Some(index) = mods.iter().position(|record| matches(record, sel)) else {
+            return Ok((false, false));
+        };
+        let Some(obj) = mods[index].as_object_mut() else {
+            return Ok((false, false));
+        };
+        let now = now_ms().to_string();
+        if obj.get("LastUpdate").and_then(|v| v.as_str()) == Some(now.as_str()) {
+            return Ok((false, false));
+        }
+        obj.insert("LastUpdate".to_string(), Value::String(now));
+        Ok((true, true))
+    })?;
+    Ok(changed)
+}
+
 /// 把某条记录的 Path 改成 `local//<folder>`（并置为启用），同时清掉 `Unsub` 里的残留 WorkshopID。
 /// 记录不存在时按游戏格式新建一条（CheckSum 写 "0"，游戏启动后自行补齐）。
+///
+/// **local 记录的 WorkshopID 一律写 0**：带着真实 ID 的 local 记录会被游戏当成
+/// workshop 模组，在启动时反向同步成“已订阅”。
 pub fn localize_record(
     status_path: &Path,
     backup_dir: &Path,
@@ -607,6 +647,7 @@ pub fn localize_record(
     let new_path = format!("local//{}", folder_name.trim());
     let mut path_updated = false;
     let mut record_added = false;
+    let mut workshop_id_cleared = false;
     let mut unsub_cleared = false;
 
     let (outcome, ()) = update_status(status_path, backup_dir, skip_process_check, |root| {
@@ -619,7 +660,8 @@ pub fn localize_record(
                         record.get("Path").and_then(|p| p.as_str()) == Some(new_path.as_str());
                     let enabled =
                         record.get("Enabled").and_then(|v| v.as_bool()) == Some(true);
-                    if !same_path || !enabled {
+                    let id_zeroed = record.get("WorkshopID").and_then(as_u64) == Some(0);
+                    if !same_path || !enabled || !id_zeroed {
                         if let Some(obj) = record.as_object_mut() {
                             if !same_path {
                                 obj.insert("Path".to_string(), Value::String(new_path.clone()));
@@ -627,6 +669,10 @@ pub fn localize_record(
                             }
                             if !enabled {
                                 obj.insert("Enabled".to_string(), Value::Bool(true));
+                            }
+                            if !id_zeroed {
+                                obj.insert("WorkshopID".to_string(), Value::from(0));
+                                workshop_id_cleared = true;
                             }
                         }
                     }
@@ -641,7 +687,7 @@ pub fn localize_record(
                         "Priority": 1,
                         "PublishID": 0,
                         "Title": title.trim(),
-                        "WorkshopID": sel.workshop_id.unwrap_or(0),
+                        "WorkshopID": 0,
                     }));
                 }
             }
@@ -656,7 +702,10 @@ pub fn localize_record(
             }
         }
 
-        Ok(((), path_updated || record_added || unsub_cleared))
+        Ok((
+            (),
+            path_updated || record_added || workshop_id_cleared || unsub_cleared,
+        ))
     })?;
 
     Ok(LocalizeOutcome {
@@ -664,6 +713,7 @@ pub fn localize_record(
         backup_path: outcome.backup_path,
         path_updated,
         record_added,
+        workshop_id_cleared,
         unsub_cleared,
         total_enabled_after: outcome.total_enabled_after,
     })
@@ -1420,18 +1470,24 @@ mod tests {
 
         let sel = ModSelector {
             workshop_id: Some(20505),
-            path: "subscribed//20505_A".to_string(),
+            path: "local//A".to_string(),
         };
-        let out = localize_record(&status, &dir.join("backups"), &sel, "20505_A", "A", true).unwrap();
+        let out = localize_record(&status, &dir.join("backups"), &sel, "A", "A", true).unwrap();
         assert!(out.path_updated);
         assert!(!out.record_added);
+        assert!(out.workshop_id_cleared, "local 记录的 WorkshopID 必须置 0");
         assert!(out.unsub_cleared);
 
         let value: Value = serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
         let mods = value["Mods"].as_array().unwrap();
         assert_eq!(mods.len(), 1);
-        assert_eq!(mods[0]["Path"], Value::String("local//20505_A".to_string()));
+        assert_eq!(mods[0]["Path"], Value::String("local//A".to_string()));
         assert_eq!(mods[0]["Enabled"], Value::Bool(true));
+        assert_eq!(
+            mods[0]["WorkshopID"],
+            serde_json::json!(0),
+            "local 记录的 WorkshopID 必须为 0（否则游戏会反向同步为订阅）"
+        );
         assert_eq!(
             mods[0]["CheckSum"],
             Value::String("12".to_string()),
@@ -1440,23 +1496,25 @@ mod tests {
         assert_eq!(value["Unsub"], serde_json::json!(["999"]), "只清掉自己的 ID");
 
         // 已就位后再跑：不动文件
-        let again = localize_record(&status, &dir.join("backups"), &sel, "20505_A", "A", true).unwrap();
-        assert!(!again.path_updated && !again.record_added && !again.unsub_cleared);
+        let again = localize_record(&status, &dir.join("backups"), &sel, "A", "A", true).unwrap();
+        assert!(
+            !again.path_updated && !again.record_added && !again.workshop_id_cleared && !again.unsub_cleared
+        );
         assert!(again.backup_path.is_none());
 
-        // 记录不存在（游戏把它清了）：按游戏格式新建一条
+        // 记录不存在（游戏把它清了）：按游戏格式新建一条，WorkshopID 写 0
         let sel2 = ModSelector {
             workshop_id: Some(4242),
-            path: "subscribed//4242_B".to_string(),
+            path: "local//B".to_string(),
         };
-        let added = localize_record(&status, &dir.join("backups"), &sel2, "4242_B", "B", true).unwrap();
+        let added = localize_record(&status, &dir.join("backups"), &sel2, "B", "B", true).unwrap();
         assert!(added.record_added);
         let value: Value = serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
         let hit = value["Mods"].as_array().unwrap()
             .iter()
-            .find(|r| r["WorkshopID"] == serde_json::json!(4242))
+            .find(|r| r["Path"] == serde_json::json!("local//B"))
             .unwrap();
-        assert_eq!(hit["Path"], Value::String("local//4242_B".to_string()));
+        assert_eq!(hit["WorkshopID"], serde_json::json!(0));
         assert_eq!(hit["Enabled"], Value::Bool(true));
         assert_eq!(hit["CheckSum"], Value::String("0".to_string()));
 

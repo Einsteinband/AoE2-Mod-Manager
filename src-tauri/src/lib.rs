@@ -7,12 +7,14 @@ mod download;
 mod install;
 mod metadata;
 mod models;
+mod modupdate;
 mod net;
 mod presets;
 mod online;
 mod scan;
 mod secure;
 mod settings;
+mod update;
 
 use online::api::ApiClient;
 use online::ApiFailure;
@@ -87,6 +89,91 @@ fn set_locale(app: tauri::AppHandle, locale: String) -> Result<String, String> {
     Ok(normalized)
 }
 
+// ---------------- v0.4：软件更新检测（GitHub Releases） ----------------
+
+/// 当前版本号（编译期常量；前端「关于」页与更新提示都用它，避免前端硬编码）
+#[tauri::command]
+fn app_version() -> String {
+    update::current_version()
+}
+
+/// 检查更新：代理链路与在线接口保持一致（手动 > 系统 > 环境变量 > 直连），
+/// 因此用户设了手动代理时 GitHub 也能通；请求本身匿名，不需要登录态。
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<update::UpdateInfo, String> {
+    let settings = settings::load_for_app(&app);
+    let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
+        .map_err(|e| format!("网络配置无效：{e}"))?;
+    let proxy = net::ureq_proxy(&resolved).map_err(|e| format!("代理配置无效：{e}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || update::fetch_latest(proxy))
+        .await
+        .map_err(|e| format!("更新检查线程异常：{e}"))?
+}
+// ---------------- v0.4：本地模组批量更新检测 ----------------
+
+/// 批量检查本地模组是否有新版本。
+///
+/// 只用官方 `/Installed`（每页 50 条，最多 20 页），**绝不逐个请求 Detail**；
+/// 比对全部在 Rust 内存里完成，返回的 items 带 hasUpdate / unknown 标记。
+#[tauri::command]
+async fn check_mod_updates(app: tauri::AppHandle) -> Result<modupdate::ModUpdateReport, ApiFailure> {
+    let root = mod_root(&app)?;
+    let store = metadata::load_for_app(&app);
+    let client = client(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<modupdate::ModUpdateReport, ApiFailure> {
+        let locals = modupdate::local_mods(&root, &store);
+        if locals.is_empty() {
+            return Ok(modupdate::build_report(
+                &locals,
+                &std::collections::HashMap::new(),
+                None,
+                0,
+            ));
+        }
+
+        let mut server: std::collections::HashMap<i64, modupdate::ServerMod> =
+            std::collections::HashMap::new();
+        let mut server_total: Option<i64> = None;
+        let mut pages = 0usize;
+        let mut start: i64 = 1;
+
+        while pages < modupdate::MAX_PAGES {
+            let page = client.installed(start, modupdate::PAGE_SIZE)?;
+            pages += 1;
+            if server_total.is_none() {
+                server_total = page.total_count;
+            }
+            if page.items.is_empty() {
+                break;
+            }
+            modupdate::collect_page(&page, &mut server);
+
+            // 本机模组全部命中就提前收工，少发请求
+            if locals.iter().all(|local| server.contains_key(&local.mod_id)) {
+                break;
+            }
+            start += modupdate::PAGE_SIZE;
+            if let Some(total) = server_total {
+                if start > total {
+                    break;
+                }
+            }
+        }
+
+        log::info!(
+            target: "modupdate",
+            "批量更新检测完成：本地 {} 个，服务端已订阅 {:?}，请求 {} 页",
+            locals.len(),
+            server_total,
+            pages
+        );
+        Ok(modupdate::build_report(&locals, &server, server_total, pages))
+    })
+    .await
+    .map_err(|e| ApiFailure::new("internal", format!("批量检查任务失败：{e}"), None))?
+}
 /// 首次启动引导用：本机真实存在、含 local/subscribed 的候选路径（只有路径）
 #[tauri::command]
 fn candidate_roots() -> Vec<String> {
@@ -656,6 +743,9 @@ fn write_final_status(
             title,
             skip_process_check,
         )?;
+        // 覆盖安装后刷新 LastUpdate：工具自己的「批量更新检测」靠它判断是否已是最新，
+        // 否则刚更新完的模组会因为本地时间戳仍是旧的而被再次误报为可更新
+        let _ = presets::touch_last_update(status_path, backup_dir, &sel, skip_process_check);
         let mut parts: Vec<String> = Vec::new();
         if o.record_added {
             parts.push("已新建 local// 记录并置为启用".to_string());
@@ -663,6 +753,9 @@ fn write_final_status(
             parts.push("已把记录 Path 改为 local// 并置为启用".to_string());
         } else {
             parts.push("local// 记录已是最新状态".to_string());
+        }
+        if o.workshop_id_cleared {
+            parts.push("已把该记录的 WorkshopID 置 0（游戏不会再把它反向同步为订阅）".to_string());
         }
         if o.unsub_cleared {
             parts.push("已从 Unsub 列表移除该 WorkshopID".to_string());
@@ -709,9 +802,24 @@ async fn online_install(
     let client = client(&app)?;
     CANCEL_FLAG.store(false, Ordering::SeqCst);
     // 归属判断只看软件自己的元数据：早先装过 = 更新，从未记录 = 外来目录
-    let owned_before = metadata::load_for_app(&app)
-        .mods
-        .contains_key(&mod_id.to_string());
+    let stored_meta = metadata::load_for_app(&app);
+    let owned_before = stored_meta.mods.contains_key(&mod_id.to_string());
+    // 「更新到最新版」只传 modId / title：分类信息缺失时沿用上次安装记录，
+    // 否则会把已有的官方 Tag 覆盖成空，分类与徽章一起丢失
+    let stored = stored_meta.mods.get(&mod_id.to_string());
+    let title = if title.trim().is_empty() {
+        stored.map(|m| m.title.clone()).unwrap_or(title)
+    } else {
+        title
+    };
+    let tag_ids = match tag_ids {
+        Some(list) if !list.is_empty() => Some(list),
+        _ => stored.map(|m| m.tag_ids.clone()).filter(|list| !list.is_empty()),
+    };
+    let tag_names = match tag_names {
+        Some(list) if !list.is_empty() => Some(list),
+        _ => stored.map(|m| m.tag_names.clone()).filter(|list| !list.is_empty()),
+    };
 
     let cookie_ok = client;
     let app_for_task = app.clone();
@@ -819,16 +927,29 @@ async fn online_install(
         // ⑤ 最终形态：移交 local/（失败则保留在 subscribed，照常登记，模组仍然可用）
         let mut localized = false;
         let mut final_dir = report.target_dir.clone();
+        let mut final_folder = folder_name.clone();
         let mut final_path = install::status_rel_path("subscribed", &folder_name);
         let mut localize_note = String::new();
         let mut localize_target: Option<install::LocalizeTarget> = None;
-        match install::resolve_localize_target(&root_for_task, mod_id, Some(&folder_name)) {
+        match install::resolve_localize_target(
+            &root_for_task,
+            mod_id,
+            Some(&folder_name),
+            owned_before || force,
+        ) {
             Ok(target) => match install::move_to_local(&target) {
-                Ok(()) => {
+                Ok(backup) => {
                     localized = true;
                     final_dir = target.to.display().to_string();
-                    final_path = install::status_rel_path("local", &target.folder_name);
+                    final_folder = target.folder_name.clone();
+                    final_path = install::status_rel_path("local", &final_folder);
                     localize_target = Some(target);
+                    if let Some(backup) = backup {
+                        localize_note = format!(
+                            "local 下的同名旧目录已备份为 {}（未删除）",
+                            backup.display()
+                        );
+                    }
                     log::info!(target: "install", "modId={mod_id} 已转入本地目录：{final_dir}");
                 }
                 Err(e) => {
@@ -851,7 +972,7 @@ async fn online_install(
             &backup_dir,
             mod_id,
             &title,
-            &folder_name,
+            &final_folder,
             localized,
             false,
         ) {
@@ -860,10 +981,11 @@ async fn online_install(
                 log::error!(target: "install", "modId={mod_id} 写 mod-status.json 失败：{e}");
                 // 回滚：已 move 就把目录挪回 subscribed，保证“文件位置”与“记录 Path”一致
                 let rollback_note = if let Some(target) = localize_target.as_ref() {
-                    match install::move_dir(&target.to, &target.from) {
+                    match install::revert_localize(target) {
                         Ok(()) => {
                             localized = false;
                             final_dir = target.from.display().to_string();
+                            final_folder = folder_name.clone();
                             final_path = install::status_rel_path("subscribed", &folder_name);
                             "已把目录挪回 subscribed".to_string()
                         }
@@ -877,7 +999,7 @@ async fn online_install(
                     &backup_dir,
                     mod_id,
                     &title,
-                    &folder_name,
+                    &final_folder,
                     false,
                     false,
                 ) {
@@ -904,10 +1026,10 @@ async fn online_install(
             title: title.clone(),
             tag_ids: tag_ids.unwrap_or_default(),
             tag_names: tag_names.unwrap_or_default(),
-            folder_name: if folder_name.is_empty() {
+            folder_name: if final_folder.is_empty() {
                 None
             } else {
-                Some(folder_name.clone())
+                Some(final_folder.clone())
             },
             installed_at_ms: scan::now_ms(),
             source: "api.ageofempires.com".to_string(),
@@ -929,7 +1051,12 @@ async fn online_install(
             assets.message.clone(),
         ];
         if localized {
-            note_parts.push("已移入 local 目录并置为启用，可直接在游戏内启用".to_string());
+            note_parts.push(format!(
+                "已移入 local/{final_folder} 并置为启用（目录已去掉 ID 前缀、WorkshopID=0，游戏不会再把它反向同步为订阅）"
+            ));
+            if !localize_note.is_empty() {
+                note_parts.push(localize_note.clone());
+            }
         } else {
             note_parts.push(localize_note.clone());
         }
@@ -1418,6 +1545,9 @@ pub fn run() {
             ui_log,
             get_settings,
             set_locale,
+            app_version,
+            check_update,
+            check_mod_updates,
             candidate_roots,
             detect_root_candidates,
             scan_mods,

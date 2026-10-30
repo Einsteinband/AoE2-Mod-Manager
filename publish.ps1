@@ -1,32 +1,69 @@
-# publish.ps1
-# ×Ô¶¯¶ÁÈ¡ package.json µÄ°æ±¾ºÅ£¬´ò Tag£¬ÍÆËÍ£¬²¢ÉÏ´«±¾µØ°üµ½ GitHub Release
+ï»¿# publish.ps1
+# è‡ªåŠ¨è¯»å– package.json çš„ç‰ˆæœ¬å·ï¼Œæ‰“ Tagã€æ¨é€ï¼Œå¹¶ä¸Šä¼ æœ¬åœ°å®‰è£…åŒ…åˆ° GitHub Releaseã€‚
 
 $ErrorActionPreference = "Stop"
-$version = (Get-Content package.json | ConvertFrom-Json).version
+
+$version = (Get-Content "package.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
 $tag = "v$version"
 
-Write-Host "×¼±¸·¢²¼°æ±¾: $tag" -ForegroundColor Cyan
+Write-Host "å‡†å¤‡å‘å¸ƒç‰ˆæœ¬: $tag" -ForegroundColor Cyan
 
-# 1. ×Ô¶¯ĞŞ¸Ä°æ±¾ºÅ£¿ÕâÀï¼ÙÉèÄãÒÑ¾­ÊÖ¶¯¸ÄÁË°æ±¾ºÅ²¢´ò°üºÃÁË¡£
-# Èç¹ûÄãÏë°Ñ¸Ä°æ±¾ºÅºÍ´ò°üÒ²×Ô¶¯»¯£¬¿ÉÒÔÔÚÕâÀï¼Ó¡£
+# ---- 0. å®šä½ gh cliï¼ˆPATH é‡Œæ²¡æœ‰æ—¶ç”¨é»˜è®¤å®‰è£…è·¯å¾„å…œåº•ï¼‰----
+$gh = $null
+$cmd = Get-Command gh -ErrorAction SilentlyContinue
+if ($cmd) {
+  $gh = $cmd.Source
+} elseif (Test-Path "C:\Program Files\GitHub CLI\gh.exe") {
+  $gh = "C:\Program Files\GitHub CLI\gh.exe"
+}
+if (-not $gh) { throw "æ‰¾ä¸åˆ° gh cliï¼Œè¯·å®‰è£… GitHub CLI æˆ–æŠŠ gh.exe åŠ å…¥ PATHã€‚" }
+Write-Host "ä½¿ç”¨ gh: $gh" -ForegroundColor DarkGray
 
-# 2. Git Ìá½»Óë´ò±êÇ©
-Write-Host "ÕıÔÚÌá½»´úÂë²¢´ò±êÇ©..." -ForegroundColor Yellow
+# ---- 1. Git æäº¤ä¸æ‰“æ ‡ç­¾ ----
+Write-Host "æ­£åœ¨æäº¤ä»£ç å¹¶æ‰“æ ‡ç­¾..." -ForegroundColor Yellow
 git add .
-git commit -m "chore: release $tag"
-git tag $tag
-git push origin main
-git push origin $tag
+git diff --cached --quiet
+if ($LASTEXITCODE -ne 0) {
+  git commit -m "chore: release $tag"
+  if ($LASTEXITCODE -ne 0) { throw "git commit å¤±è´¥ (exit $LASTEXITCODE)" }
+} else {
+  Write-Host "æ²¡æœ‰éœ€è¦æäº¤çš„æ”¹åŠ¨ï¼Œè·³è¿‡ commitã€‚" -ForegroundColor DarkGray
+}
 
-# 3. µ÷ÓÃ gh cli ÉÏ´«±¾µØ°ü
+$existingTag = git tag --list $tag
+if ([string]::IsNullOrWhiteSpace($existingTag)) {
+  git tag $tag
+  if ($LASTEXITCODE -ne 0) { throw "git tag å¤±è´¥ (exit $LASTEXITCODE)" }
+} else {
+  Write-Host "æ ‡ç­¾ $tag å·²å­˜åœ¨ï¼Œè·³è¿‡ tagã€‚" -ForegroundColor DarkGray
+}
+
+git push origin main
+if ($LASTEXITCODE -ne 0) { throw "git push main å¤±è´¥ (exit $LASTEXITCODE)" }
+git push origin $tag
+if ($LASTEXITCODE -ne 0) { throw "git push tag å¤±è´¥ (exit $LASTEXITCODE)" }
+
+# ---- 2. ç”¨ gh cli ä¸Šä¼ å®‰è£…åŒ… ----
 $nsisPath = "src-tauri\target\release\bundle\nsis\AoE2 Mod Manager_${version}_x64-setup.exe"
 $portablePath = "dist-portable\AoE2ModManager-${version}-win-x64-portable.zip"
 
-Write-Host "ÕıÔÚ´´½¨ GitHub Release ²¢ÉÏ´«±¾µØÎÄ¼ş..." -ForegroundColor Yellow
-gh release create $tag `
+foreach ($f in @($nsisPath, $portablePath)) {
+  if (-not (Test-Path -LiteralPath $f)) { throw "å‘å¸ƒèµ„äº§ä¸å­˜åœ¨: $f" }
+}
+
+$notesFile = "RELEASE_NOTES.md"
+if (Test-Path -LiteralPath $notesFile) {
+  $notesArgs = @("--notes-file", $notesFile)
+} else {
+  $notesArgs = @("--notes", "Release $tag. Please download the assets below.")
+}
+
+Write-Host "æ­£åœ¨åˆ›å»º GitHub Release å¹¶ä¸Šä¼ å®‰è£…æ–‡ä»¶..." -ForegroundColor Yellow
+& $gh release create $tag `
   $nsisPath `
   $portablePath `
   --title "$tag" `
-  --notes "Release $tag. Please download the assets below."
+  @notesArgs
+if ($LASTEXITCODE -ne 0) { throw "gh release create å¤±è´¥ (exit $LASTEXITCODE)" }
 
-Write-Host "·¢²¼Íê³É£¡" -ForegroundColor Green
+Write-Host "å‘å¸ƒå®Œæˆï¼" -ForegroundColor Green

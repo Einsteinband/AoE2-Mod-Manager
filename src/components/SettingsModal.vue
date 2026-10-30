@@ -8,12 +8,23 @@
  *
  * 15 秒冷却：lastCheckMs 放在模块作用域，关掉弹窗再打开也绕不过去。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { appVersion, checkUpdate, openExternalUrl, setLocale } from "../api";
 import { translateBackendMessage } from "../format";
 import { applyLocale, LOCALE_OPTIONS, type Locale } from "../i18n";
 import { getNetworkSettings, setNetworkSettings } from "../online/service";
+import {
+  getTranslateSettings,
+  setTranslateSettings,
+  translationCacheClear,
+  translationCacheStat,
+} from "../online/service";
+import {
+  applyTranslateSettings,
+  languageName,
+  resetTranslations,
+} from "../online/translation";
 import { clearOnlineCache, onlineCacheStat } from "../online/cache";
 import {
   canCheck as modCanCheck,
@@ -24,13 +35,13 @@ import {
   resumeCooldown as resumeModCooldown,
   runModUpdateCheck,
 } from "../modUpdates";
-import type { CacheOverview, NetworkSettingsView } from "../online/types";
+import type { CacheOverview, NetworkSettingsView, TranslateSettingsView, TranslationCacheStat } from "../online/types";
 import type { UpdateInfo } from "../types";
 
 const emit = defineEmits<{ close: [] }>();
 const { t, locale } = useI18n();
 
-type Tab = "general" | "network" | "about";
+type Tab = "general" | "network" | "translate" | "about";
 const tab = ref<Tab>("general");
 
 const REPO_URL = "https://github.com/Einsteinband/AoE2-Mod-Manager";
@@ -331,6 +342,188 @@ async function saveNetwork() {
   }
 }
 
+// ---------------- 翻译（目标语言 / 引擎 / 缓存） ----------------
+
+const translateView = ref<TranslateSettingsView | null>(null);
+const translateLoading = ref(false);
+const translateSaving = ref(false);
+const translateError = ref<string | null>(null);
+const translateMessage = ref<string | null>(null);
+
+/** 下拉框的值："" = 跟随界面语言 */
+const targetChoice = ref("");
+const engineChoice = ref("auto");
+const customUrl = ref("");
+/** 只输入新 key；留空 = 不修改已保存的 key */
+const customKey = ref("");
+
+const translationCache = ref<TranslationCacheStat | null>(null);
+const translationCacheBusy = ref(false);
+const translationCacheMessage = ref<string | null>(null);
+const translationCacheError = ref<string | null>(null);
+
+const supportedLangs = computed<string[]>(
+  () => translateView.value?.supportedLanguages ?? ["zh-cn", "zh-tw", "en", "ja", "ko", "ru", "fr", "de", "es"],
+);
+
+/** 当前实际生效的语言名（跟随模式会随 UI 语言提示） */
+const effectiveTargetLabel = computed(() =>
+  languageName(translateView.value?.resolvedLanguage ?? "zh-cn"),
+);
+
+/** 下拉候选：Rust 预设列表 + 已保存但不在预设里的自定义值（防止回显成空白项） */
+const targetOptions = computed<string[]>(() => {
+  const list = [...supportedLangs.value];
+  const saved = (translateView.value?.targetLanguage ?? "").trim();
+  if (saved && !list.includes(saved)) list.push(saved);
+  return list;
+});
+
+/** 上一次**成功落盘**的值：切换失败时用它把下拉框退回去 */
+const savedTargetChoice = ref("");
+const savedEngineChoice = ref("auto");
+
+/** 两个下拉框的 DOM 引用：Vue 只在 ref 变化时回写 value，回退时需要显式对齐 */
+const targetSelect = ref<HTMLSelectElement | null>(null);
+const engineSelect = ref<HTMLSelectElement | null>(null);
+
+function syncSelectDom() {
+  if (targetSelect.value) targetSelect.value.value = targetChoice.value;
+  if (engineSelect.value) engineSelect.value.value = engineChoice.value;
+}
+
+const translationCacheText = computed(() => {
+  const stat = translationCache.value;
+  if (!stat) return t("translateCache.reading");
+  if (stat.entries <= 0) return t("translateCache.empty");
+  const langs = stat.byLanguage
+    .map((item) => `${languageName(item.lang)} ${item.count}`)
+    .join(" · ");
+  return t("translateCache.stat", {
+    n: stat.entries,
+    mods: stat.mods,
+    size: formatBytes(stat.bytes),
+    langs,
+  });
+});
+
+function pickSelect(event: Event): string {
+  return (event.target as HTMLSelectElement).value;
+}
+
+async function loadTranslate() {
+  translateLoading.value = true;
+  translateError.value = null;
+  try {
+    const view = await getTranslateSettings();
+    translateView.value = view;
+    targetChoice.value = view.targetLanguage;
+    engineChoice.value = view.provider;
+    savedTargetChoice.value = view.targetLanguage;
+    savedEngineChoice.value = view.provider;
+    customUrl.value = view.customUrl ?? "";
+    customKey.value = "";
+  } catch (e) {
+    translateError.value = describe(e);
+  } finally {
+    translateLoading.value = false;
+  }
+}
+
+/**
+ * 保存并**立即生效**：解析出具体语言、清空预热，列表会自己重新接缓存。
+ * 返回 true = 已落盘；false = 失败（调用方负责把下拉框退回旧值）。
+ */
+async function saveTranslate(): Promise<boolean> {
+  if (translateSaving.value) return false;
+  translateSaving.value = true;
+  translateError.value = null;
+  translateMessage.value = null;
+  try {
+    const view = await setTranslateSettings({
+      targetLanguage: targetChoice.value,
+      provider: engineChoice.value,
+      customUrl: customUrl.value.trim() || null,
+      customKey: customKey.value.trim() || null,
+    });
+    translateView.value = view;
+    targetChoice.value = view.targetLanguage;
+    engineChoice.value = view.provider;
+    savedTargetChoice.value = view.targetLanguage;
+    savedEngineChoice.value = view.provider;
+    customKey.value = "";
+    // 全局状态：立即更新 targetLang + langEpoch++，详情页/列表按钮文案同步刷新
+    applyTranslateSettings(view, String(locale.value));
+    translateMessage.value = t("settings.translateSaved");
+    return true;
+  } catch (e) {
+    translateError.value = describe(e);
+    return false;
+  } finally {
+    translateSaving.value = false;
+  }
+}
+
+/**
+ * 下拉框**即时保存**：改完立刻落盘 + 同步全局状态。
+ * 失败（写盘异常 / 后端拒绝）→ 把两个下拉框都退回上次成功的值，界面与磁盘保持一致。
+ */
+async function commitTranslate(pick: "target" | "engine", next: string) {
+  // 上一次保存还没回来：忽略这次切换，并把下拉框的 DOM 值退回当前状态
+  if (translateSaving.value) {
+    syncSelectDom();
+    return;
+  }
+  if (pick === "target") targetChoice.value = next;
+  else engineChoice.value = next;
+  const prevTarget = savedTargetChoice.value;
+  const prevEngine = savedEngineChoice.value;
+  const ok = await saveTranslate();
+  if (ok) return;
+  // 回退：下拉框回到上一次成功保存的值，并在下方显示错误
+  targetChoice.value = prevTarget;
+  engineChoice.value = prevEngine;
+  await nextTick();
+  syncSelectDom();
+  translateError.value = t("favorites.failSave", { msg: translateError.value ?? "" });
+}
+
+function onTargetChange(event: Event) {
+  void commitTranslate("target", pickSelect(event));
+}
+
+function onEngineChange(event: Event) {
+  void commitTranslate("engine", pickSelect(event));
+}
+
+async function loadTranslationCache() {
+  try {
+    translationCache.value = await translationCacheStat();
+  } catch {
+    translationCache.value = null;
+  }
+}
+
+async function doClearTranslationCache() {
+  if (translationCacheBusy.value) return;
+  translationCacheBusy.value = true;
+  translationCacheError.value = null;
+  translationCacheMessage.value = null;
+  try {
+    const report = await translationCacheClear();
+    translationCacheMessage.value = report.removed
+      ? t("translateCache.cleared", { n: report.entriesRemoved })
+      : t("translateCache.clearedEmpty");
+    // 内存里的译文也要清，否则卡片还显示已删除的译文
+    resetTranslations();
+    await loadTranslationCache();
+  } catch (e) {
+    translationCacheError.value = t("translateCache.error", { msg: describe(e) });
+  } finally {
+    translationCacheBusy.value = false;
+  }
+}
+
 // ---------------- 生命周期 ----------------
 
 function onKeydown(event: KeyboardEvent) {
@@ -341,6 +534,8 @@ onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
   void loadNetwork();
   void loadCacheStat();
+  void loadTranslate();
+  void loadTranslationCache();
   try {
     version.value = await appVersion();
   } catch {
@@ -389,6 +584,14 @@ onBeforeUnmount(() => {
             @click="tab = 'network'"
           >
             🌐 {{ t("settings.tabNetwork") }}
+          </button>
+          <button
+            type="button"
+            class="settings-tab"
+            :class="{ active: tab === 'translate' }"
+            @click="tab = 'translate'"
+          >
+            🈯 {{ t("settings.tabTranslate") }}
           </button>
           <button
             type="button"
@@ -549,6 +752,109 @@ onBeforeUnmount(() => {
             <p class="settings-hint">{{ t("cache.note") }}</p>
             <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
             <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
+          </section>
+
+          <!-- 翻译 -->
+          <section v-else-if="tab === 'translate'" class="settings-card">
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("settings.translateTarget") }}</span>
+                <span class="row-note">{{ t("settings.translateTargetNote", { lang: effectiveTargetLabel }) }}</span>
+              </div>
+              <select
+                ref="targetSelect"
+                class="settings-select"
+                :value="targetChoice"
+                :disabled="translateLoading || translateSaving"
+                :aria-label="t('settings.translateTarget')"
+                @change="onTargetChange"
+              >
+                <option value="">
+                  {{ t("settings.translateFollowUi", { lang: effectiveTargetLabel }) }}
+                </option>
+                <option v-for="code in targetOptions" :key="code" :value="code">
+                  {{ languageName(code) }}
+                </option>
+              </select>
+            </div>
+
+            <div class="settings-sep"></div>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("settings.translateEngine") }}</span>
+                <span class="row-note">{{ t("settings.translateEngineNote") }}</span>
+              </div>
+              <select
+                ref="engineSelect"
+                class="settings-select"
+                :value="engineChoice"
+                :disabled="translateLoading || translateSaving"
+                :aria-label="t('settings.translateEngine')"
+                @change="onEngineChange"
+              >
+                <option value="auto">{{ t("settings.translateEngineAuto") }}</option>
+                <option value="google">Google</option>
+                <option value="mymemory">MyMemory</option>
+                <option value="custom">{{ t("settings.translateEngineCustom") }}</option>
+              </select>
+            </div>
+
+            <template v-if="engineChoice === 'custom'">
+              <input
+                v-model="customUrl"
+                class="settings-input"
+                type="text"
+                placeholder="https://api.example.com/translate"
+                spellcheck="false"
+                :disabled="translateSaving"
+              />
+              <input
+                v-model="customKey"
+                class="settings-input"
+                type="password"
+                :placeholder="
+                  translateView?.customKeySet ? t('settings.translateCustomKeyKept') : t('settings.translateCustomKey')
+                "
+                spellcheck="false"
+                autocomplete="off"
+                :disabled="translateSaving"
+              />
+              <p class="settings-hint">{{ t("settings.translateCustomDev") }}</p>
+            </template>
+
+            <div class="settings-actions">
+              <button type="button" :disabled="translateSaving || translateLoading" @click="saveTranslate">
+                {{ translateSaving ? t("online.saving") : t("online.save") }}
+              </button>
+            </div>
+            <p class="settings-hint">{{ t("settings.translateAutoSave") }}</p>
+
+            <div v-if="translateError" class="settings-msg error">{{ translateError }}</div>
+            <div v-else-if="translateMessage" class="settings-msg">{{ translateMessage }}</div>
+
+            <div class="settings-sep"></div>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("translateCache.sectionTitle") }}</span>
+                <span class="row-note">{{ translationCacheText }}</span>
+              </div>
+              <button
+                type="button"
+                class="settings-check"
+                :disabled="translationCacheBusy"
+                :title="t('translateCache.clearButton')"
+                @click="doClearTranslationCache"
+              >
+                <span v-if="translationCacheBusy" class="spinner"></span>
+                {{ translationCacheBusy ? t("translateCache.clearing") : t("translateCache.clearButton") }}
+              </button>
+            </div>
+
+            <p class="settings-hint">{{ t("translateCache.note") }}</p>
+            <div v-if="translationCacheError" class="settings-msg error">{{ translationCacheError }}</div>
+            <div v-else-if="translationCacheMessage" class="settings-msg">{{ translationCacheMessage }}</div>
           </section>
 
           <!-- 关于 -->

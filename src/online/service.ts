@@ -9,6 +9,10 @@ import type {
   ModTag,
   NetworkSettingsView,
   SessionStatus,
+  TranslateSettingsView,
+  Translation,
+  TranslationCacheStat,
+  TranslationClearReport,
   UninstallReport,
 } from "./types";
 
@@ -165,6 +169,96 @@ export function uninstallMod(
 /** 用系统默认浏览器打开 https://www.ageofempires.com/mods/details/{modId}/ */
 export function openModWebpage(modId: number): Promise<string> {
   return invoke<string>("open_mod_webpage", { modId });
+}
+
+/**
+ * 一键翻译（模组标题 + 描述 → 目标语言）。
+ *
+ * - `targetLang` 由前端状态层统一传入（小写：zh-cn / ja …），Rust 会给设置兼底；
+ * - `description` 请传**已纯文本化**的描述（前端 `plainText()` 的结果），
+ *   Rust 侧用它算 originalHash，作者改名/改描述后会自动重译；
+ * - 失败返回 ApiFailure（kind: network / quota / blocked / busy / not_ready / parse …）。
+ */
+export function translateModText(
+  modId: number,
+  title: string,
+  description: string,
+  targetLang: string,
+): Promise<Translation> {
+  return tracked(
+    invoke<Translation>("translate_mod_text", { modId, title, description, targetLang }),
+  );
+}
+
+/**
+ * **只读**译文缓存（绝不发网络，也不写盘）。
+ *
+ * 本地模组详情页打开时用它判断能不能直接显示译文：
+ * 命中则秒开（在线页/上次会话翻过），返回 null 才需要用户自己点「翻译」。
+ * 因此这个函数刻意**不走 tracked()** —— 它根本不算一次网络请求。
+ */
+export function cachedTranslation(
+  modId: number,
+  title: string,
+  description: string,
+  targetLang: string,
+): Promise<Translation | null> {
+  return invoke<Translation | null>("translation_cached", {
+    modId,
+    title,
+    description,
+    targetLang,
+  });
+}
+
+export interface TranslationProbe {
+  modId: number;
+  title: string;
+  description: string;
+  /** 不传则回到设置/界面语言 */
+  targetLang?: string;
+}
+
+/**
+ * **批量**只读译文缓存（同样零网络）。
+ *
+ * 列表渲染后一次调用把整页的译文标题接回来 —— 重启软件不会变回原文，
+ * 也不用为每张卡片发一次 invoke。
+ */
+export function cachedTranslations(items: TranslationProbe[]): Promise<Translation[]> {
+  return invoke<Translation[]>("translations_cached", { items });
+}
+
+// ---------------- 设置页「翻译」页签 ----------------
+
+export function getTranslateSettings(): Promise<TranslateSettingsView> {
+  return invoke<TranslateSettingsView>("get_translate_settings");
+}
+
+/**
+ * 保存翻译设置。`targetLanguage` 传空串 = 跟随界面语言；
+ * `customKey` 传空串表示“不修改已保存的 key”。
+ */
+export function setTranslateSettings(params: {
+  targetLanguage: string;
+  provider: string;
+  customUrl: string | null;
+  customKey?: string | null;
+}): Promise<TranslateSettingsView> {
+  return invoke<TranslateSettingsView>("set_translate_settings", {
+    targetLanguage: params.targetLanguage,
+    provider: params.provider,
+    customUrl: params.customUrl,
+    customKey: params.customKey ?? null,
+  });
+}
+
+export function translationCacheStat(): Promise<TranslationCacheStat> {
+  return invoke<TranslationCacheStat>("translation_cache_stat");
+}
+
+export function translationCacheClear(): Promise<TranslationClearReport> {
+  return invoke<TranslationClearReport>("translation_cache_clear");
 }
 
 export function onDownloadProgress(

@@ -143,10 +143,27 @@ pub struct Settings {
     /// 界面语言："en" | "zh"；空字符串 = 尚未选择（前端按系统语言推断后回写）
     #[serde(default)]
     pub locale: String,
+    /// 翻译目标语言（小写：zh-cn / zh-tw / en / ja / ru …）；空字符串 = 跟随界面语言
+    #[serde(default)]
+    pub target_language: String,
+    /// 翻译引擎：auto（默认）| google | mymemory | custom
+    /// （custom 只落库，当前版本仍走 auto）
+    #[serde(default = "default_translate_provider")]
+    pub translate_provider: String,
+    /// 自定义翻译接口地址（预留，开发中）
+    #[serde(default)]
+    pub translate_custom_url: Option<String>,
+    /// 自定义翻译接口的 Key（预留，开发中；只存不读）
+    #[serde(default)]
+    pub translate_custom_key: Option<String>,
 }
 
 fn default_proxy_mode() -> String {
     crate::net::MODE_SYSTEM.to_string()
+}
+
+fn default_translate_provider() -> String {
+    "auto".to_string()
 }
 
 fn default_true() -> bool {
@@ -162,6 +179,10 @@ impl Default for Settings {
             proxy_url: None,
             remember_login: true,
             locale: String::new(),
+            target_language: String::new(),
+            translate_provider: default_translate_provider(),
+            translate_custom_url: None,
+            translate_custom_key: None,
         }
     }
 }

@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { OnlineMod } from "../online/types";
 import { initials } from "../format";
 import { customNameOf, displayTitle, isFavorite } from "../userData";
+import { translatedTitleOf } from "../online/translation";
 
 /** 在线模组卡片：与本地 ModCard 共用 style.css 的 .mod-card / .card-* 类，
  *  宽高比、字号、内边距、Badge 位置全部保持一致（不另写一套尺寸）。 */
@@ -41,8 +42,13 @@ function onImageError() {
 }
 
 // v0.5：备注名优先做主标题，副标题小字回显官方标题
-const title = computed(() => displayTitle(props.mod.modId, props.mod.title));
+// v0.2.4：没备注名时，手动翻译过的模组优先显示中文标题（未翻译就原样显示，绝不自动请求）
 const custom = computed(() => customNameOf(props.mod.modId));
+const translated = computed(() => translatedTitleOf(props.mod.modId));
+/** 标题优先级：备注名 > 中文译文 > 官方原标题 */
+const title = computed(() => displayTitle(props.mod.modId, translated.value ?? props.mod.title));
+/** 副标题只服务于备注名（📝）；译文不再叠英文原名 */
+const sub = computed(() => (custom.value ? props.mod.title : null));
 const favorited = computed(() => isFavorite(props.mod.modId));
 
 function formatCount(n: number | null): string {
@@ -69,7 +75,7 @@ function formatCount(n: number | null): string {
     </div>
     <div class="card-body">
       <div class="card-title" :title="title">{{ title }}</div>
-      <div v-if="custom" class="card-sub" :title="mod.title">📝 {{ mod.title }}</div>
+      <div v-if="sub" class="card-sub" :title="mod.title">📝 {{ mod.title }}</div>
       <div class="card-meta">
         <span v-if="mod.updateAvailable" class="badge warn">{{ t("online.cardUpdate") }}</span>
         <span v-else-if="mod.userInstalled" class="badge sub">{{ t("online.cardSubscribed") }}</span>

@@ -183,3 +183,13 @@ Not affiliated with Microsoft, Xbox Game Studios or Forgotten Empires. Age of Em
 If this tool has helped you, consider buying me a coffee! Your support keeps the project alive.
 
 [![Sponsor](https://img.shields.io/badge/Sponsor_Afdian-☕-orange)](https://afdian.com/a/Einsteinband)
+
+---
+
+## License & Commercial Use
+
+This project is licensed under the **PolyForm Noncommercial License 1.0.0**. 
+You are free to use, modify, and share this software for personal, non-commercial purposes. 
+**Any commercial use (including selling this software, integrating it into paid products, or using it for commercial services) is strictly prohibited.** 
+
+Copyright (c) 2026 Einsteinband. All rights reserved.

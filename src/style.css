@@ -1799,6 +1799,42 @@ body.sort-dragging * {
   line-height: 1;
 }
 
+/* ---------- v0.2.4：详情页「一键翻译」按钮行（与收藏/备注名同一套金色描边语言） ---------- */
+.translate-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 10px;
+}
+.translate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  letter-spacing: 0.4px;
+}
+.translate-btn.active {
+  border-color: var(--gold);
+  color: var(--gold-bright);
+  background: linear-gradient(180deg, #2a2118, #1c1610);
+  box-shadow: inset 0 0 0 1px rgba(201, 162, 77, 0.35);
+}
+.translate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.translate-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+.translate-note {
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+
 /* 有备注名时，详情页标题下方小字回显原英文标题 */
 .detail-title-orig {
   margin: -2px 0 8px;

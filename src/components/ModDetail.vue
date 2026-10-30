@@ -14,10 +14,23 @@ import {
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { openModWebpage } from "../online/service";
 import { localizedTagName } from "../online/types";
+import {
+  activeTranslation,
+  canTranslateText,
+  currentTargetLanguageName,
+  ensureTranslation,
+  isQueued,
+  isShowingOriginal,
+  isTranslating,
+  loadCachedTranslation,
+  toggleOriginal,
+  translationErrorKind,
+  translationLangEpoch,
+  translationOf,
+} from "../online/translation";
 import { translateBackendMessage } from "../format";
 import {
   customNameOf,
-  displayTitle,
   isFavorite,
   setCustomName,
   setFavorite,
@@ -119,7 +132,127 @@ async function applyRename(name: string) {
   }
 }
 
+// ---------------- v0.2.4：一键翻译（复用在线页的 translation_cache.json） ----------------
+/**
+ * 翻译入口只看 WorkshopID：
+ * 手动拷进 local 目录的模组既不能在官方查重，也无法稳定绑定缓存，
+ * 所以直接隐藏按钮（与收藏/备注名的判定保持一致）。
+ */
+const translateId = computed(() => {
+  const id = props.mod.workshopId ?? 0;
+  return id > 0 ? id : 0;
+});
+const selectedTranslation = computed(() => activeTranslation(translateId.value));
+const hasTranslation = computed(() => translationOf(translateId.value) !== null);
+const translateBusy = computed(() => isTranslating(translateId.value));
+const translateQueued = computed(() => isQueued(translateId.value));
+const showingOriginalText = computed(() => isShowingOriginal(translateId.value));
+
+/** 详情标题优先级：备注名 > 中文译文 > info.json / 文件夹原名 */
+const headerTitle = computed(() => {
+  const custom = customName.value;
+  if (custom) return custom;
+  const zh = selectedTranslation.value?.title?.trim();
+  return zh ? zh : props.mod.displayName;
+});
+
+/** 标题下小字：**只**用于备注名回显；译文不再叠英文原名 */
+const titleSub = computed(() =>
+  customName.value ? `${t("favorites.originalTitle")}: ${props.mod.displayName}` : null,
+);
+
+/** 描述：中文译文优先，否则用本地 info.json / mod-status 里的原文 */
+const descText = computed(() => {
+  const zh = selectedTranslation.value?.desc?.trim();
+  return zh ? zh : props.mod.description ?? "";
+});
+
+/** 描述过短（无描述的手工模组）= 不够翻译，按钮置灰并提示 */
+const canTranslate = computed(() => canTranslateText(props.mod.description));
+
+const translateLabel = computed(() => {
+  if (translateBusy.value) return t("translate.busy");
+  if (translateQueued.value) return t("translate.queued");
+  if (!hasTranslation.value) {
+    return t("translate.trigger", { lang: currentTargetLanguageName() });
+  }
+  return showingOriginalText.value
+    ? t("translate.showTranslated", { lang: currentTargetLanguageName() })
+    : t("translate.showOriginal");
+});
+
+const translateProvider = computed(() => {
+  const tr = translationOf(translateId.value);
+  if (!tr) return null;
+  return tr.cached
+    ? t("translate.fromCache", { name: tr.provider })
+    : t("translate.provider", { name: tr.provider });
+});
+
+/** 只读探测本地译文缓存（无网络）：在线页翻过 / 上次会话翻过 → 打开即中文 */
+async function probeTranslationCache(): Promise<void> {
+  const id = translateId.value;
+  if (id <= 0) return;
+  await loadCachedTranslation(
+    { modId: id, title: props.mod.displayName },
+    props.mod.description ?? "",
+  );
+}
+
+async function onTranslateClick(): Promise<void> {
+  const id = translateId.value;
+  if (id <= 0) return;
+  // ① 当前**目标语言**下已有译文：按钮是「显示原文 / 显示译文」的开关，不发任何请求。
+  //    （translationOf 会过滤掉旧语言槽位，所以换语言后这里一定是 null）
+  if (translationOf(id)) {
+    toggleOriginal(id);
+    return;
+  }
+  if (translateBusy.value || translateQueued.value) return;
+  // ② 没翻过 / 只翻过旧语言 → 走当前目标语言的请求；
+  //    ensureTranslation 会先丢掉旧语言条目，所以点一次就会去翻新语言而不是切原文。
+  if (!canTranslate.value) {
+    showToast(t("translate.notReady"), "error");
+    return;
+  }
+  try {
+    const tr = await ensureTranslation(
+      { modId: id, title: props.mod.displayName },
+      props.mod.description ?? "",
+    );
+    if (tr.truncated) {
+      showToast(t("translate.truncated", { chars: tr.charCount }));
+    } else {
+      showToast(tr.cached ? t("translate.fromCacheToast") : t("translate.okToast"));
+    }
+  } catch (e) {
+    showToast(translationErrorText(e), "error");
+  }
+}
+
+function translationErrorText(error: unknown): string {
+  switch (translationErrorKind(error)) {
+    case "network":
+      return t("translate.failNetwork");
+    case "busy":
+      return t("translate.failBusy");
+    case "quota":
+      return t("translate.failQuota");
+    case "not_ready":
+      return t("translate.notReady");
+    default:
+      return t("translate.failGeneric", { msg: rawMessageOf(error) });
+  }
+}
+
+function rawMessageOf(error: unknown): string {
+  if (typeof error === "string") return error;
+  const message = (error as Error)?.message;
+  return message ?? String(error ?? "");
+}
+
 const hasUpdate = computed(() => props.updateInfo?.hasUpdate === true);
+
 /** 服务端 vs 本地的时间对比文案（接口没给时间时只说“检测到新版本”） */
 const updateTimeNote = computed(() => {
   const info = props.updateInfo;
@@ -231,7 +364,7 @@ const coverUrl = computed(() =>
 );
 
 watch(
-  () => props.mod.id,
+  () => [props.mod.id, props.mod.workshopId, translationLangEpoch()] as const,
   () => {
     imgFailed.value = false;
     toggleError.value = null;
@@ -239,7 +372,10 @@ watch(
     deleteError.value = null;
     favError.value = null;
     renameOpen.value = false;
+    // 只读查一次缓存（无网络）：命中就瞬间显示中文，未命中也只是让按钮可点
+    void probeTranslationCache();
   },
+  { immediate: true },
 );
 </script>
 
@@ -259,9 +395,24 @@ watch(
       {{ t("detail.coverMissingDetail") }}
     </div>
 
-    <h3 class="detail-title">{{ displayTitle(mod.workshopId, mod.displayName) }}</h3>
-    <div v-if="customName" class="detail-title-orig">
-      {{ t("favorites.originalTitle") }}: {{ mod.displayName }}
+    <h3 class="detail-title">{{ headerTitle }}</h3>
+    <div v-if="titleSub" class="detail-title-orig">{{ titleSub }}</div>
+
+    <!-- v0.2.4：一键翻译（仅手动触发；打开详情页只做一次本地缓存查询，绝无网络请求） -->
+    <div v-if="translateId > 0" class="translate-row">
+      <button
+        type="button"
+        class="translate-btn"
+        :class="{ active: hasTranslation && !showingOriginalText }"
+        :disabled="translateBusy || translateQueued || (!hasTranslation && !canTranslate)"
+        :title="t('translate.triggerTitle')"
+        @click="onTranslateClick"
+      >
+        <span class="translate-icon">🌐</span>
+        {{ translateLabel }}
+      </button>
+      <span v-if="translateProvider" class="translate-note">{{ translateProvider }}</span>
+      <span v-else-if="!canTranslate" class="translate-note">{{ t("translate.waitingContent") }}</span>
     </div>
 
     <!-- v0.5：收藏 / 备注名 -->
@@ -447,7 +598,7 @@ watch(
 
     <div class="section">
       <h3>{{ t("detail.description") }}</h3>
-      <div v-if="mod.description" class="desc">{{ mod.description }}</div>
+      <div v-if="descText" class="desc">{{ descText }}</div>
       <div v-else class="note">{{ t("detail.descriptionMissing") }}</div>
     </div>
 

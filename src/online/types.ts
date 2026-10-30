@@ -198,6 +198,71 @@ export interface ClearCacheReport {
   imagesBytes: number;
 }
 
+// ---------------- v0.2.4：一键翻译（%APPDATA%\com.aoe2.modmanager\translation_cache.json） ----------------
+
+/**
+ * 一个模组的译文（Rust translator::Translation）。
+ * `cached=true` 表示直接命中本地 translation_cache.json，一个 HTTP 都没发。
+ */
+export interface Translation {
+  modId: number;
+  /** 目标语言（小写：zh-cn / ja …） */
+  lang: string;
+  /** FNV-1a 64 的 16 位 hex（title + description），用于判断原文是否变了 */
+  originalHash: string;
+  /** 译文标题（不再叫 zhTitle：目标语言可以是任意语言） */
+  title: string;
+  /** 译文描述 */
+  desc: string;
+  /** google | mymemory */
+  provider: string;
+  charCount: number;
+  savedAtMs: number;
+  cached: boolean;
+  /** 描述过长被截断（只翻译了前 6000 字符） */
+  truncated: boolean;
+}
+
+/** 设置页「翻译」页签的视图（Rust translator::TranslateSettingsView） */
+export interface TranslateSettingsView {
+  /** 用户存下的值；空串 = 跟随界面语言 */
+  targetLanguage: string;
+  /** 实际生效的语言（小写） */
+  resolvedLanguage: string;
+  /** auto | google | mymemory | custom */
+  provider: string;
+  customUrl: string | null;
+  /** 只告诉前端“有没有存 key”，密钥本体永不回传 */
+  customKeySet: boolean;
+  supportedLanguages: string[];
+}
+
+/** 单个语言的缓存条数 */
+export interface LangCount {
+  lang: string;
+  count: number;
+}
+
+/** 翻译缓存总览 */
+export interface TranslationCacheStat {
+  path: string;
+  /** 条目总数（模组 × 语言） */
+  entries: number;
+  /** 涉及多少个模组 */
+  mods: number;
+  bytes: number;
+  byLanguage: LangCount[];
+  oldestMs: number | null;
+  newestMs: number | null;
+}
+
+/** 清理翻译缓存的结果 */
+export interface TranslationClearReport {
+  removed: boolean;
+  path: string;
+  entriesRemoved: number;
+}
+
 export interface SessionStatus {
   loggedIn: boolean;
   cookieCount: number;

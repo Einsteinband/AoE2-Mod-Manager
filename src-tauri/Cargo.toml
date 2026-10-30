@@ -1,8 +1,9 @@
 [package]
 name = "aoe2-mod-manager"
-version = "0.2.3"
+version = "0.3.0"
 description = "AoE2 DE Mod Manager (read-only prototype)"
 authors = ["AoE2 Mod Manager"]
+license = "PolyForm-Noncommercial-1.0.0"
 edition = "2021"
 rust-version = "1.77"
 

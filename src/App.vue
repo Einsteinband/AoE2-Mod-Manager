@@ -24,8 +24,14 @@ import {
 import { attachDragSort, type DragEndPayload } from "./dragSort";
 import { formatDateTime, translateBackendMessage } from "./format";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
-import { installMod } from "./online/service";
+import { getTranslateSettings, installMod } from "./online/service";
 import { itemsById, markUpdated, updateIds } from "./modUpdates";
+import {
+  applyTranslateSettings,
+  hydrateTranslations,
+  syncUiLocale,
+  translationLangEpoch,
+} from "./online/translation";
 import { ensureSession, sessionPhase } from "./sessionState";
 import { customNameOf, displayTitle, ensureUserData, isFavorite } from "./userData";
 import { TAG_ZH, SORT_OPTIONS, localizedTagName } from "./online/types";
@@ -85,6 +91,32 @@ const updatingEntryId = ref<string | null>(null);
 
 const mods = computed<ModEntry[]>(() => report.value?.mods ?? []);
 const warnings = computed<string[]>(() => report.value?.warnings ?? []);
+
+/**
+ * 本地列表变化 / 目标语言切换后，把已缓存的译文接回来（**只读缓存，零网络**）。
+ * 重启软件后卡片仍显示译文（之前每次重启都退回原文）。
+ */
+function hydrateLocalTranslations(list: ModEntry[]): void {
+  hydrateTranslations(
+    list
+      .filter((mod) => (mod.workshopId ?? 0) > 0)
+      .map((mod) => ({
+        modId: mod.workshopId as number,
+        title: mod.displayName,
+        // 卡片只需要标题：传空描述走 titleHash 匹配，
+        // 旧缓存（没有 titleHash）也能按 modId 认下，不会因为升级丢译文
+        description: "",
+      })),
+  );
+}
+
+watch(
+  [mods, translationLangEpoch],
+  ([list]) => {
+    hydrateLocalTranslations(list);
+  },
+  { immediate: true },
+);
 
 const sourceCounts = computed(() => ({
   all: mods.value.length,
@@ -657,6 +689,13 @@ onMounted(async () => {
     if (!savedLocale) {
       void persistLocale(locale.value).catch(() => undefined);
     }
+    // 翻译目标语言：空串 = 跟随界面语言（此时取刚应用完的 UI 语言）
+    try {
+      const translateView = await getTranslateSettings();
+      applyTranslateSettings(translateView, String(locale.value));
+    } catch (e) {
+      console.warn("[translation] 读取翻译设置失败", e);
+    }
     if (settings.modRoot) {
       await refresh(settings.modRoot);
       // 记录的路径被移动 / 磁盘未连接时，直接回到引导而不是只留一个错误面板
@@ -668,6 +707,14 @@ onMounted(async () => {
     error.value = normalizeError(e);
     showWizard.value = true;
   }
+});
+
+/**
+ * UI 语言变化 → 「跟随界面语言」模式下，翻译目标语言立即联动，
+ * 列表与详情会因 langEpoch 自增而重新只读预热（无需重启、不发网络）。
+ */
+watch(locale, (next) => {
+  syncUiLocale(String(next));
 });
 
 /** 引导完成：后端已写入 settings.json 并吐回完整扫描结果 */

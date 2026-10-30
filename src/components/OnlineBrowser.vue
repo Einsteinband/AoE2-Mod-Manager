@@ -57,8 +57,21 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import { deleteModFiles, installedLocalIndex } from "../api";
 import { sourceLabel, translateBackendMessage } from "../format";
 import {
+  activeTranslation,
+  canTranslateText,
+  currentTargetLanguageName,
+  ensureTranslation,
+  hydrateTranslations,
+  isQueued,
+  isShowingOriginal,
+  isTranslating,
+  toggleOriginal,
+  translationErrorKind,
+  translationLangEpoch,
+  translationOf,
+} from "../online/translation";
+import {
   customNameOf,
-  displayTitle,
   ensureUserData,
   favoriteCount,
   favoriteIdSet,
@@ -356,6 +369,100 @@ const descriptionText = computed(() => {
 
 /** 传给后端的原始描述：游戏 info.json 里存的就是这段 HTML，原样写回最接近官方产物 */
 const rawDescription = computed(() => pickDetailText(["description", "modDescription"]));
+
+// ---------------- v0.2.4：一键翻译（只由用户点击触发，绝不自动请求） ----------------
+const selectedTranslation = computed(() => activeTranslation(selected.value?.modId));
+const selectedTranslated = computed(() => translationOf(selected.value?.modId) !== null);
+const translateBusy = computed(() => isTranslating(selected.value?.modId));
+const translateQueued = computed(() => isQueued(selected.value?.modId));
+const showingOriginalText = computed(() => isShowingOriginal(selected.value?.modId));
+
+const canTranslate = computed(
+  () => !!selected.value && canTranslateText(descriptionText.value),
+);
+
+/** 详情还没拉回来 / 官方描述太短：不允许翻译（否则空文本会被写进缓存，永久漏翻） */
+const waitingDetail = computed(
+  () => !!selected.value && !canTranslateText(descriptionText.value),
+);
+
+/** 详情标题优先级：备注名 > 中文译文 > 官方原名 */
+const headerTitle = computed(() => {
+  const mod = selected.value;
+  if (!mod) return "";
+  const custom = customName.value;
+  if (custom) return custom;
+  const title = selectedTranslation.value?.title?.trim();
+  return title ? title : mod.title;
+});
+
+/** 标题下小字：**只**用于备注名回显；译文不再叠英文原名 */
+const titleSub = computed(() => {
+  const mod = selected.value;
+  if (!mod || !customName.value) return null;
+  return `${t("favorites.originalTitle")}: ${mod.title}`;
+});
+
+const translateLabel = computed(() => {
+  if (translateBusy.value) return t("translate.busy");
+  if (translateQueued.value) return t("translate.queued");
+  if (!selectedTranslated.value) {
+    return t("translate.trigger", { lang: currentTargetLanguageName() });
+  }
+  return showingOriginalText.value
+    ? t("translate.showTranslated", { lang: currentTargetLanguageName() })
+    : t("translate.showOriginal");
+});
+
+const translateProvider = computed(() => {
+  const tr = translationOf(selected.value?.modId);
+  if (!tr) return null;
+  return tr.cached
+    ? t("translate.fromCache", { name: tr.provider })
+    : t("translate.provider", { name: tr.provider });
+});
+
+/** 描述：中文译文优先；切回原文或没翻译时用官方描述的纯文本 */
+const descText = computed(() => {
+  const zh = selectedTranslation.value?.desc?.trim();
+  return zh ? zh : descriptionText.value;
+});
+
+async function onTranslateClick(): Promise<void> {
+  const mod = selected.value;
+  if (!mod) return;
+  // 已有译文：按钮变成「显示原文 / 显示中文」的开关，不再发请求
+  if (translationOf(mod.modId)) {
+    toggleOriginal(mod.modId);
+    return;
+  }
+  if (!canTranslate.value || translateBusy.value || translateQueued.value) return;
+  try {
+    const tr = await ensureTranslation(mod, descriptionText.value ?? "");
+    if (tr.truncated) {
+      showToast(t("translate.truncated", { chars: tr.charCount }), "ok");
+    } else {
+      showToast(tr.cached ? t("translate.fromCacheToast") : t("translate.okToast"), "ok");
+    }
+  } catch (e) {
+    showToast(translationErrorText(e), "error");
+  }
+}
+
+function translationErrorText(error: unknown): string {
+  switch (translationErrorKind(error)) {
+    case "network":
+      return t("translate.failNetwork");
+    case "busy":
+      return t("translate.failBusy");
+    case "quota":
+      return t("translate.failQuota");
+    case "not_ready":
+      return t("translate.notReady");
+    default:
+      return t("translate.failGeneric", { msg: messageOf(error) });
+  }
+}
 
 function formatDate(text: string | null): string | null {
   if (!text) return null;
@@ -805,6 +912,7 @@ function applyList(next: OnlineMod[], mode: "merge" | "replace"): void {
       detailError.value = null;
       detailLoading.value = false;
     }
+    hydrateVisibleTranslations();
     return;
   }
   const existing = new Map(items.value.map((mod) => [mod.modId, mod]));
@@ -818,7 +926,25 @@ function applyList(next: OnlineMod[], mode: "merge" | "replace"): void {
     patchIfChanged(current, fresh);
   }
   if (appended.length) items.value = [...items.value, ...appended];
+  hydrateVisibleTranslations();
 }
+
+/**
+ * 列表一变就把已缓存的译文接回来（**只读缓存，零网络**）。
+ * 只在启动后第一次出现某模组时真正发一次批量 invoke，之后靠内存。
+ */
+function hydrateVisibleTranslations(): void {
+  hydrateTranslations(
+    items.value
+      .filter((mod) => mod.modId > 0)
+      .map((mod) => ({ modId: mod.modId, title: mod.title ?? "", description: "" })),
+  );
+}
+
+/** 目标语言一变（设置页切换 / 跟随界面语言联动）→ 重新预热，卡片立刻换成新语言 */
+watch(translationLangEpoch, () => {
+  hydrateVisibleTranslations();
+});
 
 /**
  * 换筛选时把滚动容器归零（在替换数据之前调用）。
@@ -1934,9 +2060,26 @@ onUnmounted(() => {
         />
         <div v-else class="no-cover-box">{{ t("online.noThumbnail") }}</div>
 
-        <h3 class="detail-title">{{ displayTitle(selected.modId, selected.title) }}</h3>
-        <div v-if="customName" class="detail-title-orig">
-          {{ t("favorites.originalTitle") }}: {{ selected.title }}
+        <h3 class="detail-title">{{ headerTitle }}</h3>
+        <div v-if="titleSub" class="detail-title-orig">{{ titleSub }}</div>
+
+        <!-- v0.2.4：一键翻译（手动触发；未点击时绝不发任何翻译请求） -->
+        <div class="translate-row">
+          <button
+            type="button"
+            class="translate-btn"
+            :class="{ active: selectedTranslated && !showingOriginalText }"
+            :disabled="translateBusy || translateQueued || (!selectedTranslated && !canTranslate)"
+            :title="t('translate.triggerTitle')"
+            @click="onTranslateClick"
+          >
+            <span class="translate-icon">🌐</span>
+            {{ translateLabel }}
+          </button>
+          <span v-if="translateProvider" class="translate-note">{{ translateProvider }}</span>
+          <span v-else-if="waitingDetail && !selectedTranslated" class="translate-note">
+            {{ t("translate.waitingContent") }}
+          </span>
         </div>
 
         <!-- v0.5：收藏 / 备注名 -->
@@ -2079,9 +2222,9 @@ onUnmounted(() => {
         <div v-if="installError" class="online-error">{{ installError }}</div>
         <pre v-if="installNote" class="online-note-box">{{ installNote }}</pre>
 
-        <div v-if="descriptionText" class="section">
+        <div v-if="descText" class="section">
           <h3>{{ t("online.description") }}</h3>
-          <div class="desc">{{ descriptionText }}</div>
+          <div class="desc">{{ descText }}</div>
         </div>
 
         <details class="section raw-details">

@@ -10,6 +10,8 @@ const props = defineProps<{
   confirmLabel?: string;
   busy?: boolean;
   error?: string | null;
+  /** false = 用金色主按钮（“全部启用”这类非破坏性操作）；默认 true = 红色危险按钮 */
+  danger?: boolean;
 }>();
 
 const emit = defineEmits<{ (e: "confirm"): void; (e: "cancel"): void }>();
@@ -39,7 +41,12 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
         <div v-if="error" class="path-error">{{ error }}</div>
         <div class="confirm-actions">
           <button type="button" :disabled="busy" @click="emit('cancel')">{{ t("confirm.cancel") }}</button>
-          <button type="button" class="danger" :disabled="busy" @click="emit('confirm')">
+          <button
+            type="button"
+            :class="danger === false ? 'primary' : 'danger'"
+            :disabled="busy"
+            @click="emit('confirm')"
+          >
             {{ busy ? t("confirm.working") : (confirmLabel ?? t("confirm.defaultConfirm")) }}
           </button>
         </div>

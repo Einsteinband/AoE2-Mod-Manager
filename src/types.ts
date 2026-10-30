@@ -103,6 +103,10 @@ export interface AppSettings {
   locale: string;
   /** 最后一次自动检查软件更新的毫秒时间戳；0 = 从未检查过（启动检查的 24 小时时间锁） */
   lastAutoUpdateCheckMs: number;
+  /** 是否允许后台静默建本地索引（设置 → 通用，默认关闭） */
+  enableIndexing: boolean;
+  /** 是否在在线页显示本地搜索框（设置 → 通用，默认关闭） */
+  enableLocalSearch: boolean;
 }
 
 /** v0.3 预设：一条记录对应 mod-status.json 里的一条 Mods 项 */
@@ -150,6 +154,35 @@ export interface ToggleOutcome {
   totalEnabledAfter: number;
   statusPath: string;
   backupPath: string | null;
+}
+
+/**
+ * 批量启用/禁用的单个目标：WorkshopID 优先，Path 兜底。
+ * 本工具安装的 local 模组 WorkshopID 被置 0，只能靠 kind + folderName 定位。
+ */
+export interface BatchTarget {
+  workshopId: number | null;
+  kind: ModKind;
+  folderName: string;
+}
+
+/** 批量启用/禁用的真实结果（未登记 / 已一致 / 真正改写 分开计数） */
+export interface BatchToggleReport {
+  /** 目标状态 */
+  enabled: boolean;
+  requested: number;
+  /** 本次真正被改写的记录数 */
+  updated: number;
+  /** 本来就是目标状态、无需改写的记录数 */
+  already: number;
+  /** mod-status.json 里找不到记录的条目数（游戏还没登记） */
+  notInStatus: number;
+  totalEnabledAfter: number;
+  statusPath: string;
+  backupPath: string | null;
+  /** 是否真的写了文件（全部已一致时不写盘、不产生备份） */
+  wrote: boolean;
+  message: string;
 }
 
 export type SourceFilter = "all" | ModKind;

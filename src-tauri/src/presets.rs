@@ -532,6 +532,150 @@ pub fn set_enabled(
     })
 }
 
+// ---------------- 批量启用 / 禁用（整个批次只写一次盘） ----------------
+
+/// 批量操作目标。与 `ModSelector` 一一对应，另带来源信息供前端回填。
+///
+/// 为什么不用裸 `Vec<u64>`：本工具安装的 local 记录 `WorkshopID` 会被置 0，
+/// 多个本地模组共用 0，只能靠 `Path`（`<kind>//<folder>`）区分。
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchTarget {
+    /// 0 或缺失一律视为“没有数字 ID”，改走 Path 匹配
+    #[serde(default)]
+    pub workshop_id: Option<u64>,
+    /// "local" | "subscribed"
+    pub kind: String,
+    pub folder_name: String,
+}
+
+impl BatchTarget {
+    fn selector(&self) -> ModSelector {
+        ModSelector {
+            workshop_id: self.workshop_id.filter(|id| *id > 0),
+            path: crate::install::status_rel_path(&self.kind, self.folder_name.trim()),
+        }
+    }
+}
+
+/// 批量结果：未登记 / 已是目标状态 / 真正被改写，三者分开计数，绝不四舍五入成“全部成功”
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchToggleReport {
+    /// 目标状态
+    pub enabled: bool,
+    /// 前端提交的模组数
+    pub requested: usize,
+    /// 本次真正被改写的记录数
+    pub updated: usize,
+    /// 本来就是目标状态、无需改写的记录数
+    pub already: usize,
+    /// mod-status.json 里找不到记录的条目数（游戏还没登记）
+    pub not_in_status: usize,
+    pub total_enabled_after: usize,
+    pub status_path: String,
+    pub backup_path: Option<String>,
+    /// 是否真的写了文件（全部已一致时不写盘、不产生备份）
+    pub wrote: bool,
+    pub message: String,
+}
+
+/// 批量把多条记录的 `Enabled` 设为同一目标值。
+///
+/// **整个批次只走一次 `update_status`**：一次进程检测 → 一次读盘 → 一次业务改动 →
+/// 一份备份 → 一次原子替换 → 一次回读校验。逐条调用 `set_enabled` 会产生 N 份备份，
+/// 且在第 k 条失败时留下「前面已改、后面没改」的部分成功状态。
+///
+/// 与 `set_enabled` 的差异：找不到记录的条目**只计数不报错**（批量里混入未登记模组是常态），
+/// 结果通过 `not_in_status` / `message` 汇报给用户。
+pub fn batch_set_enabled(
+    status_path: &Path,
+    backup_dir: &Path,
+    targets: &[BatchTarget],
+    enabled: bool,
+    skip_process_check: bool,
+) -> Result<BatchToggleReport, String> {
+    if targets.is_empty() {
+        return Err("当前列表没有可操作的模组".to_string());
+    }
+
+    let selectors: Vec<ModSelector> = targets.iter().map(BatchTarget::selector).collect();
+    let mut hits = vec![false; selectors.len()];
+    let mut updated = 0usize;
+    let mut already = 0usize;
+
+    let (outcome, ()) = update_status(status_path, backup_dir, skip_process_check, |root| {
+        let mods = mods_array_mut(root)?;
+        for record in mods.iter_mut() {
+            if record.as_object().is_none() {
+                continue;
+            }
+            let index = match selectors.iter().position(|sel| matches(record, sel)) {
+                Some(index) => index,
+                None => continue,
+            };
+            hits[index] = true;
+            let current = record.get("Enabled").and_then(|v| v.as_bool());
+            if current == Some(enabled) {
+                already += 1;
+                continue;
+            }
+            // 字段缺失等价于禁用：目标也是禁用时不必写字
+            if !enabled && current.is_none() {
+                continue;
+            }
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert("Enabled".to_string(), Value::Bool(enabled));
+                updated += 1;
+            }
+        }
+        Ok(((), updated > 0))
+    })?;
+
+    let not_in_status = hits.iter().filter(|hit| !**hit).count();
+    let action = if enabled { "启用" } else { "禁用" };
+    let message = if not_in_status == selectors.len() {
+        format!(
+            "{not_in_status} 个模组还没有在 mod-status.json 里登记，请先启动一次游戏让它们登记后再试。"
+        )
+    } else if !outcome.wrote {
+        format!("当前列表已经是目标状态（{already} 个模组无需改动），未修改文件。")
+    } else if not_in_status > 0 {
+        format!(
+            "已{action} {updated} 个模组（{already} 个原本已是目标状态），跳过 {not_in_status} 个未登记模组。现在共 {} 个模组处于启用状态，请启动游戏确认。",
+            outcome.total_enabled_after
+        )
+    } else {
+        format!(
+            "已{action} {updated} 个模组（{already} 个原本已是目标状态）。现在共 {} 个模组处于启用状态，请启动游戏确认。",
+            outcome.total_enabled_after
+        )
+    };
+
+    log::info!(
+        target: "mod-status",
+        "批量{action}完成：提交 {} 个，改写 {} 个，已一致 {} 个，未登记 {} 个（wrote={}）",
+        selectors.len(),
+        updated,
+        already,
+        not_in_status,
+        outcome.wrote
+    );
+
+    Ok(BatchToggleReport {
+        enabled,
+        requested: selectors.len(),
+        updated,
+        already,
+        not_in_status,
+        total_enabled_after: outcome.total_enabled_after,
+        status_path: outcome.status_path,
+        backup_path: outcome.backup_path,
+        wrote: outcome.wrote,
+        message,
+    })
+}
+
 // ---------------- 需求 3：卸载时删除记录 ----------------
 
 #[derive(Serialize, Clone, Debug)]

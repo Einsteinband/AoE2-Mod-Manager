@@ -10,6 +10,7 @@ import SettingsModal from "./components/SettingsModal.vue";
 import StatusBar from "./components/StatusBar.vue";
 import { useI18n } from "vue-i18n";
 import {
+  batchToggleMods,
   checkUpdateAuto,
   detectRootCandidates,
   getSettings,
@@ -25,6 +26,7 @@ import { attachDragSort, type DragEndPayload } from "./dragSort";
 import { formatDateTime, translateBackendMessage } from "./format";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
 import { getTranslateSettings, installMod } from "./online/service";
+import { kickIndexSync } from "./online/indexSync";
 import { itemsById, markUpdated, updateIds } from "./modUpdates";
 import {
   applyTranslateSettings,
@@ -32,19 +34,55 @@ import {
   syncUiLocale,
   translationLangEpoch,
 } from "./online/translation";
-import { ensureSession, sessionPhase } from "./sessionState";
+import { ensureSession, localSearchEnabled, openSettingsNonce, sessionEpoch, sessionPhase } from "./sessionState";
 import { customNameOf, displayTitle, ensureUserData, isFavorite } from "./userData";
 import { TAG_ZH, SORT_OPTIONS, localizedTagName } from "./online/types";
-import type { ModEntry, ModStats, ScanReport, SortKey, SourceFilter, StatusFilter } from "./types";
+import type { BatchTarget, ModEntry, ModStats, ScanReport, SortKey, SourceFilter, StatusFilter } from "./types";
 
 /** 顶部模式：本地扫描 / 在线官方服务 */
 const mode = ref<"local" | "online">("local");
 
 /** 在线页的筛选状态提升到顶栏，保证两种模式的搜索/排序控件位置完全一致 */
+/** 官方搜索已提交的词（空 = 显示最新列表）。**只在回车 / 点搜索时写入**，输入过程中不变 */
 const onlineQuery = ref("");
+/** 官方搜索框的输入缓冲：打字不触发任何请求（v1.1 双搜索框） */
+const onlineQueryDraft = ref("");
 const onlineSort = ref(SORT_OPTIONS[0].value);
 const onlineOrder = ref<"DESC" | "ASC">("DESC");
 const onlineRef = ref<InstanceType<typeof OnlineBrowser> | null>(null);
+
+/** 提交官方搜索（回车 / 点搜索按钮）：词没变就当作一次手动刷新 */
+function submitOnlineSearch() {
+  const next = onlineQueryDraft.value.trim();
+  onlineQueryDraft.value = next;
+  if (next === onlineQuery.value) {
+    if (next) void onlineRef.value?.refresh?.();
+    return;
+  }
+  onlineQuery.value = next;
+}
+
+/** 清空官方搜索 → 回到最新 / 官方列表（本地搜索框由在线页自己跟随清除） */
+function resetOnlineSearch() {
+  onlineQueryDraft.value = "";
+  onlineQuery.value = "";
+}
+
+/**
+ * v1.0：登录成功（`sessionEpoch` 递增）→ 静默补建在线索引（中文混合搜索的底座）。
+ *
+ * 必须放在 App 顶层而不是在线页：用户一直停在「本地」页时 `OnlineBrowser` 根本没挂载，
+ * 索引就永远不会建，中文搜索会一直是空的。
+ * `kickIndexSync` 内部按 epoch 去重，与在线页自己的触发共享同一个请求，不会发两次。
+ */
+watch(sessionEpoch, (epoch) => {
+  if (epoch > 0) void kickIndexSync(epoch);
+});
+
+/** v1.2：在线页「本地索引未开启 → 前往设置」的快捷入口 */
+watch(openSettingsNonce, () => {
+  showSettings.value = true;
+});
 
 const { t, locale } = useI18n();
 /** 当前界面语言（语言切换本身已迁到 SettingsModal，这里只用于排序区域） */
@@ -320,14 +358,99 @@ function selectMod(mod: ModEntry) {
  * 启用/禁用后的局部刷新：只 patch 这一条记录的字段，不重扫、不重置筛选、不重算体积。
  * 后端已把真实写入结果回传，这里不做任何推测。
  */
-function handleToggle(payload: { enabled: boolean }) {
-  const id = selectedId.value;
+function patchModEnabled(id: string, enabled: boolean) {
   const list = report.value?.mods;
-  if (!id || !list) return;
+  if (!list) return;
   const mod = list.find((m) => m.id === id);
   if (!mod) return;
-  mod.enabled = payload.enabled;
+  mod.enabled = enabled;
   mod.issues = mod.issues.filter((issue) => !issue.startsWith("mod-status.json 中没有该模组的记录"));
+}
+
+function handleToggle(payload: { enabled: boolean }) {
+  const id = selectedId.value;
+  if (!id) return;
+  patchModEnabled(id, payload.enabled);
+}
+
+/** v0.9：卡片右下角快捷开关写入成功 → 只改这一条 */
+function handleCardToggled(payload: { id: string; enabled: boolean }) {
+  patchModEnabled(payload.id, payload.enabled);
+}
+
+/** v0.9：卡片快捷开关失败 / 未登记 → 统一走右下角 Toast */
+function handleCardToggleError(message: string) {
+  showToast(message, "error");
+}
+
+// ---------------- v0.9：工具栏批量启用 / 禁用 ----------------
+
+/** null = 未弹窗；true = 全部启用；false = 全部禁用 */
+const batchAsk = ref<boolean | null>(null);
+const batchBusy = ref(false);
+const batchError = ref<string | null>(null);
+
+/** 只传当前筛选出的列表：WorkshopID 优先，local 模组靠 kind + 文件夹名定位 */
+const batchTargets = computed<BatchTarget[]>(() =>
+  sorted.value.map((mod) => ({
+    workshopId: mod.workshopId && mod.workshopId > 0 ? mod.workshopId : null,
+    kind: mod.kind,
+    folderName: mod.folderName,
+  })),
+);
+
+function askBatch(enable: boolean) {
+  if (batchBusy.value) return;
+  if (!batchTargets.value.length) {
+    showToast(t("batch.empty"), "error");
+    return;
+  }
+  batchError.value = null;
+  batchAsk.value = enable;
+}
+
+/**
+ * 批量写入：后端整批只写一次盘（一次进程检测 → 一份备份 → 原子替换 → 回读校验），
+ * 所以不会出现“前面改了、后面没改”。成功后只就地 patch 已登记（enabled !== null）的条目，
+ * 不重扫、不重置筛选；未登记的条目由后端计入 notInStatus 并在 Toast 里告知。
+ */
+async function runBatchToggle() {
+  if (batchAsk.value === null || batchBusy.value) return;
+  const enable = batchAsk.value;
+  const targets = batchTargets.value;
+  if (!targets.length) {
+    batchAsk.value = null;
+    showToast(t("batch.empty"), "error");
+    return;
+  }
+  const keys = new Set(targets.map((target) => `${target.kind}//${target.folderName}`));
+  batchBusy.value = true;
+  batchError.value = null;
+  try {
+    const result = await batchToggleMods(enable, targets);
+    for (const mod of report.value?.mods ?? []) {
+      if (mod.enabled === null) continue;
+      if (!keys.has(`${mod.kind}//${mod.folderName}`)) continue;
+      patchModEnabled(mod.id, result.enabled);
+    }
+    batchAsk.value = null;
+    if (result.notInStatus >= result.requested) {
+      showToast(t("batch.allUnregistered"), "error");
+    } else if (!result.wrote) {
+      showToast(t("batch.noChange"));
+    } else {
+      const text =
+        t(enable ? "batch.doneEnable" : "batch.doneDisable", {
+          updated: result.updated,
+          already: result.already,
+        }) + (result.notInStatus > 0 ? t("batch.skipped", { n: result.notInStatus }) : "");
+      showToast(text);
+    }
+  } catch (e) {
+    batchError.value = normalizeError(e);
+  } finally {
+    batchBusy.value = false;
+  }
 }
 
 /**
@@ -684,6 +807,8 @@ onMounted(async () => {
   try {
     candidates.value = (await detectRootCandidates()).map((c) => c.path);
     const settings = await getSettings();
+    // v1.2：在线页本地搜索框开关（默认关闭，设置页可改）
+    localSearchEnabled.value = settings.enableLocalSearch === true;
     // 语言：已保存的优先，否则按系统语言决定（并把结果回写，以后不再依赖 navigator）
     const savedLocale = normalizeLocale(settings.locale);
     applyLocale(savedLocale ?? detectSystemLocale());
@@ -890,24 +1015,30 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- 在线模式：同一个搜索框位置，绑定在线 query（输入 300ms 防抖自动查） -->
-      <div v-else class="search-box">
+      <!-- v1.1：在线模式的搜索框 = **官方搜索**。输入过程中绝不发请求，
+           只有回车 / 点「搜索」才写入 onlineQuery 去请求官方接口。 -->
+      <div v-else class="search-box official-search">
         <span class="glyph">⌕</span>
         <input
-          v-model="onlineQuery"
+          v-model="onlineQueryDraft"
           type="search"
-          :placeholder="t('online.searchPlaceholder')"
+          :title="t('online.officialSearchHint')"
+          :placeholder="t('online.officialSearchPlaceholder')"
           spellcheck="false"
+          @keyup.enter="submitOnlineSearch"
         />
         <button
-          v-if="onlineQuery"
+          v-if="onlineQueryDraft || onlineQuery"
           class="clear"
           type="button"
           :title="t('search.clear')"
           :aria-label="t('search.clear')"
-          @click="onlineQuery = ''"
+          @click="resetOnlineSearch"
         >
           ✕
+        </button>
+        <button type="button" class="go" @click="submitOnlineSearch">
+          {{ t("online.officialSearchGo") }}
         </button>
       </div>
 
@@ -930,6 +1061,24 @@ onBeforeUnmount(() => {
         </button>
         <button type="button" class="preset-entry" @click="showPresets = true">
           {{ t("toolbar.presets") }}
+        </button>
+        <button
+          type="button"
+          class="batch-enable"
+          :disabled="loading || !report || !sorted.length || batchBusy"
+          :title="t('toolbar.enableAllTitle')"
+          @click="askBatch(true)"
+        >
+          {{ batchBusy ? t("batch.working") : t("toolbar.enableAll") }}
+        </button>
+        <button
+          type="button"
+          class="batch-disable"
+          :disabled="loading || !report || !sorted.length || batchBusy"
+          :title="t('toolbar.disableAllTitle')"
+          @click="askBatch(false)"
+        >
+          {{ batchBusy ? t("batch.working") : t("toolbar.disableAll") }}
         </button>
         <button
           type="button"
@@ -1213,6 +1362,8 @@ onBeforeUnmount(() => {
                 :has-update="updateIds.has(mod.id)"
                 sortable
                 @select="selectMod"
+                @toggled="handleCardToggled"
+                @toggle-error="handleCardToggleError"
               />
             </div>
 
@@ -1226,6 +1377,8 @@ onBeforeUnmount(() => {
                   :active="mod.id === selectedId"
                   :has-update="updateIds.has(mod.id)"
                   @select="selectMod"
+                  @toggled="handleCardToggled"
+                  @toggle-error="handleCardToggleError"
                 />
               </div>
             </div>
@@ -1270,6 +1423,8 @@ onBeforeUnmount(() => {
               :active="mod.id === selectedId"
               :has-update="updateIds.has(mod.id)"
               @select="selectMod"
+              @toggled="handleCardToggled"
+              @toggle-error="handleCardToggleError"
             />
           </div>
         </div>
@@ -1326,6 +1481,23 @@ onBeforeUnmount(() => {
 
     <!-- v0.6：全局底部状态栏（账号灯 / 动态提示 / 代理与本地计数），始终显示 -->
     <StatusBar :local-count="mods.length" :mode="mode" />
+
+    <!-- v0.9：批量启用 / 禁用的二次确认（整批只写一次盘） -->
+    <ConfirmDialog
+      v-if="batchAsk !== null"
+      :title="batchAsk ? t('batch.confirmTitleEnable') : t('batch.confirmTitleDisable')"
+      :message="
+        t(batchAsk ? 'batch.confirmEnableMessage' : 'batch.confirmDisableMessage', {
+          n: batchTargets.length,
+        })
+      "
+      :confirm-label="batchAsk ? t('batch.confirmEnable') : t('batch.confirmDisable')"
+      :danger="!batchAsk"
+      :busy="batchBusy"
+      :error="batchError"
+      @confirm="runBatchToggle"
+      @cancel="batchAsk = null"
+    />
 
     <!-- 放弃未保存排序的二次确认 -->
     <ConfirmDialog

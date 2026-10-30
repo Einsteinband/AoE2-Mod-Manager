@@ -62,6 +62,20 @@ export function requestManualRefresh(): void {
   manualRefreshNonce.value += 1;
 }
 
+/** 用户明确意图：打开设置弹窗（在线页「本地索引未开启」的快捷入口用） */
+export const openSettingsNonce = ref(0);
+
+export function requestOpenSettings(): void {
+  openSettingsNonce.value += 1;
+}
+
+/**
+ * 在线页本地搜索框开关的**运行时镜像**（真正的持久化在 settings.json 的
+ * `enable_local_search`）：App.vue 启动时载入，设置页改完立即写回这里，
+ * 在线页（KeepAlive 常驻）靠它即时隐藏/显示搜索框。
+ */
+export const localSearchEnabled = ref(false);
+
 /**
  * 登录态有效：点亮绿灯。
  *

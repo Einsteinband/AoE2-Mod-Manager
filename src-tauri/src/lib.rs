@@ -13,6 +13,7 @@ mod modupdate;
 mod net;
 mod presets;
 mod online;
+mod online_index;
 mod scan;
 mod secure;
 mod settings;
@@ -897,6 +898,130 @@ async fn online_cache_clear(app: tauri::AppHandle) -> Result<ClearEverything, St
     .map_err(|e| format!("清理任务异常：{e}"))?
 }
 
+// ---------------- v1.0：在线全量索引（中文搜索的底座） ----------------
+
+/// 索引状态：已收录条数 / 服务端总量 / 是否同步中 / 一行状态文案
+#[tauri::command]
+async fn online_index_status(app: tauri::AppHandle) -> online_index::IndexStatus {
+    tauri::async_runtime::spawn_blocking(move || online_index::status_for_app(&app))
+        .await
+        .unwrap_or_default()
+}
+
+/// 手动补全索引：受单飞 + 限流冷却保护，连点无效
+#[tauri::command]
+async fn online_index_sync(app: tauri::AppHandle) -> Result<online_index::SyncReport, ApiFailure> {
+    tauri::async_runtime::spawn_blocking(move || online_index::sync_blocking(&app, "manual"))
+        .await
+        .map_err(|e| ApiFailure::new("internal", format!("索引任务失败：{e}"), None))?
+}
+
+/// 本地混合搜索：索引 + 本地译文标题，**一个网络请求都不发**。
+/// 中文查询由前端拦截到这里；英文查询仍然走 `online_find`。
+#[tauri::command]
+async fn online_index_search(
+    app: tauri::AppHandle,
+    query: String,
+    offset: Option<i64>,
+    limit: Option<i64>,
+    target_lang: Option<String>,
+) -> online_index::SearchResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 语言走与「一键翻译」完全相同的解析链，避免设置里换了语言搜索却按旧语言匹配
+        let lang = translator::resolve_lang(&app, target_lang.as_deref());
+        online_index::search_for_app(&app, &query, offset.unwrap_or(0), limit.unwrap_or(24), &lang)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// v1.1：**本地搜索**的唯一入口（前端「本地搜索框」专用）。
+///
+/// 与官方搜索彻底解耦：顶栏官方搜索走 `online_find`（英文 / ID / 作者），
+/// 这里只查本地索引 + 本地译文标题，**一个网络请求都不发**。
+/// 底层复用 `online_index::search_for_app`（中文标题 > 英文标题 > 作者 > 分类 > `#ID`），
+/// 索引本身没有任何改动。
+#[tauri::command]
+async fn search_local_mods(
+    app: tauri::AppHandle,
+    keyword: String,
+    offset: Option<i64>,
+    limit: Option<i64>,
+    target_lang: Option<String>,
+) -> online_index::SearchResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 语言与「一键翻译」共用同一条解析链，设置里换语言后搜索立刻按新语言匹配
+        let lang = translator::resolve_lang(&app, target_lang.as_deref());
+        online_index::search_for_app(&app, &keyword, offset.unwrap_or(0), limit.unwrap_or(60), &lang)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// v1.2：开关「本地中文搜索与自动索引」（设置 → 通用）。
+///
+/// 落盘到 settings.json 的 `enable_indexing`：
+/// - 开启：立刻在后台补建一次索引（不阻塞命令返回）；
+/// - 关闭：本轮同步在下一页之前停下，状态切成「未开启」（指示灯变 ⚪）。
+#[tauri::command]
+async fn set_enable_indexing(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    current.enable_indexing = enabled;
+    settings::save(&path, &current)?;
+    if enabled {
+        online_index::spawn_now(app.clone());
+    } else {
+        online_index::mark_disabled(&app);
+    }
+    Ok(enabled)
+}
+
+/// v1.2：开关「在线页的本地搜索框」（设置 → 通用，默认关闭）。
+/// 只是界面开关：只落盘 settings.json，不触碰索引数据，也不会发任何请求。
+#[tauri::command]
+async fn set_enable_local_search(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    current.enable_local_search = enabled;
+    settings::save(&path, &current)?;
+    Ok(enabled)
+}
+
+/// 清空索引（设置 → 缓存）。下次启动会在后台自动重建，不会丢用户数据。
+#[tauri::command]
+async fn online_index_clear(app: tauri::AppHandle) -> Result<online_index::ClearReport, String> {
+    tauri::async_runtime::spawn_blocking(move || online_index::clear_for_app(&app))
+        .await
+        .map_err(|e| format!("清理任务异常：{e}"))?
+}
+
+// ---------------- v1.0：批量标题翻译（online_titles_zh.json） ----------------
+
+/// 开始批量翻译标题：后台单线程、**1 req/s**（复用 translator 的全局 FIFO 限速器）。
+/// 只能由用户点按钮启动，绝不自动触发；已在跑时返回 `busy`。
+#[tauri::command]
+fn online_titles_translate_start(
+    app: tauri::AppHandle,
+    target_lang: Option<String>,
+) -> Result<translator::TitleJobStatus, ApiFailure> {
+    translator::start_title_job(app, target_lang)
+}
+
+/// 请求停止：当前这条请求跑完后退出，不会把在飞的 HTTP 请求掐断。
+#[tauri::command]
+fn online_titles_translate_stop(app: tauri::AppHandle) -> translator::TitleJobStatus {
+    translator::stop_title_job(&app)
+}
+
+/// 批量标题翻译进度（含「已翻 / 待翻 / 失败」与一行状态）。
+#[tauri::command]
+async fn online_titles_translate_status(app: tauri::AppHandle) -> translator::TitleJobStatus {
+    tauri::async_runtime::spawn_blocking(move || translator::title_job_status(&app))
+        .await
+        .unwrap_or_default()
+}
+
 /// 批量查询本地是否已有封面：返回 modId → 绝对路径
 /// （前端用 @tauri-apps/api 的 convertFileSrc 转成 asset URL 给 <img>）
 #[tauri::command]
@@ -1747,6 +1872,49 @@ async fn toggle_mod_enabled(
     .map_err(|e| format!("切换任务执行失败：{e}"))?
 }
 
+// ---------------- 卡片快捷开关 / 工具栏批量启用停用 ----------------
+
+/// 批量启用 / 禁用。`targets` 由前端按当前筛选列表传入（WorkshopID + 来源 + 文件夹名）。
+/// 与单条切换同一条安全链路，但**整个批次只写一次盘**：一次进程检测 → 一份备份 →
+/// 一次原子替换 → 一次回读校验（失败自动回滚），不会出现部分成功。
+#[tauri::command]
+async fn batch_toggle_mods(
+    app: tauri::AppHandle,
+    enable: bool,
+    targets: Vec<presets::BatchTarget>,
+) -> Result<presets::BatchToggleReport, String> {
+    let root = settings::load_for_app(&app)
+        .mod_root
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+
+    if targets.is_empty() {
+        return Err("当前列表没有可操作的模组".to_string());
+    }
+    for target in &targets {
+        if target.kind != "local" && target.kind != "subscribed" {
+            return Err(format!("未知的模组来源：{}", target.kind));
+        }
+        let folder = target.folder_name.trim();
+        if folder.is_empty()
+            || folder.contains('/')
+            || folder.contains('\\')
+            || folder.contains("..")
+        {
+            return Err(format!("模组文件夹名不合法：{}", target.folder_name));
+        }
+    }
+
+    let status_path = PathBuf::from(&root).join(presets::STATUS_FILE);
+    let backup_dir = presets::backups_dir_for(&app)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        presets::batch_set_enabled(&status_path, &backup_dir, &targets, enable, false)
+    })
+    .await
+    .map_err(|e| format!("批量切换任务执行失败：{e}"))?
+}
+
 // ---------------- v0.2：手动拖拽排序 ----------------
 
 /// 把拖拽后的顺序写进 mod-status.json 的 Priority（1..n 连续）。
@@ -1812,6 +1980,9 @@ pub fn run() {
         // 否则前端 asset: URL 读本地 jpg 会被拒绝。
         .setup(|app| {
             images::allow_scope(app.handle());
+            // v1.0：后台静默建立在线模组索引（中文搜索底座）。
+            // 8 秒后才开始，绝不和首屏、登录校验、更新检查抢带宽。
+            online_index::spawn_background(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1849,6 +2020,16 @@ pub fn run() {
             online_cache_items,
             online_cache_clear,
             online_cache_stat,
+            online_index_status,
+            online_index_sync,
+            online_index_search,
+    search_local_mods,
+    set_enable_indexing,
+    set_enable_local_search,
+            online_index_clear,
+            online_titles_translate_start,
+            online_titles_translate_stop,
+            online_titles_translate_status,
             translator::translate_mod_text,
             translator::translation_cached,
             translator::translations_cached,
@@ -1869,6 +2050,7 @@ pub fn run() {
             preset_delete,
             preset_apply,
             toggle_mod_enabled,
+            batch_toggle_mods,
             update_mod_priority,
             load_user_data,
             save_user_data,

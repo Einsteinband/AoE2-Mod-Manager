@@ -242,6 +242,117 @@ select {
   color: var(--gold);
   background: transparent;
 }
+/* v1.1：官方搜索的「搜索」按钮（只在回车 / 点击时提交） */
+.search-box .go {
+  position: absolute;
+  right: 6px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-family: var(--serif);
+  letter-spacing: 0.6px;
+  color: var(--gold);
+  background: rgba(201, 162, 77, 0.08);
+  border: 1px solid var(--gold-dim);
+  border-radius: 3px;
+}
+.search-box .go:hover {
+  background: rgba(201, 162, 77, 0.16);
+  border-color: var(--gold);
+}
+.search-box.official-search input {
+  padding-right: 74px;
+}
+.search-box.official-search .clear {
+  right: 56px;
+}
+
+/* v1.1：本地搜索框（在线页列表上方，与顶栏官方搜索互不干扰） */
+.local-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 2px 18px 0;
+}
+.local-search input {
+  width: 100%;
+  padding: 7px 34px 7px 30px;
+  font-size: 12.5px;
+  font-family: var(--serif);
+  letter-spacing: 0.5px;
+  border-radius: 4px;
+}
+.local-search input:focus {
+  border-color: var(--gold-dim);
+  box-shadow: 0 0 0 2px rgba(201, 162, 77, 0.08);
+}
+.local-search .glyph {
+  position: absolute;
+  left: 10px;
+  color: var(--gold-dim);
+  font-size: 13px;
+  pointer-events: none;
+}
+.local-search .spinner {
+  position: absolute;
+  right: 30px;
+  margin-right: 0;
+}
+.local-search .clear {
+  position: absolute;
+  right: 6px;
+  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+.local-search .clear:hover {
+  color: var(--gold);
+  background: transparent;
+}
+
+/* v1.2：索引进度指示灯（🟡/🟢/🔴） */
+.index-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 18px 0;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+}
+.index-status.syncing {
+  color: var(--gold);
+  background: rgba(201, 162, 77, 0.06);
+  border: 1px solid rgba(201, 162, 77, 0.18);
+}
+.index-status.ready {
+  color: var(--ok);
+  background: rgba(120, 162, 92, 0.07);
+  border: 1px solid rgba(120, 162, 92, 0.22);
+}
+.index-status.failed {
+  color: var(--danger);
+  background: rgba(180, 85, 63, 0.08);
+  border: 1px solid rgba(180, 85, 63, 0.25);
+}
+.index-status.idle {
+  border: 1px solid var(--line);
+}
+.index-status .text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.index-status .mini {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: 10.5px;
+}
 
 .toolbar {
   display: flex;
@@ -972,6 +1083,34 @@ button.toggle:disabled {
   background: linear-gradient(180deg, #2b2216, #1c1610);
   font-family: var(--serif);
   letter-spacing: 1px;
+}
+
+/* ================= v0.9 工具栏批量启用 / 禁用 ================= */
+.toolbar button.batch-enable,
+.toolbar button.batch-disable {
+  font-family: var(--serif);
+  letter-spacing: 1px;
+  padding: 6px 9px;
+}
+.toolbar button.batch-enable {
+  color: #a9cf85;
+  border-color: rgba(120, 162, 92, 0.5);
+  background: linear-gradient(180deg, #1e2618, #161c12);
+}
+.toolbar button.batch-enable:hover:not(:disabled) {
+  color: #cfe8b1;
+  border-color: rgba(146, 196, 112, 0.85);
+  background: linear-gradient(180deg, #263020, #1a2216);
+}
+.toolbar button.batch-disable {
+  color: #d99a83;
+  border-color: rgba(180, 85, 63, 0.5);
+  background: linear-gradient(180deg, #241614, #1a100e);
+}
+.toolbar button.batch-disable:hover:not(:disabled) {
+  color: #f0b39b;
+  border-color: rgba(200, 105, 82, 0.85);
+  background: linear-gradient(180deg, #2c1b18, #20130f);
 }
 
 button.primary {

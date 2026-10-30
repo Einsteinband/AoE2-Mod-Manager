@@ -3,6 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type {
   ApplyReport,
   AppSettings,
+  BatchTarget,
+  BatchToggleReport,
   DeleteReport,
   InstalledIndexEntry,
   ModStats,
@@ -58,6 +60,22 @@ export function checkModUpdates(): Promise<ModUpdateReport> {
 /** 保存界面语言（en / zh；空字符串 = 跟随系统） */
 export function setLocale(locale: string): Promise<string> {
   return invoke<string>("set_locale", { locale });
+}
+
+/**
+ * v1.2：开关「本地中文搜索与自动索引」（settings.json 的 enable_indexing）。
+ * 开启 = Rust 立即在后台补建一次索引；关闭 = 本轮爬取立刻停下。
+ */
+export function setEnableIndexing(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_enable_indexing", { enabled });
+}
+
+/**
+ * v1.2：开关「在线页的本地搜索框」（settings.json 的 enable_local_search）。
+ * 纯界面开关：只影响入口是否显示，不碰索引数据。
+ */
+export function setEnableLocalSearch(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_enable_local_search", { enabled });
 }
 
 export function candidateRoots(): Promise<string[]> {
@@ -180,6 +198,19 @@ export function toggleModEnabled(
     folderName,
     enabled,
   });
+}
+
+/**
+ * 批量启用 / 禁用当前筛选出的列表。
+ * 后端整个批次只写一次盘（一次进程检测 → 一份备份 → 一次原子替换 → 一次回读校验），
+ * 因此不会出现“前面改了、后面没改”的部分成功；未在 mod-status.json 登记的条目
+ * 会被跳过并计入 notInStatus，而不是让整批失败。
+ */
+export function batchToggleMods(
+  enable: boolean,
+  targets: BatchTarget[],
+): Promise<BatchToggleReport> {
+  return invoke<BatchToggleReport>("batch_toggle_mods", { enable, targets });
 }
 
 // ---------------- v0.5：模组收藏与自定义备注 ----------------

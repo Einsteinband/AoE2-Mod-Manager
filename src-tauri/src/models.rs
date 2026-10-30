@@ -160,6 +160,14 @@ pub struct Settings {
     /// 启动静默检查前比对该值，24 小时内不再请求 GitHub（手动检查不受限）。
     #[serde(default)]
     pub last_auto_update_check_ms: i64,
+    /// 是否允许后台静默建立本地中文搜索索引（**默认关闭**）。
+    /// 关闭时 Rust 端一个爬取请求都不发，本地搜索只查 online_cache.json 已缓存条目。
+    #[serde(default)]
+    pub enable_indexing: bool,
+    /// 是否在「在线模组」页显示本地搜索框（**默认关闭**）。
+    /// 只是一个界面开关：关闭时本地搜索入口会整个隐藏（不影响已有索引数据）。
+    #[serde(default)]
+    pub enable_local_search: bool,
 }
 
 fn default_proxy_mode() -> String {
@@ -188,6 +196,10 @@ impl Default for Settings {
             translate_custom_url: None,
             translate_custom_key: None,
             last_auto_update_check_ms: 0,
+            // 默认关闭：不自动爬取官方列表，避免无谓流量与官方限流风险
+            enable_indexing: false,
+            // 默认不显示本地搜索框（需要时在设置里开启）
+            enable_local_search: false,
         }
     }
 }

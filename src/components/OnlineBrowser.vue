@@ -9,6 +9,8 @@ import {
   localizedTagName,
   tagLabel,
   type DownloadProgress,
+  type IndexSearchItem,
+  type IndexStatus,
   type InstallOutcome,
   type LoginTarget,
   type ModTag,
@@ -20,6 +22,8 @@ import {
   clearLoginCache,
   closeLoginWindow,
   findMods,
+  indexStatus as fetchIndexStatus,
+  indexSync,
   installMod,
   installedMods,
   loginTargets,
@@ -29,7 +33,9 @@ import {
   openLogin,
   openLoginSilent,
   openModWebpage,
+  onIndexProgress,
   probeAccountWindow,
+  searchLocalMods,
   sessionStatus,
   uiLog,
 } from "../online/service";
@@ -41,6 +47,7 @@ import {
   usableDetailCache,
 } from "../online/cache";
 import { assetUrl, fetchImages, localImages, onImagesReady, type LocalImage } from "../online/images";
+import { kickIndexSync } from "../online/indexSync";
 import { isNetworkError, isNetworkFailure } from "../online/networkError";
 import {
   ensureSession,
@@ -52,12 +59,15 @@ import {
   sessionPhase,
   setStatusMessage,
   manualRefreshNonce,
+  requestOpenSettings,
+  localSearchEnabled,
 } from "../sessionState";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { deleteModFiles, installedLocalIndex } from "../api";
 import { sourceLabel, translateBackendMessage } from "../format";
 import {
   activeTranslation,
+  applyExternalTitles,
   canTranslateText,
   currentTargetLanguageName,
   ensureTranslation,
@@ -69,6 +79,7 @@ import {
   translationErrorKind,
   translationLangEpoch,
   translationOf,
+  translatedTitleOf,
 } from "../online/translation";
 import {
   customNameOf,
@@ -139,17 +150,17 @@ watch([sort, order], () => {
   void reload();
 });
 
-/** 搜索：300ms 防抖，避免每敲一个字就打一次官方接口 */
-let queryTimer: number | null = null;
+/**
+ * 官方搜索：App.vue 只在「回车 / 点搜索」时才写 query（输入过程中不写），
+ * 所以这里直接重载，无需防抖。官方搜索一旦生效就清空本地搜索框（两套搜索互斥）。
+ */
 watch(query, () => {
-  if (queryTimer !== null) window.clearTimeout(queryTimer);
-  queryTimer = window.setTimeout(() => {
-    queryTimer = null;
-    void reload();
-  }, 300);
+  if (query.value.trim()) clearLocalSearch();
+  void reload();
 });
 onUnmounted(() => {
-  if (queryTimer !== null) window.clearTimeout(queryTimer);
+  if (localTimer !== null) window.clearTimeout(localTimer);
+  stopIndexPoll();
 });
 
 /** 顶栏“刷新”按钮只能走组件内部逻辑：仅暴露这一个方法 */
@@ -179,6 +190,253 @@ const activeTag = ref<number | null>(null);
  * 避免「收藏 + 官方分类」叠加导致侧栏计数与列表条数对不上（如 3 收藏却只剩 48/1037）。
  */
 const effectiveTag = computed<number | null>(() => (favoritesOnly.value ? null : activeTag.value));
+
+// ---------------- v1.1：本地搜索（与官方搜索彻底解耦） ----------------
+
+/** 本地搜索框输入（列表上方那个框，独立于顶栏官方搜索） */
+const localQuery = ref("");
+/** 已生效的本地关键词：空串 = 不在本地搜索态 */
+const localTerm = ref("");
+/** 本地检索结果：直接渲染进原来的卡片网格 */
+const localItems = ref<OnlineMod[]>([]);
+const localSearching = ref(false);
+/** 命中总数 / 索引规模（标题条展示用） */
+const localTotal = ref(0);
+const localIndexed = ref(0);
+
+/** 本地索引一次取多少条：一次拿全，不为本地结果单独翻页 */
+const LOCAL_SEARCH_LIMIT = 60;
+/** 300ms 防抖句柄 */
+let localTimer: number | null = null;
+/** 本地检索请求序号：换词时丢弃过期响应 */
+let localSeq = 0;
+
+/** 当前是否处于「本地搜索」视图：是则网格只渲染本地结果，且绝不发网络请求 */
+const localMode = computed(() => localTerm.value !== "");
+
+/** 退出本地搜索态并清空输入框（点官方分类 / 切来源 / 提交官方搜索时调用） */
+function clearLocalSearch(): void {
+  if (localTimer !== null) {
+    window.clearTimeout(localTimer);
+    localTimer = null;
+  }
+  localSeq += 1;
+  localQuery.value = "";
+  localTerm.value = "";
+  localItems.value = [];
+  localTotal.value = 0;
+  localSearching.value = false;
+}
+
+/**
+ * 执行本地检索：只调 `search_local_mods`（纯内存索引 + 本地译文标题），**零网络**。
+ * 命中项的中文标题先灌进共享译文表，卡片和详情页立刻显示中文。
+ */
+async function runLocalSearch(term: string): Promise<void> {
+  // v1.2：搜索框被关掉时不跑（进度事件也会反过来触发这里）
+  if (!localSearchEnabled.value) return;
+  const mySeq = ++localSeq;
+  localSearching.value = true;
+  try {
+    const result = await searchLocalMods({ query: term, offset: 0, limit: LOCAL_SEARCH_LIMIT });
+    if (mySeq !== localSeq) return;
+    const titled = result.items.filter((item) => !!item.zhTitle);
+    if (titled.length) {
+      applyExternalTitles(
+        titled.map((item) => ({ modId: item.modId, title: item.zhTitle as string })),
+      );
+    }
+    localItems.value = result.items.map(toOnlineMod);
+    localTotal.value = result.total;
+    localIndexed.value = result.indexed;
+    // 索引规模随搜索同步回来：顺手刷新状态面板的数字，省一次 invoke
+    if (indexStatus.value) indexStatus.value = { ...indexStatus.value, indexed: result.indexed };
+    // 切到本地视图前先归零滚动（顺序反了会先顶到最底再回弹）
+    if (!localMode.value) resetScrollToTop();
+    localTerm.value = term;
+    if (!indexStatus.value) void refreshIndexStatus();
+  } catch {
+    // 索引不可用属于预期（未登录 / 还在建立 / IPC 异常）：给空态，不发网络兜底
+    if (mySeq !== localSeq) return;
+    localItems.value = [];
+    localTotal.value = 0;
+    localTerm.value = term;
+  } finally {
+    if (mySeq === localSeq) localSearching.value = false;
+  }
+}
+
+/**
+ * 本地搜索框：300ms 防抖后查本地索引，**输入过程中一个网络请求都不会发**。
+ * 清空输入立即回到官方列表，不等防抖。
+ */
+watch(localQuery, (value) => {
+  if (localTimer !== null) {
+    window.clearTimeout(localTimer);
+    localTimer = null;
+  }
+  const term = value.trim();
+  if (!term) {
+    if (localTerm.value || localItems.value.length) {
+      localSeq += 1;
+      localTerm.value = "";
+      localItems.value = [];
+      localTotal.value = 0;
+      localSearching.value = false;
+      resetScrollToTop();
+    }
+    return;
+  }
+  localTimer = window.setTimeout(() => {
+    localTimer = null;
+    void runLocalSearch(term);
+  }, 300);
+});
+
+/** 本地索引状态（已收录条数 / 服务端总量 / 是否在建立） */
+const indexStatus = ref<IndexStatus | null>(null);
+/** 手动补建索引正在进行（按钮防连点） */
+const indexSyncBusy = ref(false);
+/** 本会话是否已经自动补建过索引（登录成功只补一次） */
+let indexSyncRequested = false;
+
+/** 索引里有数据 = 中文搜索可用 */
+const indexReady = computed(() => (indexStatus.value?.indexed ?? 0) > 0);
+
+/**
+ * 索引进度指示灯：failed（🔴 需登录）/ syncing（🟡）/ ready（🟢）/ idle（⚪）
+ *
+ * 判定以 `done` 为准：服务端深翻页截断 + 3 万条硬上限都会让
+ * 「indexed < totalCount」永远成立，拿它当条件会永远转圈。
+ */
+const indexPhaseKind = computed<"failed" | "syncing" | "ready" | "disabled" | "idle">(() => {
+  const st = indexStatus.value;
+  if (!st) return "idle";
+  // 开关关闭 → 无论如何都显示 ⚪（绝不能说「同步中」）
+  if (!st.indexingEnabled) return "disabled";
+  if (st.phase === "needLogin" || st.phase === "error") return "failed";
+  if (st.syncing) return "syncing";
+  if (st.done) return "ready";
+  // 已撞硬上限：不会再增长，当「就绪」展示
+  if (st.maxItems > 0 && st.indexed >= st.maxItems) return "ready";
+  return "syncing";
+});
+
+/** 索引还没建完：与指示灯同一套判定（空态提示 / 轮询都用它） */
+const indexBuilding = computed(() => indexPhaseKind.value === "syncing");
+
+/** 一行进度文案：同步中带「已收集 N / M 条」 */
+const indexStatusText = computed(() => {
+  const st = indexStatus.value;
+  if (!st) return t("online.indexStatusIdle");
+  if (indexPhaseKind.value === "disabled") return t("online.indexStatusDisabled");
+  if (indexPhaseKind.value === "failed") {
+    return st.phase === "needLogin"
+      ? t("online.indexStatusNeedLogin")
+      : t("online.indexStatusError");
+  }
+  if (indexPhaseKind.value === "ready") {
+    return t("online.indexStatusReady", { n: st.indexed });
+  }
+  return st.totalCount > 0
+    ? t("online.indexStatusSyncing", { n: st.indexed, total: st.totalCount })
+    : t("online.indexStatusSyncingUnknown", { n: st.indexed });
+});
+
+/** 读一次索引状态（已收录条数 / 服务端总量 / 是否在建立） */
+async function refreshIndexStatus(): Promise<void> {
+  try {
+    indexStatus.value = await fetchIndexStatus();
+  } catch {
+    /* 读不到状态就按「未建立」处理，空态会自己兜底 */
+  }
+  scheduleIndexPoll();
+}
+
+// ---------------- 索引进度轮询（同步中每 6 秒刷一次，纯内存读，开销可忽略） ----------------
+
+let indexPollTimer: number | null = null;
+
+function indexNeedsPolling(): boolean {
+  if (indexSyncBusy.value) return true;
+  const st = indexStatus.value;
+  if (!st || !st.indexingEnabled) return false;
+  if (st.syncing) return true;
+  // 从未完成且还没撞到硬上限：说明后台正在或在排队建，保持刷新直到 done
+  return !st.done && st.scanned < st.maxItems && st.updatedAtMs > 0;
+}
+
+function stopIndexPoll(): void {
+  if (indexPollTimer !== null) {
+    window.clearInterval(indexPollTimer);
+    indexPollTimer = null;
+  }
+}
+
+function scheduleIndexPoll(): void {
+  if (indexPollTimer !== null || !indexNeedsPolling()) return;
+  indexPollTimer = window.setInterval(() => {
+    const wasBuilding = indexBuilding.value;
+    void (async () => {
+      try {
+        indexStatus.value = await fetchIndexStatus();
+      } catch {
+        return;
+      }
+      // 刚建完：正在看的本地搜索结果必须重算，否则用户看到的还是「0 条」
+      if (wasBuilding && !indexBuilding.value && localMode.value && localTerm.value) {
+        void runLocalSearch(localTerm.value);
+      }
+      if (!indexNeedsPolling()) stopIndexPoll();
+    })();
+  }, 6000);
+}
+
+/**
+ * 补建索引（登录成功后自动跑一次，空态里也提供手动按钮）。
+ * 自动路径走 `kickIndexSync`：与 App.vue 顶层的登录触发器**共享同一个 Promise**，
+ * 同一 epoch 不会发两次请求。失败一律静默：未登录（unauthenticated）、
+ * 已在同步（busy）、限流冷却都不该打扰用户。
+ */
+async function triggerIndexSync(force = false): Promise<void> {
+  if (indexSyncBusy.value) return;
+  // v1.2：开关关闭时一个请求都不发（手动按钮也不会出现在 🟡 状态里）
+  // indexStatus 还没读到时不拦：Rust 侧 sync_blocking 自己会按设置拒掉
+  if (indexStatus.value && !indexStatus.value.indexingEnabled) return;
+  if (!force && indexSyncRequested) return;
+  indexSyncRequested = true;
+  indexSyncBusy.value = true;
+  try {
+    const report = force
+      ? await indexSync()
+      : await kickIndexSync(sessionEpoch.value);
+    if (report && (report.fetched > 0 || report.done)) {
+      setStatusMessage(t("online.localSearchReady", { n: report.indexed }));
+    }
+  } catch {
+    // 手动路径才可能抛（自动路径已被 kickIndexSync 吃掉）：允许下次登录再自动试一次
+    indexSyncRequested = false;
+  } finally {
+    indexSyncBusy.value = false;
+    await refreshIndexStatus();
+    // 索引变了：本地结果必须重算，否则用户看到的还是旧的命中集
+    if (localMode.value && localTerm.value) void runLocalSearch(localTerm.value);
+  }
+}
+
+/** 首次进入本地搜索时读一次索引状态（之后只在补建完成后刷新） */
+watch(localMode, (on) => {
+  if (on) void refreshIndexStatus();
+});
+
+/** 设置里关掉本地搜索框：立即退出本地视图，回到官方列表 */
+watch(localSearchEnabled, (on) => {
+  if (on) return;
+  if (localMode.value || localQuery.value) {
+    clearLocalSearch();
+    resetScrollToTop();
+  }
+});
 
 const selected = ref<OnlineMod | null>(null);
 const detail = ref<Record<string, unknown> | null>(null);
@@ -261,21 +519,29 @@ const sentinel = ref<HTMLElement | null>(null);
 let unlisten: (() => void) | null = null;
 /** 封面图落地事件 */
 let unlistenImages: (() => void) | null = null;
+/** 索引进度事件（Rust 每入库一批就 emit 一次） */
+let unlistenIndex: (() => void) | null = null;
 let pollTimer: number | null = null;
 let observer: IntersectionObserver | null = null;
 /** 请求序号：筛选条件变化时自增，丢弃过期响应 */
 let seq = 0;
 
 const heading = computed(() => {
+  if (localMode.value) return t("online.localSearchHeading", { q: localTerm.value });
   if (favoritesOnly.value) return t("favorites.heading");
   if (onlySubscribed.value) return t("online.headingSubscribed");
   return query.value.trim() ? t("online.headingSearch") : t("online.headingAll");
 });
 
-/** 收藏过滤后的可见列表（列表按页加载，只过滤已加载条目，绝不重新请求） */
-const visibleItems = computed<OnlineMod[]>(() =>
-  favoritesOnly.value ? items.value.filter((m) => isFavorite(m.modId)) : items.value,
-);
+/**
+ * 网格实际渲染的列表。
+ * 本地搜索态 → 本地索引结果；收藏 → 按 modId 过滤已加载条目（绝不重新请求）；否则官方列表。
+ * 单一出口：模板里所有「有没有内容」的判断都读它，避免两套搜索互相串台。
+ */
+const visibleItems = computed<OnlineMod[]>(() => {
+  if (localMode.value) return localItems.value;
+  return favoritesOnly.value ? items.value.filter((m) => isFavorite(m.modId)) : items.value;
+});
 
 const activeTagName = computed(() => {
   // 收藏视图：分类已让位，标题栏直接说明作用域
@@ -386,13 +652,13 @@ const waitingDetail = computed(
   () => !!selected.value && !canTranslateText(descriptionText.value),
 );
 
-/** 详情标题优先级：备注名 > 中文译文 > 官方原名 */
+/** 详情标题优先级：备注名 > 中文译文 / 本地索引标题 > 官方原名 */
 const headerTitle = computed(() => {
   const mod = selected.value;
   if (!mod) return "";
   const custom = customName.value;
   if (custom) return custom;
-  const title = selectedTranslation.value?.title?.trim();
+  const title = translatedTitleOf(mod.modId);
   return title ? title : mod.title;
 });
 
@@ -893,6 +1159,9 @@ function patchIfChanged(current: OnlineMod, fresh: OnlineMod): void {
  * - merge：同一筛选的静默刷新 / 翻页 → 逐条比对，只有真变的卡片被 patch，新条目追加；
  * - replace：换了筛选（分类 / 搜索 / 排序 / 来源 / 收藏）→ 整体替换，但**复用已存在的对象**，
  *   一次赋值完成，中间不出现空白帧，selected 引用也不失效（详情面板不闪）。
+ *
+ * 中文查询下官方与本地索引两路结果在这里汇合：**官方在前、本地补充在尾部**，
+ * 按 modId 去重 —— 官方条目带活的订阅数/评分，字段更准，永远优先。
  */
 function applyList(next: OnlineMod[], mode: "merge" | "replace"): void {
   if (mode === "replace") {
@@ -935,7 +1204,7 @@ function applyList(next: OnlineMod[], mode: "merge" | "replace"): void {
  */
 function hydrateVisibleTranslations(): void {
   hydrateTranslations(
-    items.value
+    visibleItems.value
       .filter((mod) => mod.modId > 0)
       .map((mod) => ({ modId: mod.modId, title: mod.title ?? "", description: "" })),
   );
@@ -944,6 +1213,8 @@ function hydrateVisibleTranslations(): void {
 /** 目标语言一变（设置页切换 / 跟随界面语言联动）→ 重新预热，卡片立刻换成新语言 */
 watch(translationLangEpoch, () => {
   hydrateVisibleTranslations();
+  // 本地索引的标题占位是按旧语言灌进来的（切语言时已清空）：重新检索一次，别退化成英文
+  if (localMode.value && localTerm.value) void runLocalSearch(localTerm.value);
 });
 
 /**
@@ -994,7 +1265,32 @@ async function loadFavorites(mode: "merge" | "replace"): Promise<void> {
 }
 
 /**
- * 列表加载唯一入口（v1.0）。
+ * 本地索引搜索命中的一条 → 前端卡片用的 OnlineMod。
+ * Rust 返回的字段与 OnlineModSummary 完全同形，这里只去掉 zhTitle / matchedBy。
+ */
+function toOnlineMod(item: IndexSearchItem): OnlineMod {
+  return {
+    modId: item.modId,
+    title: item.title,
+    creator: item.creator ?? null,
+    thumbnail: item.thumbnail ?? null,
+    installs: item.installs ?? null,
+    installsTruncated: item.installsTruncated ?? false,
+    rating: item.rating ?? null,
+    modStatus: item.modStatus ?? null,
+    userInstalled: item.userInstalled ?? false,
+    userDownloaded: item.userDownloaded ?? false,
+    updateAvailable: item.updateAvailable ?? false,
+    gameTitleId: item.gameTitleId ?? null,
+    tagIds: item.tagIds ?? [],
+    tagNames: item.tagNames ?? [],
+    fileSize: item.fileSize ?? null,
+    raw: item.raw ?? {},
+  };
+}
+
+/**
+ * 列表加载唯一入口（v1.1：官方搜索专用）。
  *
  * 规则（严格按需求）：
  * 1. 先查缓存。**命中就立刻渲染并彻底断网** —— 即使是空列表（0 条）也算命中；
@@ -1022,6 +1318,8 @@ async function reload(forceNetwork = false): Promise<void> {
     return;
   }
 
+  // v1.1：本地搜索不再掺入官方列表——两条搜索链路彻底分开，
+  // 这里只管官方（缓存 → /Find），本地结果由 runLocalSearch 独立渲染。
   const cached = await loadCachePages(1);
   if (mySeq !== seq) return;
 
@@ -1195,8 +1493,8 @@ function thumbOf(mod: OnlineMod | null): string | null {
 /** 滚动到底部：追加下一批（同样缓存优先，只显示底部小 spinner，绝不整屏转圈） */
 async function loadMore(): Promise<void> {
   if (loading.value || loadingMore.value || !hasMore.value) return;
-  // 收藏视图纯本地：不翻页、不发请求
-  if (favoritesOnly.value || error.value || !items.value.length) return;
+  // 收藏视图 / 本地搜索视图纯本地：不翻页、不发请求
+  if (favoritesOnly.value || localMode.value || error.value || !items.value.length) return;
   // 连续滚轮 / 惯性滚动：两次加载之间至少间隔 900ms
   const now = Date.now();
   if (now - lastLoadMoreMs < MIN_LOAD_MORE_GAP_MS) return;
@@ -1340,7 +1638,10 @@ function pickTag(id: number | null) {
   // 分类与收藏视图互斥：选了分类就必然要退出收藏视图
   const wasFavorites = favoritesOnly.value;
   if (wasFavorites) favoritesOnly.value = false;
-  if (activeTag.value === id && !wasFavorites) return;
+  // v1.1：点官方分类 = 回到官方列表，本地搜索框自动清空
+  const wasLocal = localMode.value;
+  if (wasLocal) clearLocalSearch();
+  if (activeTag.value === id && !wasFavorites && !wasLocal) return;
   activeTag.value = id;
   void reload();
 }
@@ -1349,7 +1650,10 @@ function pickSubscribed(value: boolean) {
   // 来源与收藏视图互斥：在收藏视图里点来源，先退出收藏再按来源重查
   const wasFavorites = favoritesOnly.value;
   if (wasFavorites) favoritesOnly.value = false;
-  if (onlySubscribed.value === value) return;
+  // v1.1：切来源也是回官方列表，本地搜索框一并清空
+  const wasLocal = localMode.value;
+  if (wasLocal) clearLocalSearch();
+  if (onlySubscribed.value === value && !wasLocal) return;
   onlySubscribed.value = value;
   // /Installed 不支持 tags 过滤：进入「已订阅」必须清空官方分类，
   // 否则前端过滤会把「全部订阅」砍成只剩几条（看起来像只同步了少量模组）
@@ -1365,6 +1669,8 @@ function pickSubscribed(value: boolean) {
  * **不会调用 Find / Installed**，断网也可用；哨兵被 v-if 移除后自动翻页也会停掉。
  */
 function toggleFavorites() {
+  // v1.1：收藏是纯本地视图，与本地搜索互斥
+  if (localMode.value) clearLocalSearch();
   favoritesOnly.value = !favoritesOnly.value;
   void reload();
 }
@@ -1686,6 +1992,11 @@ async function handleSessionEpoch() {
   handledEpoch = current;
   if (sessionPhase.value !== "online") return;
   await loadTags();
+  // v1.0：登录成功 → 自动补建索引（之前未登录时索引只能是空的）。
+  // v1.2：每次新登录都重置闸门 —— 上一轮可能就是因为 Cookie 失效（401）中止的，
+  //       重新登录后必须能立刻接着爬，而不是等到下次启动。
+  indexSyncRequested = false;
+  void triggerIndexSync();
   // 自动触发：受 30 秒闸门约束，缓存命中时不会再打网络
   await reload(false);
 }
@@ -1707,6 +2018,21 @@ async function boot() {
   });
   // v0.5：收藏 / 备注只读一次磁盘（失败不阻塞在线页）
   void ensureUserData().catch(() => undefined);
+
+  // v1.0：先读索引状态（中文搜索的空态 / 提示依赖它）
+  void refreshIndexStatus();
+
+  // v1.2：索引进度事件（每入库一批推一次）：实时刷进度行，并在本地搜索态下
+  // 把新入库的命中补上（1.5s 节流，边爬边搜）
+  let lastIndexRefresh = 0;
+  unlistenIndex = await onIndexProgress((status) => {
+    indexStatus.value = status;
+    if (!localMode.value || !localTerm.value) return;
+    const now = Date.now();
+    if (now - lastIndexRefresh < 1500) return;
+    lastIndexRefresh = now;
+    void runLocalSearch(localTerm.value);
+  });
 
   // ① 先渲染缓存（内部就是一次 invoke，命中就立刻出卡片，绝不转圈；缓存命中不联网）
   await reload(false);
@@ -1803,6 +2129,7 @@ onUnmounted(() => {
   stopSilentTimer();
   if (unlisten) unlisten();
   if (unlistenImages) unlistenImages();
+  if (unlistenIndex) unlistenIndex();
   if (pollTimer) window.clearInterval(pollTimer);
 });
 </script>
@@ -1900,6 +2227,13 @@ onUnmounted(() => {
           <template v-if="favoritesOnly">
             {{ t("favorites.localHint", { n: visibleItems.length }) }}
           </template>
+          <template v-else-if="localMode">
+            {{ t("online.localSearchFound", { n: localTotal }) }}
+            <template v-if="localIndexed > 0">
+              · {{ t("online.localSearchIndexed", { n: localIndexed }) }}
+            </template>
+            <template v-if="localSearching">{{ t("online.loadingSuffix") }}</template>
+          </template>
           <template v-else>
             {{ activeTagName }} ·
             {{ items.length
@@ -1909,11 +2243,80 @@ onUnmounted(() => {
         </span>
       </div>
 
+      <!-- v1.1：本地搜索框（与顶栏官方搜索彻底解耦：只查本地索引，输入过程零网络）
+           v1.2：设置 → 通用里可关闭此入口（默认关闭） -->
+      <div v-if="localSearchEnabled" class="local-search">
+        <span class="glyph">⌕</span>
+        <input
+          v-model="localQuery"
+          type="search"
+          :placeholder="t('online.localSearchPlaceholder')"
+          spellcheck="false"
+        />
+        <span v-if="localSearching" class="spinner"></span>
+        <button
+          v-if="localQuery"
+          class="clear"
+          type="button"
+          :title="t('search.clear')"
+          :aria-label="t('search.clear')"
+          @click="localQuery = ''"
+        >
+          ✕
+        </button>
+      </div>
+
+      <!-- v1.2：索引进度指示（Rust 事件推送，实时刷新；不靠轮询）
+           搜索框关掉但索引仍在跑时也保留这行，让用户能看到进度 -->
+      <div
+        v-if="localSearchEnabled || (indexStatus?.indexingEnabled ?? false)"
+        class="index-status"
+        :class="indexPhaseKind"
+      >
+        <span class="text">{{ indexStatusText }}</span>
+        <button
+          v-if="indexPhaseKind === 'failed' && indexStatus?.phase === 'needLogin'"
+          type="button"
+          class="mini"
+          @click="startLogin()"
+        >
+          {{ t("online.openLogin") }}
+        </button>
+        <button
+          v-else-if="indexPhaseKind === 'syncing'"
+          type="button"
+          class="mini"
+          :disabled="indexSyncBusy"
+          @click="triggerIndexSync(true)"
+        >
+          {{ indexSyncBusy ? t("online.localSearchBuildingShort") : t("online.localSearchBuildNow") }}
+        </button>
+        <!-- 开关关闭：指示灯变 ⚪，直接给一个跳设置页的入口 -->
+        <button
+          v-else-if="indexPhaseKind === 'disabled'"
+          type="button"
+          class="mini"
+          @click="requestOpenSettings()"
+        >
+          {{ t("online.indexStatusGoSettings") }}
+        </button>
+        <button
+          v-else-if="indexPhaseKind === 'idle'"
+          type="button"
+          class="mini"
+          :disabled="indexSyncBusy"
+          @click="triggerIndexSync(true)"
+        >
+          {{ indexSyncBusy ? t("online.localSearchBuildingShort") : t("online.localSearchBuildNow") }}
+        </button>
+      </div>
+
       <!-- 搜索 / 排序 / 刷新已统一到 App.vue 的顶栏，这里只保留标题条与列表 -->
       <div ref="scrollEl" class="grid-scroll">
         <!-- v0.6：已删除全屏「正在检查登录状态」蒙层。有缓存就直接出列表；
              既没缓存又没登录才显示登录面板，校验进行中只在面板里加一行 🟡 提示。 -->
-        <div v-if="!items.length && !session?.loggedIn" class="state-panel">
+        <!-- v1.1：本地搜索态下不管登录/官方列表，直接走下面的本地分支 -->
+        <div v-if="!localMode && !items.length && !session?.loggedIn" class="state-panel">
           <h2>{{ t("online.sessionConnectTitle") }}</h2>
           <p>{{ t("online.sessionConnectBody") }}</p>
           <p v-if="sessionPhase === 'checking'" class="online-silent">
@@ -1954,12 +2357,52 @@ onUnmounted(() => {
         <template v-else>
           <!-- 收藏视图的空态必须排在前面：它是纯本地结果，
                不能报“官方接口没返回”这种误导文案 -->
-          <div v-if="favoritesOnly && !visibleItems.length" class="state-panel">
+          <div v-if="favoritesOnly && !localMode && !visibleItems.length" class="state-panel">
             <h2>⭐ {{ t("favorites.empty") }}</h2>
             <p>{{ t("favorites.localEmpty") }}</p>
           </div>
 
-          <div v-else-if="noCacheOffline" class="state-panel">
+          <!-- 本地搜索空态：与官方接口完全无关，只说本地索引的情况。 -->
+          <div v-else-if="localMode && !visibleItems.length && !localSearching" class="state-panel">
+            <h2>{{ t("online.localSearchEmptyTitle") }}</h2>
+            <!-- 边爬边搜：索引还没建完时不能说「没有结果」，要说清后台还在继续 -->
+            <p v-if="indexBuilding" class="note">{{ t("online.localSearchPartial") }}</p>
+            <p v-else-if="indexStatus && !indexStatus.indexingEnabled" class="note">
+              {{ t("online.localSearchDisabledHint") }}
+            </p>
+            <p v-else>{{ t("online.localSearchEmptyBody") }}</p>
+            <p v-if="!session?.loggedIn" class="note">{{ t("online.localSearchNeedLogin") }}</p>
+            <p v-else-if="indexSyncBusy" class="note">{{ t("online.localSearchBuildingShort") }}</p>
+            <p v-else-if="!indexReady" class="note">{{ t("online.localSearchNotReady") }}</p>
+            <p v-else-if="indexBuilding" class="note">
+              {{ t("online.localSearchBuilding", { n: indexStatus?.indexed ?? 0, total: indexStatus?.totalCount ?? 0 }) }}
+            </p>
+            <div class="login-actions">
+              <button v-if="!session?.loggedIn" type="button" @click="startLogin()">
+                {{ t("online.openLogin") }}
+              </button>
+              <button
+                v-else-if="indexStatus && !indexStatus.indexingEnabled"
+                type="button"
+                @click="requestOpenSettings()"
+              >
+                {{ t("online.indexStatusGoSettings") }}
+              </button>
+              <button
+                v-else-if="!indexReady || indexBuilding"
+                type="button"
+                :disabled="indexSyncBusy"
+                @click="triggerIndexSync(true)"
+              >
+                {{ indexSyncBusy ? t("online.localSearchBuildingShort") : t("online.localSearchBuildNow") }}
+              </button>
+              <button v-else type="button" @click="runLocalSearch(localTerm)">
+                {{ t("online.reload") }}
+              </button>
+            </div>
+          </div>
+
+          <div v-else-if="noCacheOffline && !localMode" class="state-panel">
             <h2>{{ onlySubscribed ? t("online.headingSubscribed") : t("online.offlineNoCacheTitle") }}</h2>
             <p>{{ t("online.offlineNoCacheBody") }}</p>
             <div class="login-actions">
@@ -1967,7 +2410,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-else-if="error" class="state-panel">
+          <div v-else-if="error && !localMode" class="state-panel">
             <h2>{{ t("online.requestFailedTitle") }}</h2>
             <p>{{ error }}</p>
             <div class="login-actions">
@@ -1976,12 +2419,12 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-else-if="!items.length && loading" class="state-panel">
+          <div v-else-if="!visibleItems.length && (localMode ? localSearching : loading)" class="state-panel">
             <h2><span class="spinner"></span>{{ t("online.listLoadingTitle") }}</h2>
             <p class="note">{{ t("online.listLoadingBody", { n: PAGE_SIZE }) }}</p>
           </div>
 
-          <div v-else-if="!items.length" class="state-panel">
+          <div v-else-if="!visibleItems.length" class="state-panel">
             <h2>{{ t("online.listEmptyTitle") }}</h2>
             <p>{{ t("online.listEmptyBody") }}</p>
             <div class="login-actions">
@@ -1990,8 +2433,8 @@ onUnmounted(() => {
           </div>
 
           <template v-else>
-            <!-- 离线 + 有缓存：列表照常展示，只在上方加一条不可下载的提示 -->
-            <div v-if="!session?.loggedIn" class="offline-strip">
+            <!-- 离线 + 有缓存：列表照常展示，只在上方加一条不可下载的提示（本地搜索视图不插这条） -->
+            <div v-if="!session?.loggedIn && !localMode" class="offline-strip">
               ⚪ {{ t("online.offlineCacheNotice") }}
             </div>
 
@@ -2006,9 +2449,13 @@ onUnmounted(() => {
               />
             </div>
 
+            <!-- 本地搜索：哨兵不挂（v-if 移除后 watch([scrollEl, sentinel]) 自动解绑），一次给完 60 条不翻页 -->
+            <div v-if="localMode" class="scroll-foot">
+              {{ t("online.localSearchFooter", { n: visibleItems.length }) }}
+            </div>
             <!-- 收藏视图不挂哨兵：sentinel 为 null 后 watch([scrollEl, sentinel]) 会自动解绑
                  IntersectionObserver 与滚动监听，从根上停掉自动翻页（双保险：loadMore 内还有一道 guard） -->
-            <div v-if="favoritesOnly" class="scroll-foot">
+            <div v-else-if="favoritesOnly" class="scroll-foot">
               {{ t("favorites.footerLoaded", { fav: visibleItems.length, loaded: items.length }) }}
             </div>
             <div v-else ref="sentinel" class="scroll-foot">

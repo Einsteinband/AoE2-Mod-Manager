@@ -7,7 +7,7 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    taglinePrefix: "v0.2.2 · by ",
+    taglinePrefix: "v0.2.3 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",

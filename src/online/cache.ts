@@ -47,6 +47,36 @@ export function readCachedPages(params: CacheQuery): Promise<CachedPage[]> {
   });
 }
 
+export interface InstalledCacheQuery {
+  start: number;
+  count: number;
+  /** 最多连续读几页（默认 20） */
+  maxPages?: number;
+}
+
+/**
+ * **已订阅列表（/Installed）专用**读缓存入口。
+ *
+ * 与 `readCachedPages` 的区别：Rust 侧 `/Installed` 的 key 只有
+ * `installed|start={start}|count={count}`，不掺 query / sort / order / tags。
+ * 这里显式走 installed=true 且不传任何搜索参数，保证与 `online_installed`
+ * 写缓存时的 key 完全一致（否则永远读不到自己写的数据）。
+ *
+ * 返回空数组 = 该页没有缓存，调用方才该去发网络请求。
+ */
+export function readInstalledPages(params: InstalledCacheQuery): Promise<CachedPage[]> {
+  return invoke<CachedPage[]>("online_cache_pages", {
+    query: "",
+    start: params.start,
+    count: params.count,
+    sort: "",
+    order: "",
+    tags: [],
+    installed: true,
+    maxPages: params.maxPages ?? 20,
+  });
+}
+
 /** 缓存里出现过的所有列表项（“我的收藏”纯本地浏览用，绝不发网络请求） */
 export function allCachedItems(): Promise<OnlineMod[]> {
   return invoke<OnlineMod[]>("online_cache_items");

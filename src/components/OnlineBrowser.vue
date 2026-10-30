@@ -37,6 +37,7 @@ import {
   allCachedItems,
   readCachedPages,
   readDetailCache,
+  readInstalledPages,
   usableDetailCache,
 } from "../online/cache";
 import { assetUrl, fetchImages, localImages, onImagesReady, type LocalImage } from "../online/images";
@@ -649,6 +650,14 @@ const CACHE_PAGE_LIMIT = 8;
  */
 const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * 「已订阅」（/Installed）的缓存过期阈值：订阅状态随本机安装 / 官网退订随时变化，
+ * 沿用 24 小时会把「只缓存到 6 条」的半截结果当成事实卡一整天，所以单独收紧到 10 分钟。
+ */
+const INSTALLED_STALE_MS = 10 * 60 * 1000;
+/** 已订阅一次最多读回几页缓存：20 × 24 = 480 条，覆盖绝大多数账号的订阅量 */
+const INSTALLED_CACHE_PAGE_LIMIT = 20;
+
 /** 滚动加载最小间隔：连续滚轮 / 惯性滚动不会触发连环请求 */
 const MIN_LOAD_MORE_GAP_MS = 900;
 /** 滚动停下多久才判定「真的到底了」 */
@@ -700,21 +709,29 @@ async function loadCachePages(
   complete: boolean;
   savedAtMs: number;
 }> {
+  const installed = onlySubscribed.value;
   try {
-    const pages = await readCachedPages({
-      query: query.value.trim(),
-      start: from,
-      count: PAGE_SIZE,
-      sort: sort.value,
-      order: order.value,
-      tags: effectiveTag.value === null ? [] : [effectiveTag.value],
-      installed: onlySubscribed.value,
-      maxPages: CACHE_PAGE_LIMIT,
-    });
+    // 已订阅：走 /Installed 专用 key（installed|start|count），绝不掺搜索 / 排序 / 分类，
+    // 否则 key 与 online_installed 写入时不一致，永远读不到自己写的缓存。
+    const pages = installed
+      ? await readInstalledPages({
+          start: from,
+          count: PAGE_SIZE,
+          maxPages: INSTALLED_CACHE_PAGE_LIMIT,
+        })
+      : await readCachedPages({
+          query: query.value.trim(),
+          start: from,
+          count: PAGE_SIZE,
+          sort: sort.value,
+          order: order.value,
+          tags: effectiveTag.value === null ? [] : [effectiveTag.value],
+          maxPages: CACHE_PAGE_LIMIT,
+        });
     const merged: OnlineMod[] = [];
     let total: number | null = null;
     let nextStart = from;
-    let complete = false;
+    let shortPage = false;
     let savedAtMs = 0;
     for (const page of pages) {
       if (!savedAtMs && page.savedAtMs) savedAtMs = page.savedAtMs;
@@ -722,17 +739,20 @@ async function loadCachePages(
       for (const raw of page.items) {
         const mod = raw as unknown as OnlineMod;
         if (typeof mod?.modId !== "number") continue;
-        if (onlySubscribed.value && !exceedsTagFilter(mod)) continue;
+        if (installed && !exceedsTagFilter(mod)) continue;
         if (!merged.some((seen) => seen.modId === mod.modId)) merged.push(mod);
       }
       nextStart = page.start + page.items.length;
       if (page.items.length < PAGE_SIZE) {
-        complete = true;
+        shortPage = true;
         break;
       }
     }
     if (total !== null) totalCount.value = total;
-    // hit = 这个「分类 + 搜索词 + 排序 + 页码」的 key 在缓存里真实存在（哪怕结果是 0 条）
+    // 结束判定：服务端报过总数就以「已取回条数 ≥ 总数」为准，否则才退回「本页不满一页」。
+    // 旧实现只看「本页不满一页」，一页半截缓存就会把列表永久判成「已到最后一页」（6 条卡死）。
+    const complete = total !== null ? nextStart - 1 >= total : shortPage;
+    // hit = 这个 key 在缓存里真实存在（哪怕结果是 0 条）
     return { hit: pages.length > 0, items: merged, nextStart, complete, savedAtMs };
   } catch {
     return { hit: false, items: [], nextStart: from, complete: false, savedAtMs: 0 };
@@ -879,12 +899,20 @@ async function reload(forceNetwork = false): Promise<void> {
   const cached = await loadCachePages(1);
   if (mySeq !== seq) return;
 
+  // 已订阅用更短的过期阈值（10 分钟），其余列表仍是 24 小时
+  const ttl = onlySubscribed.value ? INSTALLED_STALE_MS : CACHE_STALE_MS;
   const cacheAge = cached.savedAtMs ? Date.now() - cached.savedAtMs : Number.MAX_SAFE_INTEGER;
   const lastFetch = lastFetchMsBySignature.get(signature) ?? 0;
   const sinceFetch = Date.now() - lastFetch;
+  const expired = cacheAge >= ttl;
+  /**
+   * 已订阅：只要决定联网（缓存过期 / 手动刷新），就从第 1 页**整体重建**。
+   * 绝不把「陈旧的半截缓存」和服务器真实现状拼在一起（6 条配 24 条会错位）。
+   */
+  const rebuildInstalled = onlySubscribed.value && (forceNetwork || expired);
 
   if (cached.hit) {
-    // ① 命中缓存：立刻渲染（哪怕 0 条），然后断网
+    // ① 命中缓存：立刻渲染（哪怕 0 条）
     noCacheOffline.value = false;
     listSignature = signature;
     applyList(cached.items, mode);
@@ -895,17 +923,12 @@ async function reload(forceNetwork = false): Promise<void> {
     loadingMore.value = false;
     setStatusMessage(t("statusbar.cacheLoaded"));
     void syncImages();
-
-    // 自动触发（切分类 / 启动 / 登录态变化 / 退出）：缓存未过 24 小时 → 一个请求都不发
-    if (!forceNetwork && cacheAge < CACHE_STALE_MS) return;
-    // 手动刷新：2 秒防连点
-    if (sinceFetch < USER_MIN_GAP_MS) return;
   } else {
     // ② 从未缓存过
     listSignature = signature;
     cursor.value = 1;
     hasMore.value = true;
-    // 已知断网：一个请求都不发，直接空态（避免终端满屏 Dns Failed）
+    // 已知断网：一个请求都不发，直接给友好提示（避免终端满屏 Dns Failed）
     if (isNetworkError.value && !forceNetwork) {
       items.value = [];
       loading.value = false;
@@ -916,8 +939,19 @@ async function reload(forceNetwork = false): Promise<void> {
     noCacheOffline.value = false;
     loading.value = items.value.length === 0;
     // 同一个筛选连点（且上一次请求还没落盘）时，2 秒内不重复请求
-    if (sinceFetch < USER_MIN_GAP_MS) return;
+    if (!forceNetwork && sinceFetch < USER_MIN_GAP_MS) return;
   }
+
+  if (rebuildInstalled) {
+    cursor.value = 1;
+    hasMore.value = true;
+  } else if (cached.hit && !expired && !forceNetwork) {
+    // 缓存新鲜：静默刷新关闭 —— 一个请求都不发
+    return;
+  }
+
+  // 手动刷新 / 过期补拉：同一筛选 2 秒防连点
+  if (sinceFetch < USER_MIN_GAP_MS) return;
 
   if (sessionPhase.value !== "online") {
     loading.value = false;
@@ -925,9 +959,20 @@ async function reload(forceNetwork = false): Promise<void> {
     return;
   }
 
+  // 已知断网：不再撞墙，继续展示缓存
+  if (isNetworkError.value && !forceNetwork) {
+    loading.value = false;
+    hasMore.value = false;
+    if (!cached.hit) noCacheOffline.value = true;
+    setStatusMessage(t("statusbar.networkDownHint"));
+    return;
+  }
+
   // 同一筛选已经有一个请求在飞：绝不叠加
   if (fetchSignature === signature) return;
 
+  /** 从第 1 页开始取 = 这次响应代表整个列表，必须 replace（清掉旧的半截数据） */
+  const replaceOnFirst = cursor.value === 1;
   fetchSignature = signature;
   lastFetchMsBySignature.set(signature, Date.now());
   setStatusMessage(cached.hit ? t("statusbar.refreshing") : t("statusbar.fetching"));
@@ -942,14 +987,21 @@ async function reload(forceNetwork = false): Promise<void> {
         error.value = result.serverMessage;
       }
       cursor.value += result.items.length;
-      if (result.items.length < PAGE_SIZE) hasMore.value = false;
+      // 结束判定：有总数就以总数为准，否则才按「不满一页」判定
+      const fetchedAll =
+        result.totalCount !== null
+          ? cursor.value - 1 >= result.totalCount
+          : result.items.length < PAGE_SIZE;
+      hasMore.value = result.items.length > 0 && !fetchedAll;
       const usableItems = onlySubscribed.value
         ? result.items.filter(exceedsTagFilter)
         : result.items;
-      applyList(usableItems, guard === 1 ? mode : "merge");
-      if (result.items.length === 0) break;
-      if (guard === 1) break;
-      if (!hasMore.value) break;
+      if (replaceOnFirst && !usableItems.length && items.value.length) {
+        // 服务端这一页空（未登录 / 临时异常）：保留已渲染的缓存，绝不用空列表覆盖
+        break;
+      }
+      applyList(usableItems, guard === 1 && replaceOnFirst ? "replace" : "merge");
+      break;
     }
     if (mySeq !== seq) return;
     error.value = null;
@@ -1028,7 +1080,7 @@ async function loadMore(): Promise<void> {
   // 缓存里还有下一页就直接用，不碰网络
   const cached = await loadCachePages(cursor.value);
   if (mySeq !== seq) return;
-  if (cached.items.length) {
+  if (cached.hit && cached.items.length) {
     const before = items.value.length;
     applyList(cached.items, "merge");
     cursor.value = cached.nextStart;
@@ -1037,6 +1089,10 @@ async function loadMore(): Promise<void> {
       void syncImages();
       return;
     }
+  } else if (cached.hit && !cached.items.length) {
+    // 这一页在缓存里确实是空的：真到底了，不要再打网络
+    hasMore.value = false;
+    return;
   }
 
   if (sessionPhase.value !== "online") {
@@ -1059,14 +1115,28 @@ async function loadMore(): Promise<void> {
       if (mySeq !== seq) return;
       if (result.totalCount !== null) totalCount.value = result.totalCount;
       cursor.value += result.items.length;
-      if (result.items.length < PAGE_SIZE) hasMore.value = false;
-      if (result.items.length === 0) break;
+      if (result.items.length === 0) {
+        hasMore.value = false;
+        break;
+      }
+      // 结束判定：服务端给了总数就以总数为准（不再被「不满一页」误判成已到最后一页）
+      const fetchedAll =
+        result.totalCount !== null
+          ? cursor.value - 1 >= result.totalCount
+          : result.items.length < PAGE_SIZE;
       const usableItems = onlySubscribed.value
         ? result.items.filter(exceedsTagFilter)
         : result.items;
       const before = items.value.length;
       applyList(usableItems, "merge");
-      if (items.value.length > before) break;
+      if (items.value.length > before) {
+        // 已追加新卡片：下一批交给滚动事件 / keepFilling，不在这里连发
+        hasMore.value = !fetchedAll;
+        break;
+      }
+      // 服务端忽略了 start / 全部重复：没有新条目就停止翻页，避免无限请求
+      hasMore.value = false;
+      break;
     }
     void syncImages();
   } catch (e) {
@@ -1155,6 +1225,10 @@ function pickSubscribed(value: boolean) {
   if (wasFavorites) favoritesOnly.value = false;
   if (onlySubscribed.value === value) return;
   onlySubscribed.value = value;
+  // /Installed 不支持 tags 过滤：进入「已订阅」必须清空官方分类，
+  // 否则前端过滤会把「全部订阅」砍成只剩几条（看起来像只同步了少量模组）
+  if (value) activeTag.value = null;
+  noCacheOffline.value = false;
   void reload();
 }
 
@@ -1772,7 +1846,7 @@ onUnmounted(() => {
           </div>
 
           <div v-else-if="noCacheOffline" class="state-panel">
-            <h2>{{ t("online.offlineNoCacheTitle") }}</h2>
+            <h2>{{ onlySubscribed ? t("online.headingSubscribed") : t("online.offlineNoCacheTitle") }}</h2>
             <p>{{ t("online.offlineNoCacheBody") }}</p>
             <div class="login-actions">
               <button type="button" @click="reload(true)">{{ t("online.retry") }}</button>

@@ -1,7 +1,9 @@
 ﻿# publish.ps1
 # 自动读取 package.json 的版本号，打 Tag、推送，并上传本地安装包到 GitHub Release。
 
-$ErrorActionPreference = "Stop"
+# 注意：用 Continue + 显式 $LASTEXITCODE 校验，避免 git 的 "LF will be replaced by CRLF"
+# 之类 stderr 警告在 PS 5.1 下被当成终止性异常，导致脚本实际成功却返回 exit 1。
+$ErrorActionPreference = "Continue"
 
 $version = (Get-Content "package.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
 $tag = "v$version"

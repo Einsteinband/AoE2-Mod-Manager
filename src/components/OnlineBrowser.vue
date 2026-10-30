@@ -1839,13 +1839,11 @@ onUnmounted(() => {
           type="button"
           class="side-item"
           :class="{ active: favoritesOnly }"
-          :title="t('favorites.noteOnline')"
           @click="toggleFavorites"
         >
           <span class="label">⭐ {{ t("favorites.label") }}</span>
           <span class="count">{{ favoriteCount }}</span>
         </button>
-        <div class="side-note note">{{ t("favorites.noteOnline") }}</div>
       </div>
 
       <div class="side-group">
@@ -1891,15 +1889,6 @@ onUnmounted(() => {
       </div>
 
       <!-- 代理 / 记住登录已迁到顶栏齿轮里的设置弹窗（SettingsModal → 网络） -->
-      <div class="side-group">
-        <div class="side-title">{{ t("settings.tabNetwork") }}</div>
-        <div class="side-note note">{{ t("settings.networkMoved") }}</div>
-      </div>
-
-      <div class="side-group">
-        <div class="side-title">{{ t("online.dataSource") }}</div>
-        <div class="side-note note">api.ageofempires.com /api/v4/mods</div>
-      </div>
     </aside>
 
     <!-- 中间：与本地一致的 .content + .grid-scroll + .card-grid -->
@@ -1909,7 +1898,6 @@ onUnmounted(() => {
         <span class="hint">
           <!-- 收藏视图：不展示官方「共 N 条」总数（那是查询总数，与收藏无关），只报本地命中数 -->
           <template v-if="favoritesOnly">
-            {{ t("favorites.scopeHint") }} ·
             {{ t("favorites.localHint", { n: visibleItems.length }) }}
           </template>
           <template v-else>

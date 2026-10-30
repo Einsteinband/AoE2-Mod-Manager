@@ -663,7 +663,6 @@ onBeforeUnmount(() => {
             <div class="settings-row">
               <div class="row-label">
                 <span class="row-title">{{ t("settings.modUpdate") }}</span>
-                <span class="row-note">{{ t("settings.modUpdateNote") }}</span>
               </div>
               <button
                 type="button"
@@ -689,8 +688,7 @@ onBeforeUnmount(() => {
 
             <p v-if="modReport && modReport.updateCount > 0" class="settings-hint">
               {{ t("settings.modUpdateHint") }}
-            </p>
-          </section>
+            </p>          </section>
 
           <!-- 网络 -->
           <section v-else-if="tab === 'network'" class="settings-card">
@@ -725,7 +723,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <p class="settings-hint">{{ t("settings.networkNote") }}</p>
             <div v-if="netError" class="settings-msg error">{{ netError }}</div>
             <div v-else-if="netMessage" class="settings-msg">{{ netMessage }}</div>
 
@@ -749,7 +746,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <p class="settings-hint">{{ t("cache.note") }}</p>
             <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
             <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
           </section>
@@ -820,7 +816,6 @@ onBeforeUnmount(() => {
                 autocomplete="off"
                 :disabled="translateSaving"
               />
-              <p class="settings-hint">{{ t("settings.translateCustomDev") }}</p>
             </template>
 
             <div class="settings-actions">
@@ -852,7 +847,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <p class="settings-hint">{{ t("translateCache.note") }}</p>
             <div v-if="translationCacheError" class="settings-msg error">{{ translationCacheError }}</div>
             <div v-else-if="translationCacheMessage" class="settings-msg">{{ translationCacheMessage }}</div>
           </section>
@@ -871,7 +865,6 @@ onBeforeUnmount(() => {
               <span class="row-title">{{ t("settings.author") }}</span>
               <button type="button" class="about-link" @click="openAuthor">{{ AUTHOR_URL }}</button>
             </div>
-            <p class="settings-hint">{{ t("settings.aboutNote") }}</p>
           </section>
         </div>
       </div>

@@ -1,22 +1,18 @@
-# v0.3.0
+# v0.3.1
 
-## v0.3.0 - Translation and Fast Cache Version
+## v0.3.1 - Update Check Fix
 
-🌐 **One-Click Module Translation**: Supports Chinese / multiple languages, powered by the free Google / MyMemory APIs, with translation results cached permanently on your machine.
+- **Fixed Excessive Update Requests**: The app no longer contacts GitHub on every launch. Automatic update checks are now limited to once every 24 hours.
 
-⚡ **Instant, Cache-Backed Startup**: Online and local mods now share a dual image + text cache, so you can switch categories and browse covers instantly — even offline.
-
-🔒 **Non-Commercial Use Only**: The project is now released under the PolyForm Noncommercial license to protect the author's rights.
+- **Manual Check Unchanged**: Clicking "Check for Updates" still queries GitHub immediately.
 
 ---
 
-## v0.3.0 - 多语言翻译并缓存
+## v0.3.1 - 更新检查修复
 
-🌐 **模组一键翻译**：支持多语言，基于 Google / MyMemory 免费接口，翻译结果永久缓存在本地。
+- **修复频繁请求更新**：不再每次启动都访问 GitHub，自动检查限制为 24 小时最多一次。
 
-⚡ **无痕秒开**：在线与本地模组全面接入图文双缓存，断网也能秒切分类、浏览封面。
-
-🔒 **禁止商业使用**：采用 PolyForm Noncommercial 协议，保护作者权益。
+- **手动检查保持即时**：在设置中点「检查更新」仍然立即请求。
 
 ---
 

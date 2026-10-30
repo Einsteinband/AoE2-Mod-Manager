@@ -7,7 +7,6 @@ import {
   formatBytes,
   formatDateTime,
   kindLabel,
-  sourceHint,
   sourceLabel,
   statusLabel,
 } from "../format";
@@ -382,7 +381,7 @@ watch(
 <template>
   <div class="detail-header">
     <h2>{{ t("detail.title") }}</h2>
-    <span class="badge" :class="'source-' + mod.source" :title="sourceHint(mod.source)">
+    <span class="badge" :class="'source-' + mod.source">
       {{ sourceLabel(mod.source) }}
     </span>
     <span class="badge" :class="mod.kind === 'local' ? 'local' : 'sub'">{{ kindLabel(mod.kind) }}</span>
@@ -468,10 +467,6 @@ watch(
       <span class="k">{{ t("detail.source") }}</span>
       <span class="v source-cell">
         <span class="badge" :class="'source-' + mod.source">{{ sourceLabel(mod.source) }}</span>
-        <span class="note" style="margin: 0">{{ sourceHint(mod.source) }}</span>
-        <template v-if="mod.source === 'tool' && mod.metadataRecorded">
-          <span class="note" style="margin: 0">{{ t("detail.metadataRecorded") }}</span>
-        </template>
       </span>
     </div>
     <div v-if="hasUpdate" class="update-panel">
@@ -583,16 +578,6 @@ watch(
       <span class="k">{{ t("detail.nameSource") }}</span>
       <span class="v">
         {{ mod.displayNameSource === "info.json" ? t("detail.nameFromInfoJson") : t("detail.nameFromFolder") }}
-      </span>
-    </div>
-
-    <div class="field">
-      <span class="k">{{ t("detail.categoryBasis") }}</span>
-      <span class="v" :class="{ missing: mod.categorySource !== 'official' }">
-        <template v-if="mod.categorySource === 'official'">
-          {{ t("detail.categoryOfficial", { tags: mod.officialTags.join(" / ") }) }}
-        </template>
-        <template v-else>{{ t("detail.categoryHeuristic") }}</template>
       </span>
     </div>
 

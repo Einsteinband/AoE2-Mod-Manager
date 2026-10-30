@@ -101,6 +101,8 @@ export interface AppSettings {
   lastScanMs: number | null;
   /** 界面语言："en" | "zh" | ""（尚未选择，前端按系统语言推断） */
   locale: string;
+  /** 最后一次自动检查软件更新的毫秒时间戳；0 = 从未检查过（启动检查的 24 小时时间锁） */
+  lastAutoUpdateCheckMs: number;
 }
 
 /** v0.3 预设：一条记录对应 mod-status.json 里的一条 Mods 项 */

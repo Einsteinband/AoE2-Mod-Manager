@@ -10,7 +10,7 @@ import SettingsModal from "./components/SettingsModal.vue";
 import StatusBar from "./components/StatusBar.vue";
 import { useI18n } from "vue-i18n";
 import {
-  checkUpdate,
+  checkUpdateAuto,
   detectRootCandidates,
   getSettings,
   modStats,
@@ -432,12 +432,13 @@ async function handleUpdateMod(mod: ModEntry) {
 
 /**
  * 启动时只跑一次版本检查（不轮询、不重试）。
+ * 24 小时内自动查过就直接跳过——时间锁在 Rust 侧判定，连一条 [update] 日志都不会打。
  * 失败静默：没网 / GitHub 限流不应该在界面上刷错误，用户仍可到设置里手动点“检查更新”。
  */
 async function runStartupUpdateCheck() {
   try {
-    const info = await checkUpdate();
-    if (!info.hasUpdate) return;
+    const info = await checkUpdateAuto();
+    if (!info?.hasUpdate) return;
     updateNotice.value = { version: info.latestVersion, url: info.releaseUrl };
   } catch {
     /* 静默失败 */
@@ -787,11 +788,6 @@ watch([officialTagList, inferredTagList], () => {
   if (!stillExists) activeTag.value = null;
 });
 
-/** 有多少模组的分类来自软件记录的官方 Tag */
-const officialTagged = computed(
-  () => mods.value.filter((m) => m.categorySource === "official").length,
-);
-
 // ---------------- v0.2：拖拽实例的生命周期 ----------------
 
 /**
@@ -1036,13 +1032,11 @@ onBeforeUnmount(() => {
             class="side-item"
             :class="{ active: favoritesOnly }"
             :disabled="sortMode"
-            :title="t('favorites.note')"
             @click="toggleFavorites"
           >
             <span class="label">⭐ {{ t("favorites.label") }}</span>
             <span class="count">{{ favoriteLocalCount }}</span>
           </button>
-          <div class="side-note note" style="padding: 4px 10px">{{ t("favorites.note") }}</div>
         </div>
 
         <div class="side-group">
@@ -1079,14 +1073,11 @@ onBeforeUnmount(() => {
             type="button"
             class="side-item"
             :class="{ active: activeTag === item.name && !favoritesOnly }"
-            :title="t('sidebar.inferredCount', { name: localizedTagName(item.name), n: item.count })"
+            :title="t('sidebar.tagCount', { name: localizedTagName(item.name), n: item.count })"
             @click="pickTag(item.name)"
           >
             <span class="label">{{ localizedTagName(item.name) }}</span>
           </button>
-          <div class="side-note note" style="padding: 4px 10px">
-            {{ t("sidebar.officialVsInferred", { official: officialTagged, inferred: mods.length - officialTagged }) }}
-          </div>
         </div>
 
         <div class="side-group">
@@ -1125,12 +1116,6 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="side-group">
-          <div class="side-title">{{ t("sidebar.basis") }}</div>
-          <div class="side-note note" style="padding: 4px 10px">
-            {{ t("sidebar.basisNote", { official: officialTagged, inferred: mods.length - officialTagged }) }}
-          </div>
-        </div>
       </aside>
 
       <section v-if="mode === 'local'" class="content">

@@ -39,6 +39,14 @@ export function checkUpdate(): Promise<UpdateInfo> {
 }
 
 /**
+ * 启动时的静默检查：24 小时内自动查过就直接跳过，一个请求都不发。
+ * 返回 null 表示被时间锁跳过（此时终端不会有任何 [update] 日志）。
+ */
+export function checkUpdateAuto(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>("check_update_auto");
+}
+
+/**
  * 批量检查本地模组是否有新版本。
  * 后端只用官方 /Installed（每页 50 条）翻页比对，绝不逐个请求 Detail，
  * 需要已登录《帝国时代》账号。

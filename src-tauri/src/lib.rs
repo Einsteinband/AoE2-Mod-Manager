@@ -114,6 +114,20 @@ async fn check_update(app: tauri::AppHandle) -> Result<update::UpdateInfo, Strin
         .await
         .map_err(|e| format!("更新检查线程异常：{e}"))?
 }
+
+/// 启动静默检查：24 小时内已自动查过就直接跳过（不发请求、不打日志）。
+/// 手动「检查更新」仍走 check_update，不受时间锁限制。
+#[tauri::command]
+async fn check_update_auto(app: tauri::AppHandle) -> Result<Option<update::UpdateInfo>, String> {
+    let settings = settings::load_for_app(&app);
+    let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
+        .map_err(|e| format!("网络配置无效：{e}"))?;
+    let proxy = net::ureq_proxy(&resolved).map_err(|e| format!("代理配置无效：{e}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || update::fetch_latest_auto(&app, proxy))
+        .await
+        .map_err(|e| format!("更新检查线程异常：{e}"))?
+}
 // ---------------- v0.4：本地模组批量更新检测 ----------------
 
 /// 批量检查本地模组是否有新版本。
@@ -1806,6 +1820,7 @@ pub fn run() {
             set_locale,
             app_version,
             check_update,
+            check_update_auto,
             check_mod_updates,
             candidate_roots,
             detect_root_candidates,

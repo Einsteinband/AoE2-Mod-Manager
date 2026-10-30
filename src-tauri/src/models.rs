@@ -156,6 +156,10 @@ pub struct Settings {
     /// 自定义翻译接口的 Key（预留，开发中；只存不读）
     #[serde(default)]
     pub translate_custom_key: Option<String>,
+    /// 最后一次「自动」检查软件更新的毫秒时间戳；0 / 缺字段 = 从未检查过。
+    /// 启动静默检查前比对该值，24 小时内不再请求 GitHub（手动检查不受限）。
+    #[serde(default)]
+    pub last_auto_update_check_ms: i64,
 }
 
 fn default_proxy_mode() -> String {
@@ -183,6 +187,7 @@ impl Default for Settings {
             translate_provider: default_translate_provider(),
             translate_custom_url: None,
             translate_custom_key: None,
+            last_auto_update_check_ms: 0,
         }
     }
 }

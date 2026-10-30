@@ -169,18 +169,77 @@ function validId(modId: number | null | undefined): modId is number {
  * 都会自动回到「🌐 翻译为{新语言}」，点一次就会去请求新语言，而不是误判成
  * “已有译文”去偷偷切换原文。
  */
+/**
+ * 「只带标题」的占位条目：本地索引命中后灌进来的中文标题（`provider = "index"`）。
+ *
+ * 它不是一次真正的翻译（`desc` 为空），所以**绝不能**被当成「已翻译」：
+ * 否则详情页按钮会显示「显示原文」，点了只是在原文/标题之间来回切，描述永远翻不出来。
+ */
+function isTitleOnly(tr: Translation): boolean {
+  return tr.provider === "index" && !tr.desc.trim();
+}
+
 export function translationOf(modId: number | null | undefined): Translation | null {
   if (!validId(modId)) return null;
   const tr = translations.get(modId);
   if (!tr) return null;
+  if (tr.lang && tr.lang !== targetLang.value) return null;
+  // 索引标题占位不算译文：详情页按钮要回到「翻译为 {lang}」
+  if (isTitleOnly(tr)) return null;
+  return tr;
+}
+
+/** 本地索引灌进来的标题占位（只用于标题展示，不参与「已翻译」判断） */
+function indexTitleOf(modId: number | null | undefined): Translation | null {
+  if (!validId(modId)) return null;
+  const tr = translations.get(modId);
+  if (!tr || !isTitleOnly(tr)) return null;
   if (tr.lang && tr.lang !== targetLang.value) return null;
   return tr;
 }
 
 /** 已翻译的译文标题（卡片/侧栏用）。**尊重「显示原文」开关**，所以详情页切回原文时卡片也会跟着变。 */
 export function translatedTitleOf(modId: number | null | undefined): string | null {
-  const title = activeTranslation(modId)?.title?.trim();
+  const title = (activeTranslation(modId) ?? indexTitleOf(modId))?.title?.trim();
   return title ? title : null;
+}
+
+/**
+ * 把「外部来源」的中文标题灌进内存译文表（v1.0 本地索引搜索用）。
+ *
+ * 为什么需要它：中文搜索由 Rust 在 `online_index.json` + `translation_cache.json`
+ * 里完成匹配，命中的标题必须走**同一条展示通道**（`translations` 反应式 Map），
+ * 否则会出现「搜到了中文、卡片却还显示英文」的割裂。
+ *
+ * 两条安全规则：
+ * 1. 已有当前语言、且带描述的正规译文（详情页翻过）**绝不覆盖** —— 它信息更全；
+ * 2. `lang` 显式给出且不是当前目标语言时直接跳过（防止切语言后旧结果回填）。
+ */
+export function applyExternalTitles(
+  entries: { modId: number; title: string; lang?: string }[],
+): void {
+  const lang = targetLang.value;
+  for (const entry of entries) {
+    const modId = entry.modId;
+    if (!validId(modId)) continue;
+    const title = (entry.title ?? "").trim();
+    if (!title) continue;
+    if (entry.lang && entry.lang.toLowerCase() !== lang) continue;
+    const existing = translations.get(modId);
+    if (existing && existing.lang === lang && existing.desc.trim()) continue;
+    translations.set(modId, {
+      modId,
+      lang,
+      originalHash: existing?.originalHash ?? "",
+      title,
+      desc: existing?.desc ?? "",
+      provider: existing?.provider ?? "index",
+      charCount: existing?.charCount ?? 0,
+      savedAtMs: existing?.savedAtMs ?? Date.now(),
+      cached: true,
+      truncated: existing?.truncated ?? false,
+    });
+  }
 }
 
 export function isTranslating(modId: number | null | undefined): boolean {
@@ -236,8 +295,8 @@ export function ensureTranslation(
   const lang = targetLang.value;
 
   const done = translations.get(modId);
-  // 只有「当前目标语言」的译文才能直接复用
-  if (done && done.lang === lang) return Promise.resolve(done);
+  // 只有「当前目标语言」的**完整译文**才能直接复用；索引标题占位（desc 为空）要重新翻
+  if (done && done.lang === lang && !isTitleOnly(done)) return Promise.resolve(done);
   if (done) {
     // 旧语言槽位：立刻丢进垃圾桶，避免它在请求返回前继续冒充当前译文
     translations.delete(modId);
@@ -289,8 +348,8 @@ export async function loadCachedTranslation(
   const modId = mod.modId;
   if (!validId(modId)) return null;
   const known = translations.get(modId);
-  // 只有当前语言的译文才算命中；旧语言残留要重新探查新语言槽位
-  if (known && known.lang === targetLang.value) return known;
+  // 只有当前语言的**完整译文**才算命中；旧语言残留 / 索引标题占位都要重新探查
+  if (known && known.lang === targetLang.value && !isTitleOnly(known)) return known;
   const key = `${modId}|${targetLang.value}|${(description ?? "").length}`;
   if (strictProbed.has(key)) return null;
   strictProbed.add(key);
@@ -330,9 +389,10 @@ export function hydrateTranslations(mods: TranslationProbeInput[]): void {
   let added = 0;
   for (const mod of mods) {
     if (!validId(mod.modId)) continue;
-    // 已有“当前语言”的译文才跳过；旧语言残留条目要重新探查，否则列表回不到新语言
+    // 已有「当前语言」的**完整译文**才跳过；索引标题占位 / 旧语言残留都要重新探查，
+    // 否则列表会一直停在只带标题的状态
     const known = translations.get(mod.modId);
-    if (known && known.lang === targetLang.value) continue;
+    if (known && known.lang === targetLang.value && !isTitleOnly(known)) continue;
     if (hydratedIds.has(mod.modId)) continue;
     pendingProbes.set(mod.modId, {
       modId: mod.modId,

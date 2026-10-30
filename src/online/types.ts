@@ -377,3 +377,98 @@ export function isApiFailure(value: unknown): value is ApiFailure {
     typeof (value as ApiFailure).message === "string"
   );
 }
+
+// ---------------- v1.0：在线全量索引（中文搜索的底座） ----------------
+
+/** 本地索引状态（Rust online_index::IndexStatus） */
+/** 批量标题翻译任务状态（Rust translator::TitleJobStatus） */
+export interface TitleJobStatus {
+  running: boolean;
+  /** 目标语言（小写） */
+  lang: string;
+  /** 索引里可翻译（英文标题）的候选条数 */
+  total: number;
+  /** 已有可用译文（titleHash 与当前标题一致）的条数 */
+  done: number;
+  /** 本轮失败次数 */
+  failed: number;
+  remaining: number;
+  /** Rust 侧的一行状态（只用于日志排查，界面不直接展示） */
+  message: string;
+  startedAtMs: number;
+  finishedAtMs: number;
+  path: string;
+  /** false = 在线索引还没建立，没有可翻译的标题 */
+  indexReady: boolean;
+}
+
+export interface IndexStatus {
+  /** 已收录条数 */
+  indexed: number;
+  /** 服务端总量（0 = 还没拿到） */
+  totalCount: number;
+  /** 已顺序消费的条数 */
+  scanned: number;
+  /** 是否已完整扫描过一遍 */
+  done: boolean;
+  syncing: boolean;
+  /** 是否已开启「本地中文搜索与自动索引」（关闭时一个爬取请求都不发） */
+  indexingEnabled: boolean;
+  /** idle | checking | syncing | done | paused | disabled | needLogin | error */
+  phase: string;
+  /** 一行可读状态（直接展示，不含底层术语） */
+  message: string;
+  updatedAtMs: number;
+  fullSyncedAtMs: number;
+  cooldownUntilMs: number;
+  path: string;
+  maxItems: number;
+}
+
+/** 本地索引搜索命中的一条：与 OnlineMod 同形，另带中文标题与命中字段 */
+export interface IndexSearchItem extends OnlineMod {
+  /** 本地译文标题（中文命中时非空） */
+  zhTitle: string | null;
+  /** zhTitle | title | creator | tag | modId */
+  matchedBy: string;
+}
+
+export interface IndexSearchResult {
+  query: string;
+  /** 命中总数（用于分页与「共 N 条」） */
+  total: number;
+  offset: number;
+  limit: number;
+  /** 索引当前条数 */
+  indexed: number;
+  /** 服务端总量（0 = 未知） */
+  totalCount: number;
+  indexDone: boolean;
+  /** 索引尚未建完：前端据此提示「后台仍在努力同步」 */
+  indexPending: boolean;
+  /** 本次检索额外并入了多少条缓存池条目（online_cache.json） */
+  cached: number;
+  /** 查询里是否含汉字 */
+  hasCjk: boolean;
+  lang: string;
+  items: IndexSearchItem[];
+}
+
+export interface IndexSyncReport {
+  fetched: number;
+  pages: number;
+  scanned: number;
+  totalCount: number;
+  indexed: number;
+  done: boolean;
+  /** true = 因新鲜度闸门跳过，一个请求都没发 */
+  skipped: boolean;
+  capped: boolean;
+  message: string;
+}
+
+export interface IndexClearReport {
+  removed: boolean;
+  path: string;
+  itemsBefore: number;
+}

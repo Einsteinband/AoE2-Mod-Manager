@@ -10,13 +10,16 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { appVersion, checkUpdate, openExternalUrl, setLocale } from "../api";
+import { appVersion, checkUpdate, getSettings, openExternalUrl, setEnableIndexing, setEnableLocalSearch, setLocale } from "../api";
 import { translateBackendMessage } from "../format";
 import { applyLocale, LOCALE_OPTIONS, type Locale } from "../i18n";
 import { getNetworkSettings, setNetworkSettings } from "../online/service";
 import {
   getTranslateSettings,
   setTranslateSettings,
+  titleTranslateStart,
+  titleTranslateStatus,
+  titleTranslateStop,
   translationCacheClear,
   translationCacheStat,
 } from "../online/service";
@@ -26,6 +29,7 @@ import {
   resetTranslations,
 } from "../online/translation";
 import { clearOnlineCache, onlineCacheStat } from "../online/cache";
+import { localSearchEnabled } from "../sessionState";
 import {
   canCheck as modCanCheck,
   checking as modChecking,
@@ -35,7 +39,7 @@ import {
   resumeCooldown as resumeModCooldown,
   runModUpdateCheck,
 } from "../modUpdates";
-import type { CacheOverview, NetworkSettingsView, TranslateSettingsView, TranslationCacheStat } from "../online/types";
+import type { CacheOverview, NetworkSettingsView, TitleJobStatus, TranslateSettingsView, TranslationCacheStat } from "../online/types";
 import type { UpdateInfo } from "../types";
 
 const emit = defineEmits<{ close: [] }>();
@@ -75,6 +79,73 @@ async function changeLocale(event: Event) {
     localeError.value = describe(e);
   } finally {
     localeSaving.value = false;
+  }
+}
+
+// ---------------- 通用：本地中文搜索与自动索引（v1.2） ----------------
+
+/** 开关状态：默认关闭（settings.json 缺字段也是 false） */
+const indexingEnabled = ref(false);
+const indexingSaving = ref(false);
+const indexingError = ref<string | null>(null);
+
+async function loadIndexing() {
+  try {
+    const settings = await getSettings();
+    indexingEnabled.value = settings.enableIndexing === true;
+  } catch (e) {
+    indexingError.value = describe(e);
+  }
+}
+
+/**
+ * 切换开关：先切界面再落盘（失败回滚）。
+ * 开启 = Rust 立即在后台补建一次索引；关闭 = 本轮爬取在下一页之前停下。
+ */
+async function toggleIndexing(event: Event) {
+  const next = (event.target as HTMLInputElement).checked;
+  indexingEnabled.value = next;
+  indexingSaving.value = true;
+  indexingError.value = null;
+  try {
+    await setEnableIndexing(next);
+  } catch (e) {
+    indexingEnabled.value = !next;
+    indexingError.value = describe(e);
+  } finally {
+    indexingSaving.value = false;
+  }
+}
+
+// ---------------- 通用：在线页的本地搜索框（v1.2） ----------------
+
+const localSearchOn = ref(false);
+const localSearchSaving = ref(false);
+const localSearchError = ref<string | null>(null);
+
+async function loadLocalSearch() {
+  try {
+    const settings = await getSettings();
+    localSearchOn.value = settings.enableLocalSearch === true;
+  } catch (e) {
+    localSearchError.value = describe(e);
+  }
+}
+
+/** 纯界面开关：写 settings.json + 同步运行时镜像（在线页立即生效） */
+async function toggleLocalSearch(event: Event) {
+  const next = (event.target as HTMLInputElement).checked;
+  localSearchOn.value = next;
+  localSearchSaving.value = true;
+  localSearchError.value = null;
+  try {
+    await setEnableLocalSearch(next);
+    localSearchEnabled.value = next;
+  } catch (e) {
+    localSearchOn.value = !next;
+    localSearchError.value = describe(e);
+  } finally {
+    localSearchSaving.value = false;
   }
 }
 
@@ -530,12 +601,91 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") emit("close");
 }
 
+// ---------------- v1.0：批量标题翻译（索引里的英文标题 → 当前目标语言） ----------------
+//
+// 刻意**不做自动启动**：与「一键翻译只由用户点击触发」的既有铁律一致。
+// 任务本身跑在 Rust 后台线程里，这里只负责展示进度与开始/停止。
+
+const titleJob = ref<TitleJobStatus | null>(null);
+const titleJobBusy = ref(false);
+const titleJobError = ref<string | null>(null);
+/** 进度轮询（运行中每 2 秒刷一次，纯内存读，开销可忽略） */
+let titleJobTimer: number | null = null;
+
+function stopTitleJobPoll(): void {
+  if (titleJobTimer !== null) {
+    window.clearInterval(titleJobTimer);
+    titleJobTimer = null;
+  }
+}
+
+function scheduleTitleJobPoll(): void {
+  if (titleJobTimer !== null) return;
+  titleJobTimer = window.setInterval(() => {
+    void (async () => {
+      try {
+        titleJob.value = await titleTranslateStatus();
+      } catch {
+        return;
+      }
+      if (!titleJob.value?.running) stopTitleJobPoll();
+    })();
+  }, 2000);
+}
+
+async function loadTitleJob(): Promise<void> {
+  try {
+    titleJob.value = await titleTranslateStatus();
+    titleJobError.value = null;
+  } catch (e) {
+    titleJobError.value = describe(e);
+  }
+  if (titleJob.value?.running) scheduleTitleJobPoll();
+}
+
+async function startTitleJob(): Promise<void> {
+  if (titleJobBusy.value) return;
+  titleJobBusy.value = true;
+  titleJobError.value = null;
+  try {
+    titleJob.value = await titleTranslateStart();
+    scheduleTitleJobPoll();
+  } catch (e) {
+    titleJobError.value = describe(e);
+  } finally {
+    titleJobBusy.value = false;
+  }
+}
+
+async function stopTitleJob(): Promise<void> {
+  try {
+    titleJob.value = await titleTranslateStop();
+  } catch (e) {
+    titleJobError.value = describe(e);
+  }
+  stopTitleJobPoll();
+}
+
+/** 进度文案：只讲结论，不展示底层术语 */
+const titleJobText = computed(() => {
+  const job = titleJob.value;
+  if (!job) return t("titleTranslate.reading");
+  if (!job.indexReady) return t("titleTranslate.needIndex");
+  const base = job.running
+    ? t("titleTranslate.running", { done: job.done, total: job.total })
+    : t("titleTranslate.idle", { done: job.done, total: job.total });
+  return job.failed > 0 ? `${base} · ${t("titleTranslate.failed", { n: job.failed })}` : base;
+});
+
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
+  void loadIndexing();
+  void loadLocalSearch();
   void loadNetwork();
   void loadCacheStat();
   void loadTranslate();
   void loadTranslationCache();
+  void loadTitleJob();
   try {
     version.value = await appVersion();
   } catch {
@@ -549,6 +699,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
+  stopTitleJobPoll();
   if (cooldownTimer !== null) {
     window.clearInterval(cooldownTimer);
     cooldownTimer = null;
@@ -624,6 +775,46 @@ onBeforeUnmount(() => {
               </select>
             </div>
             <div v-if="localeError" class="settings-msg error">{{ localeError }}</div>
+
+            <div class="settings-sep"></div>
+
+            <!-- v1.2：本地中文搜索与自动索引（默认关闭，落盘 settings.json） -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("settings.indexing") }}</span>
+                <span class="row-note">{{ t("settings.indexingNote") }}</span>
+              </div>
+              <label class="settings-check-line">
+                <input
+                  type="checkbox"
+                  :checked="indexingEnabled"
+                  :disabled="indexingSaving"
+                  @change="toggleIndexing"
+                />
+                {{ indexingEnabled ? t("settings.indexingOn") : t("settings.indexingOff") }}
+              </label>
+            </div>
+            <div v-if="indexingError" class="settings-msg error">{{ indexingError }}</div>
+
+            <div class="settings-sep"></div>
+
+            <!-- v1.2：在线页的本地搜索框（纯界面开关，默认关闭） -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("settings.localSearch") }}</span>
+                <span class="row-note">{{ t("settings.localSearchNote") }}</span>
+              </div>
+              <label class="settings-check-line">
+                <input
+                  type="checkbox"
+                  :checked="localSearchOn"
+                  :disabled="localSearchSaving"
+                  @change="toggleLocalSearch"
+                />
+                {{ localSearchOn ? t("settings.localSearchOn") : t("settings.localSearchOff") }}
+              </label>
+            </div>
+            <div v-if="localSearchError" class="settings-msg error">{{ localSearchError }}</div>
 
             <div class="settings-sep"></div>
 
@@ -849,6 +1040,29 @@ onBeforeUnmount(() => {
 
             <div v-if="translationCacheError" class="settings-msg error">{{ translationCacheError }}</div>
             <div v-else-if="translationCacheMessage" class="settings-msg">{{ translationCacheMessage }}</div>
+
+            <div class="settings-sep"></div>
+
+            <!-- 批量翻译标题：默认关闭、手动开始（与「一键翻译不自动触发」保持同一套铁律） -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("titleTranslate.sectionTitle") }}</span>
+                <span class="row-note">{{ t("titleTranslate.note") }}</span>
+              </div>
+              <button
+                type="button"
+                class="settings-check"
+                :disabled="titleJobBusy || (!titleJob?.running && !titleJob?.indexReady)"
+                @click="titleJob?.running ? stopTitleJob() : startTitleJob()"
+              >
+                <span v-if="titleJobBusy" class="spinner"></span>
+                {{ titleJob?.running ? t("titleTranslate.stop") : t("titleTranslate.start") }}
+              </button>
+            </div>
+
+            <p class="settings-hint">{{ titleJobText }}</p>
+
+            <div v-if="titleJobError" class="settings-msg error">{{ titleJobError }}</div>
           </section>
 
           <!-- 关于 -->

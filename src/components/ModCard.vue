@@ -2,8 +2,8 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry } from "../types";
-import { fileUrl } from "../api";
-import { initials, sourceHint, sourceLabel, statusLabel } from "../format";
+import { fileUrl, toggleModEnabled } from "../api";
+import { initials, sourceHint, sourceLabel, translateBackendMessage } from "../format";
 import { customNameOf, displayTitle, isFavorite } from "../userData";
 import { translatedTitleOf } from "../online/translation";
 
@@ -17,7 +17,13 @@ const props = defineProps<{
   /** v0.4：服务端版本比本地新（右上角红底白字 [可更新]） */
   hasUpdate?: boolean;
 }>();
-const emit = defineEmits<{ (event: "select", mod: ModEntry): void }>();
+const emit = defineEmits<{
+  (event: "select", mod: ModEntry): void;
+  /** 卡片快捷开关写入成功：只让父组件局部 patch 这条记录 */
+  (event: "toggled", payload: { id: string; enabled: boolean }): void;
+  /** 写入失败 / 未登记：由父组件统一弹 Toast */
+  (event: "toggle-error", message: string): void;
+}>();
 
 const { t } = useI18n();
 
@@ -38,6 +44,58 @@ const statusClass = computed(() => {
   if (props.mod.enabled === false) return "off";
   return "unknown";
 });
+
+// ---------------- v0.9：卡片快捷开关（替代原来的纯状态圆点） ----------------
+
+/** 写入中：禁止重复点击，按钮降透明度 */
+const toggling = ref(false);
+/** 游戏是否已登记（enabled === null = mod-status.json 里没有这条记录） */
+const registered = computed(() => props.mod.enabled !== null);
+
+const toggleTitle = computed(() => {
+  if (toggling.value) return t("card.toggleWorking");
+  if (props.mod.enabled === null) return t("card.notRegisteredHint");
+  return props.mod.enabled ? t("card.toggleDisable") : t("card.toggleEnable");
+});
+
+function errorMessage(e: unknown): string {
+  if (typeof e === "string") return translateBackendMessage(e);
+  if (e instanceof Error) return translateBackendMessage(e.message);
+  try {
+    return translateBackendMessage(JSON.stringify(e));
+  } catch {
+    return t("labels.unknown");
+  }
+}
+
+/**
+ * 点击开关：阻断冒泡（不打开详情页）→ 调 toggle_mod_enabled → 通知父组件局部 patch。
+ * 只写这一条记录，不触发全量重扫描，列表不闪、滚动条不跳。
+ */
+async function toggleEnabled(event: MouseEvent) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (toggling.value) return;
+  if (!registered.value) {
+    emit("toggle-error", t("card.notRegisteredHint"));
+    return;
+  }
+  const target = props.mod.enabled !== true;
+  toggling.value = true;
+  try {
+    const result = await toggleModEnabled(
+      props.mod.workshopId,
+      props.mod.kind,
+      props.mod.folderName,
+      target,
+    );
+    emit("toggled", { id: props.mod.id, enabled: result.enabled });
+  } catch (e) {
+    emit("toggle-error", errorMessage(e));
+  } finally {
+    toggling.value = false;
+  }
+}
 
 // v0.5：有备注名时主标题用备注名，副标题小字回显原英文标题
 // v0.2.4：没备注名时，已翻译的模组直接显示中文标题（跟详情页的「显示原文/中文」开关联动）
@@ -75,7 +133,15 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
       <div class="card-title" :title="title">{{ title }}</div>
       <div v-if="sub" class="card-sub" :title="mod.displayName">📝 {{ mod.displayName }}</div>
       <div class="card-meta status-row">
-        <span class="status-chip" :class="statusClass" :title="statusLabel(mod.enabled)">
+        <span
+          class="card-toggle"
+          :class="[statusClass, { busy: toggling }]"
+          role="switch"
+          :aria-checked="mod.enabled === true"
+          :aria-busy="toggling"
+          :title="toggleTitle"
+          @click="toggleEnabled"
+        >
           <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">
             <path d="M2.5 6.4 4.8 8.6 9.5 3.4" />
           </svg>
@@ -97,6 +163,66 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
 </template>
 
 <style scoped>
+/* v0.9：卡片右下角快捷开关（沿用原有状态配色：绿勾 / 灰杠 / 虚线未知） */
+.card-toggle {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+.card-toggle svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.card-toggle:hover {
+  transform: scale(1.14);
+}
+.card-toggle.on {
+  background: linear-gradient(180deg, #8fbb6c, var(--ok));
+  border-color: #b6d79b;
+  color: #ffffff;
+  box-shadow: 0 0 8px rgba(120, 162, 92, 0.85), inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+.card-toggle.on:hover {
+  box-shadow: 0 0 12px rgba(140, 190, 110, 1), inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+.card-toggle.off {
+  background: linear-gradient(180deg, #554330, #3d2f22);
+  border-color: #7a6449;
+  color: #efe2cc;
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.5), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.card-toggle.off:hover {
+  border-color: var(--gold-dim);
+  color: var(--gold-bright);
+}
+.card-toggle.unknown {
+  background: transparent;
+  border-color: #6a5642;
+  border-style: dashed;
+  color: #6a5642;
+}
+.card-toggle.unknown:hover {
+  border-color: var(--gold-dim);
+  color: var(--gold-dim);
+}
+.card-toggle.busy {
+  opacity: 0.5;
+  cursor: progress;
+  transform: none;
+}
 /* v0.4：右上角「可更新」角标。排序模式的序号在左上，两者互不遮挡 */
 .update-badge {
   position: absolute;

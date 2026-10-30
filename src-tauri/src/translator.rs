@@ -392,7 +392,10 @@ fn provider_target(lang: &str) -> String {
 }
 
 /// 解析本次翻译的目标语言：命令参数 → settings.target_language → 界面语言 → zh-cn
-fn resolve_lang(app: &tauri::AppHandle, requested: Option<&str>) -> String {
+///
+/// `pub(crate)`：在线索引的本地搜索要用同一套语言解析，
+/// 避免「设置里选了跟随界面语言，搜索却按 zh-cn 匹配」这种错位。
+pub(crate) fn resolve_lang(app: &tauri::AppHandle, requested: Option<&str>) -> String {
     if let Some(lang) = requested {
         let normalized = normalize_lang(lang);
         if !normalized.is_empty() {
@@ -678,6 +681,51 @@ pub fn lookup(app: &tauri::AppHandle, mod_id: i64, lang: &str) -> Option<Entry> 
         .get(&mod_id.to_string())
         .and_then(|langs| langs.get(lang))
         .cloned()
+}
+
+/// 某个语言下**所有**已缓存译文标题（modId → 标题）。
+///
+/// 只给在线索引的中文搜索用：一次加锁扫全表，比在 3 万条索引上
+/// 逐条 [`lookup`]（每次都要过一遍 Mutex + 字符串解析）快一个数量级。
+/// 空标题 / 解析不出 modId 的脏条目直接跳过。
+pub fn search_titles(app: &tauri::AppHandle, lang: &str) -> std::collections::HashMap<i64, String> {
+    let normalized = normalize_lang(lang);
+    let lang = if normalized.is_empty() { DEFAULT_LANG.to_string() } else { normalized };
+    let mut out: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+
+    // ① 批量标题翻译（只翻标题，覆盖面大）—— 语言槽位不匹配就整批忽略
+    if let Ok(guard) = ensure_title_loaded(app) {
+        if let Some(mem) = guard.as_ref() {
+            if mem.store.target_lang == lang {
+                for (key, entry) in mem.store.entries.iter() {
+                    let title = entry.title.trim();
+                    if title.is_empty() {
+                        continue;
+                    }
+                    let Ok(mod_id) = key.parse::<i64>() else { continue };
+                    if mod_id > 0 {
+                        out.insert(mod_id, title.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // ② 详情页翻过的完整译文：信息更全，覆盖 ①
+    let Ok(guard) = ensure_loaded(app) else { return out };
+    let Some(mem) = guard.as_ref() else { return out };
+    for (key, langs) in mem.store.entries.iter() {
+        let Some(title) = langs.get(&lang).map(|entry| entry.title.trim()).filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        let Ok(mod_id) = key.parse::<i64>() else { continue };
+        if mod_id <= 0 {
+            continue;
+        }
+        out.insert(mod_id, title.to_string());
+    }
+    out
 }
 
 /// 写缓存：成功返回 path 便于日志；失败只记日志，绝不影响翻译结果。
@@ -1475,6 +1523,492 @@ pub async fn translation_cache_clear(app: tauri::AppHandle) -> Result<Translatio
     };
     log::info!(target: "translate", "翻译缓存已清理：{display}（{entries_removed} 条）");
     Ok(TranslationClearReport { removed, path: display, entries_removed })
+}
+
+// ---------------- v1.0：批量标题翻译（online_titles_zh.json） ----------------
+//
+// 为什么**单独一个文件**，而不是塞进 translation_cache.json：
+// [`Entry::is_dirty`] 要求 `desc` 非空（描述为空 = 详情还没加载完就点了翻译，历史 bug）。
+// 「只翻标题」的条目一旦写进译文缓存，下次加载会被当成脏数据剔除，白翻。
+//
+// 限速与队列**完全复用**上面的 [`Slot`] + [`throttle()`]（全局严格 FIFO、任意两次
+// 外部请求间隔 ≥ 1 秒），所以批量任务与详情页手动翻译永远串行，绝不会叠加成 2 req/s。
+// 每次请求前单独取 Slot（**不是整个任务占着**）：用户中途点开详情手动翻译，不会被
+// 几小时的批量任务堵死。
+//
+// 只存标题 + titleHash：作者改了标题 → 哈希变化 → 该条自动失效待重翻，
+// 绝不把旧译文贴到新标题上。
+
+pub const TITLE_FILE_NAME: &str = "online_titles_zh.json";
+/// 1 = `{version, targetLang, entries: {modId: {titleHash, title, provider, savedAtMs}}}`
+const TITLE_VERSION: u32 = 1;
+/// 单次运行上限（2000 条 × 1 秒 ≈ 33 分钟），到顶就停，下次启动接着来
+const TITLE_MAX_PER_RUN: usize = 2_000;
+/// 每翻多少条落一次盘（整文件重写很贵，30 万条也不可能每页都写）
+const TITLE_FLUSH_EVERY: usize = 20;
+/// 连续失败几次就结束本轮（网络断了别原地空转）
+const TITLE_MAX_FAILURES: u32 = 3;
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleEntry {
+    /// 只由标题算出的哈希（与译文缓存同一套 `title_hash`）
+    #[serde(default)]
+    pub title_hash: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub saved_at_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleStore {
+    #[serde(default = "title_default_version")]
+    pub version: u32,
+    /// 这批译文属于哪个语言（换语言 = 全部作废重翻）
+    #[serde(default)]
+    pub target_lang: String,
+    #[serde(default)]
+    pub entries: BTreeMap<String, TitleEntry>,
+}
+
+fn title_default_version() -> u32 {
+    TITLE_VERSION
+}
+
+impl Default for TitleStore {
+    fn default() -> Self {
+        Self { version: TITLE_VERSION, target_lang: String::new(), entries: BTreeMap::new() }
+    }
+}
+
+/// 批量标题翻译的状态（设置页展示用）
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TitleJobStatus {
+    pub running: bool,
+    pub lang: String,
+    /// 索引里可翻译（英文标题）的候选条数
+    pub total: usize,
+    /// 已有可用译文（titleHash 与当前标题一致）的条数
+    pub done: usize,
+    /// 本轮失败次数
+    pub failed: usize,
+    pub remaining: usize,
+    /// 一行可读状态
+    pub message: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub path: String,
+    /// 索引是否可用（false = 还没建立，没东西可翻）
+    pub index_ready: bool,
+}
+
+struct TitleMemory {
+    path: PathBuf,
+    store: TitleStore,
+    dirty: bool,
+}
+
+static TITLE_MEM: Mutex<Option<TitleMemory>> = Mutex::new(None);
+
+struct TitleJob {
+    running: bool,
+    stop: bool,
+    lang: String,
+    total: usize,
+    done: usize,
+    failed: usize,
+    message: String,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+}
+
+static TITLE_JOB: Mutex<TitleJob> = Mutex::new(TitleJob {
+    running: false,
+    stop: false,
+    lang: String::new(),
+    total: 0,
+    done: 0,
+    failed: 0,
+    message: String::new(),
+    started_at_ms: 0,
+    finished_at_ms: 0,
+});
+
+fn lock_title_job() -> std::sync::MutexGuard<'static, TitleJob> {
+    TITLE_JOB.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn title_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join(TITLE_FILE_NAME))
+        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+}
+
+fn read_title_store(path: &Path) -> TitleStore {
+    let Ok(bytes) = fs::read(path) else { return TitleStore::default() };
+    let mut store = match serde_json::from_slice::<TitleStore>(strip_bom(&bytes)) {
+        Ok(store) => store,
+        Err(e) => {
+            log::warn!(target: "translate", "online_titles_zh.json 解析失败（{e}），已重建空表");
+            return TitleStore::default();
+        }
+    };
+    if store.version != TITLE_VERSION {
+        log::info!(
+            target: "translate",
+            "标题译文表版本不匹配（文件={} 期望={}），已丢弃重建",
+            store.version,
+            TITLE_VERSION
+        );
+        return TitleStore::default();
+    }
+    // 脏条目剔除：ModId 解析不出 / 标题为空 / 哈希不是 16 位 hex
+    store.entries.retain(|key, entry| {
+        key.parse::<i64>().is_ok()
+            && !entry.title.trim().is_empty()
+            && entry.title_hash.trim().len() == 16
+    });
+    store
+}
+
+fn write_title_store(path: &Path, store: &TitleStore) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+    }
+    let text = serde_json::to_vec(store).map_err(|e| format!("标题译文序列化失败：{e}"))?;
+    let _io = IO_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = unique_tmp(path);
+    fs::write(&tmp, &text).map_err(|e| format!("写入临时标题译文表失败（{}）：{e}", tmp.display()))?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(first) => match fs::copy(&tmp, path) {
+            Ok(_) => {
+                let _ = fs::remove_file(&tmp);
+                log::warn!(target: "translate", "标题译文表 rename 失败（{first}），已用 copy 兜底");
+                Ok(())
+            }
+            Err(second) => {
+                let _ = fs::remove_file(&tmp);
+                Err(format!("写入标题译文表失败：rename={first} copy={second}"))
+            }
+        },
+    }
+}
+
+fn ensure_title_loaded(
+    app: &tauri::AppHandle,
+) -> Result<std::sync::MutexGuard<'static, Option<TitleMemory>>, String> {
+    let path = title_path(app)?;
+    let mut guard = TITLE_MEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let need_reload = match guard.as_ref() {
+        Some(mem) => mem.path != path,
+        None => true,
+    };
+    if need_reload {
+        let store = read_title_store(&path);
+        log::info!(
+            target: "translate",
+            "标题译文表已载入内存：{} 条（{}）",
+            store.entries.len(),
+            path.display()
+        );
+        *guard = Some(TitleMemory { path, store, dirty: false });
+    }
+    Ok(guard)
+}
+
+fn flush_titles(app: &tauri::AppHandle) {
+    let Ok(mut guard) = ensure_title_loaded(app) else { return };
+    let Some(mem) = guard.as_mut() else { return };
+    if !mem.dirty {
+        return;
+    }
+    mem.dirty = false;
+    let snapshot = mem.store.clone();
+    let path = mem.path.clone();
+    drop(guard);
+    if let Err(e) = write_title_store(&path, &snapshot) {
+        log::warn!(target: "translate", "写入标题译文表失败：{e}");
+    }
+}
+
+fn put_title(app: &tauri::AppHandle, mod_id: i64, entry: TitleEntry) -> Result<(), String> {
+    let mut guard = ensure_title_loaded(app)?;
+    let mem = guard.as_mut().ok_or_else(|| "标题译文表未初始化".to_string())?;
+    mem.store.entries.insert(mod_id.to_string(), entry);
+    mem.dirty = true;
+    Ok(())
+}
+
+/// 换语言 → 旧译文全部作废（译文是语言相关的，留着只会把中文当日语用）
+fn reset_title_lang(app: &tauri::AppHandle, lang: &str) -> Result<(), String> {
+    let mut guard = ensure_title_loaded(app)?;
+    let mem = guard.as_mut().ok_or_else(|| "标题译文表未初始化".to_string())?;
+    if mem.store.target_lang == lang {
+        return Ok(());
+    }
+    let had = mem.store.entries.len();
+    mem.store.entries.clear();
+    mem.store.target_lang = lang.to_string();
+    mem.dirty = true;
+    if had > 0 {
+        log::info!(target: "translate", "标题译文语言切换为 {lang}，作废旧译文 {had} 条");
+    }
+    Ok(())
+}
+
+/// 索引里「英文标题」的候选（热门优先）：中文标题不必再翻
+fn title_candidates(app: &tauri::AppHandle) -> Vec<(i64, String)> {
+    crate::online_index::title_candidates(app)
+        .into_iter()
+        .filter(|(_, title)| {
+            let trimmed = title.trim();
+            !trimmed.is_empty() && !crate::online_index::has_cjk(trimmed)
+        })
+        .collect()
+}
+
+/// 已有译文的 `modId → titleHash` 快照。
+///
+/// 进度查询每 2 秒一次，若逐条查表就是 3 万次加锁 + 3 万次重算哈希；
+/// 这里一次加锁取回整表，调用方再在内存里比对。
+fn existing_title_hashes(app: &tauri::AppHandle) -> std::collections::HashMap<i64, String> {
+    let mut out: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    let Ok(guard) = ensure_title_loaded(app) else { return out };
+    let Some(mem) = guard.as_ref() else { return out };
+    for (key, entry) in mem.store.entries.iter() {
+        if entry.title.trim().is_empty() {
+            continue;
+        }
+        let Ok(mod_id) = key.parse::<i64>() else { continue };
+        out.insert(mod_id, entry.title_hash.clone());
+    }
+    out
+}
+
+fn title_update_progress(done: usize, failed: usize, total: usize, message: &str) {
+    let mut job = lock_title_job();
+    job.done = done;
+    job.failed = failed;
+    job.total = total;
+    job.message = message.to_string();
+}
+
+fn title_stop_requested() -> bool {
+    lock_title_job().stop
+}
+
+fn title_quota_like(err: &ApiFailure) -> bool {
+    if err.kind == "quota" || err.status == Some(429) {
+        return true;
+    }
+    let text = err.message.to_lowercase();
+    text.contains("429") || text.contains("too many") || text.contains("quota") || text.contains("rate limit")
+}
+
+/// 启动批量标题翻译（后台线程，**1 req/s**，可随时停止，断点续跑）
+pub fn start_title_job(
+    app: tauri::AppHandle,
+    requested_lang: Option<String>,
+) -> Result<TitleJobStatus, ApiFailure> {
+    let lang = resolve_lang(&app, requested_lang.as_deref());
+    {
+        let mut job = lock_title_job();
+        if job.running {
+            return Err(ApiFailure::new("busy", "标题翻译已在进行中", None));
+        }
+        job.running = true;
+        job.stop = false;
+        job.lang = lang.clone();
+        job.total = 0;
+        job.done = 0;
+        job.failed = 0;
+        job.message = "正在准备标题翻译".to_string();
+        job.started_at_ms = now_ms();
+        job.finished_at_ms = 0;
+    }
+    let handle = app.clone();
+    let worker_lang = lang.clone();
+    std::thread::spawn(move || run_title_job(handle, worker_lang));
+    Ok(title_job_status(&app))
+}
+
+pub fn stop_title_job(app: &tauri::AppHandle) -> TitleJobStatus {
+    {
+        let mut job = lock_title_job();
+        if job.running {
+            job.stop = true;
+            job.message = "正在停止…".to_string();
+        }
+    }
+    title_job_status(app)
+}
+
+pub fn title_job_status(app: &tauri::AppHandle) -> TitleJobStatus {
+    let (running, job_lang, failed, message, started_at_ms, finished_at_ms) = {
+        let job = lock_title_job();
+        (
+            job.running,
+            job.lang.clone(),
+            job.failed,
+            job.message.clone(),
+            job.started_at_ms,
+            job.finished_at_ms,
+        )
+    };
+    let lang = if job_lang.trim().is_empty() {
+        resolve_lang(app, None)
+    } else {
+        job_lang
+    };
+    let index_status = crate::online_index::status_for_app(app);
+    let index_ready = index_status.indexed > 0;
+    let candidates = if index_ready { title_candidates(app) } else { Vec::new() };
+    let total = candidates.len();
+    // 一次加锁取回整表，避免 3 万次逐条加锁（每 2 秒轮询一次）
+    let existing = existing_title_hashes(app);
+    let done = candidates
+        .iter()
+        .filter(|(mod_id, title)| {
+            existing.get(mod_id).is_some_and(|hash| *hash == title_hash(title))
+        })
+        .count();
+    TitleJobStatus {
+        running,
+        lang,
+        total,
+        done,
+        failed,
+        remaining: total.saturating_sub(done),
+        message: if message.trim().is_empty() {
+            if index_ready {
+                "空闲：可随时开始批量翻译标题".to_string()
+            } else {
+                "在线索引还没建立，暂时没有可翻译的标题".to_string()
+            }
+        } else {
+            message
+        },
+        started_at_ms,
+        finished_at_ms,
+        path: title_path(app).map(|p| p.display().to_string()).unwrap_or_default(),
+        index_ready,
+    }
+}
+
+fn run_title_job(app: tauri::AppHandle, lang: String) {
+    let outcome = run_title_job_inner(&app, &lang);
+    let mut job = lock_title_job();
+    job.running = false;
+    job.stop = false;
+    job.finished_at_ms = now_ms();
+    match outcome {
+        Ok(message) => {
+            log::info!(target: "translate", "批量标题翻译结束（{lang}）：{message}");
+            job.message = message;
+        }
+        Err(err) => {
+            log::warn!(target: "translate", "批量标题翻译中断（{lang}）：{}", err.message);
+            job.message = format!("已中断：{}", err.message);
+        }
+    }
+}
+
+fn run_title_job_inner(app: &tauri::AppHandle, lang: &str) -> Result<String, ApiFailure> {
+    reset_title_lang(app, lang).map_err(|e| ApiFailure::new("internal", e, None))?;
+
+    let existing = existing_title_hashes(app);
+    let pending: Vec<(i64, String)> = title_candidates(app)
+        .into_iter()
+        .filter(|(mod_id, title)| {
+            existing.get(mod_id).map_or(true, |hash| *hash != title_hash(title))
+        })
+        .collect();
+    let total = pending.len();
+    if total == 0 {
+        title_update_progress(0, 0, 0, "所有标题都已翻译");
+        return Ok("所有标题都已翻译".to_string());
+    }
+
+    let settings = settings::load_for_app(app);
+    let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
+        .map_err(|e| ApiFailure::new("network", format!("网络配置无效：{e}"), None))?;
+    let proxy = net::ureq_proxy(&resolved).map_err(|e| ApiFailure::new("network", e, None))?;
+    let config = load_config(app);
+    let providers = plan(&settings.translate_provider, &config, &resolved);
+    let agent = build_agent(proxy);
+    let target = provider_target(lang);
+    log::info!(
+        target: "translate",
+        "批量标题翻译开始：{total} 条待翻 → {lang}，接口顺序={:?}，代理={:?}",
+        providers.iter().map(|p| p.name()).collect::<Vec<_>>(),
+        resolved.proxy_url
+    );
+
+    let mut translated = 0usize;
+    let mut failed = 0usize;
+    let mut consecutive = 0u32;
+    title_update_progress(0, 0, total, "正在翻译标题");
+
+    for (mod_id, title) in pending {
+        if title_stop_requested() {
+            flush_titles(app);
+            return Ok(format!("已停止：本次翻译 {translated} 条"));
+        }
+        if translated >= TITLE_MAX_PER_RUN {
+            flush_titles(app);
+            return Ok(format!("已达单次上限 {TITLE_MAX_PER_RUN} 条，下次继续"));
+        }
+        // 单条独占队列：`throttle()` 会把「下一次允许发请求」推到 1 秒后
+        let result = {
+            let _slot = Slot::acquire();
+            translate_text(&agent, &title, &providers, &target)
+        };
+        match result {
+            Ok((text, provider)) => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    failed += 1;
+                    consecutive += 1;
+                } else {
+                    let entry = TitleEntry {
+                        title_hash: title_hash(&title),
+                        title: text,
+                        provider: provider.name().to_string(),
+                        saved_at_ms: now_ms(),
+                    };
+                    if let Err(e) = put_title(app, mod_id, entry) {
+                        log::warn!(target: "translate", "标题译文写入失败（modId={mod_id}）：{e}");
+                    }
+                    translated += 1;
+                    consecutive = 0;
+                    if translated % TITLE_FLUSH_EVERY == 0 {
+                        flush_titles(app);
+                    }
+                    title_update_progress(translated, failed, total, "正在翻译标题");
+                }
+            }
+            Err(err) => {
+                failed += 1;
+                consecutive += 1;
+                title_update_progress(translated, failed, total, "正在翻译标题");
+                if title_quota_like(&err) || consecutive >= TITLE_MAX_FAILURES {
+                    flush_titles(app);
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    flush_titles(app);
+    Ok(format!("本次翻译 {translated} 条，失败 {failed} 条"))
 }
 
 #[cfg(test)]

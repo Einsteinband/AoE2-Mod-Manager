@@ -4,8 +4,13 @@ import { noteRequestFailure, noteRequestSuccess } from "./networkError";
 import type {
   DownloadProgress,
   FindResult,
+  IndexClearReport,
+  IndexSearchResult,
+  IndexStatus,
+  IndexSyncReport,
   InstallOutcome,
   LoginTarget,
+  TitleJobStatus,
   ModTag,
   NetworkSettingsView,
   SessionStatus,
@@ -265,4 +270,91 @@ export function onDownloadProgress(
   handler: (payload: DownloadProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<DownloadProgress>("online://download-progress", (event) => handler(event.payload));
+}
+
+// ---------------- v1.0：在线全量索引（中文搜索） ----------------
+
+/** 索引状态：已收录条数 / 服务端总量 / 是否同步中 */
+export function indexStatus(): Promise<IndexStatus> {
+  return invoke<IndexStatus>("online_index_status");
+}
+
+/**
+ * 手动补全索引。
+ * 未登录会立刻抛 `unauthenticated`（官方 /Find 匿名 401），调用方静默处理即可；
+ * 同一时刻只允许一个同步，重复调用抛 `busy`。
+ */
+export function indexSync(): Promise<IndexSyncReport> {
+  return invoke<IndexSyncReport>("online_index_sync");
+}
+
+export interface IndexSearchParams {
+  query: string;
+  offset?: number;
+  limit?: number;
+  /** 不传 = 跟随设置 / 界面语言（Rust 侧解析） */
+  targetLang?: string;
+}
+
+/** 纯本地检索：索引文本 + 本地译文标题，**不发任何网络请求** */
+export function indexSearch(params: IndexSearchParams): Promise<IndexSearchResult> {
+  return invoke<IndexSearchResult>("online_index_search", {
+    query: params.query,
+    offset: params.offset ?? 0,
+    limit: params.limit ?? 24,
+    targetLang: params.targetLang ?? null,
+  });
+}
+
+/**
+ * 本地搜索（v1.1 双搜索框架）：只查本地索引 + 本地译文标题，**零网络**。
+ *
+ * 与官方搜索（`findMods`）彻底分开，前端两个输入框各走一条链路，
+ * 结果不再互相混合。Rust 侧命令 `search_local_mods` 内部复用同一个 `search_for_app`。
+ */
+export function searchLocalMods(params: IndexSearchParams): Promise<IndexSearchResult> {
+  return invoke<IndexSearchResult>("search_local_mods", {
+    keyword: params.query,
+    offset: params.offset ?? 0,
+    limit: params.limit ?? 60,
+    targetLang: params.targetLang ?? null,
+  });
+}
+
+/** 清空索引（下次登录后会自动重建） */
+export function indexClear(): Promise<IndexClearReport> {
+  return invoke<IndexClearReport>("online_index_clear");
+}
+
+/**
+ * 订阅索引进度事件（Rust 每成功写入一批数据 emit 一次，结束 / 失败也会 emit）。
+ * 前端靠它实时刷新「🟡 索引同步中 (已收集 N / M 条)」，不再依赖轮询。
+ */
+export function onIndexProgress(handler: (status: IndexStatus) => void): Promise<UnlistenFn> {
+  return listen<IndexStatus>("online://index-progress", (event) => {
+    if (event.payload) handler(event.payload);
+  });
+}
+
+// ---------------- v1.0：批量标题翻译（online_titles_zh.json） ----------------
+
+/**
+ * 开始批量翻译索引里的英文标题。
+ * 后台单线程、**1 req/s**（与详情页翻译共用同一个全局 FIFO 限速器），可随时停止，
+ * 断点续跑（已翻过的靠 titleHash 跳过）。已在跑时抛 `busy`。
+ */
+export function titleTranslateStart(targetLang?: string): Promise<TitleJobStatus> {
+  return invoke<TitleJobStatus>("online_titles_translate_start", {
+    targetLang: targetLang ?? null,
+  });
+}
+
+/** 请求停止：当前这条请求跑完后退出 */
+export function titleTranslateStop(): Promise<TitleJobStatus> {
+  return invoke<TitleJobStatus>("online_titles_translate_stop");
+}
+
+/** 进度：已翻 / 待翻 / 总数 */
+export function titleTranslateStatus(): Promise<TitleJobStatus> {
+  return invoke<TitleJobStatus>("online_titles_translate_status");
 }

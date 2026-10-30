@@ -5,6 +5,7 @@ import type { ModEntry } from "../types";
 import { fileUrl } from "../api";
 import { initials, sourceHint, sourceLabel, statusLabel } from "../format";
 import { customNameOf, displayTitle, isFavorite } from "../userData";
+import { translatedTitleOf } from "../online/translation";
 
 const props = defineProps<{
   mod: ModEntry;
@@ -39,8 +40,14 @@ const statusClass = computed(() => {
 });
 
 // v0.5：有备注名时主标题用备注名，副标题小字回显原英文标题
-const title = computed(() => displayTitle(props.mod.workshopId, props.mod.displayName));
+// v0.2.4：没备注名时，已翻译的模组直接显示中文标题（跟详情页的「显示原文/中文」开关联动）
 const custom = computed(() => customNameOf(props.mod.workshopId));
+const translated = computed(() => translatedTitleOf(props.mod.workshopId));
+const title = computed(() =>
+  displayTitle(props.mod.workshopId, translated.value ?? props.mod.displayName),
+);
+/** 副标题只服务于备注名（📝）；译文不再叠英文原名 */
+const sub = computed(() => (custom.value ? props.mod.displayName : null));
 const favorited = computed(() => isFavorite(props.mod.workshopId));
 </script>
 
@@ -66,7 +73,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
     </div>
     <div class="card-body">
       <div class="card-title" :title="title">{{ title }}</div>
-      <div v-if="custom" class="card-sub" :title="mod.displayName">📝 {{ mod.displayName }}</div>
+      <div v-if="sub" class="card-sub" :title="mod.displayName">📝 {{ mod.displayName }}</div>
       <div class="card-meta status-row">
         <span class="status-chip" :class="statusClass" :title="statusLabel(mod.enabled)">
           <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">

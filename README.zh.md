@@ -183,3 +183,13 @@ F:\AoE2ModManager
 如果这个工具帮到了你，欢迎请我喝杯咖啡！你的支持是我持续更新的最大动力。
 
 [![Sponsor](https://img.shields.io/badge/Sponsor_Afdian-☕-orange)](https://afdian.com/a/Einsteinband)
+
+---
+
+## 版权与商业使用声明
+
+本项目采用 **PolyForm Noncommercial License 1.0.0** 协议开源。
+允许个人用户自由使用、修改和分享本软件。
+**严禁任何形式的商业用途**（包括但不限于：打包售卖本软件、将其集成到付费产品中、或用于商业盈利服务）。
+
+版权所有 (c) 2026 Einsteinband。保留所有权利。

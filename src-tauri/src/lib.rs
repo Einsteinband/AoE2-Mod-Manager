@@ -16,6 +16,7 @@ mod online;
 mod scan;
 mod secure;
 mod settings;
+mod translator;
 mod update;
 mod user_data;
 
@@ -1833,6 +1834,13 @@ pub fn run() {
             online_cache_items,
             online_cache_clear,
             online_cache_stat,
+            translator::translate_mod_text,
+            translator::translation_cached,
+            translator::translations_cached,
+            translator::get_translate_settings,
+            translator::set_translate_settings,
+            translator::translation_cache_stat,
+            translator::translation_cache_clear,
             online_images_local,
             online_images_fetch,
             online_install,

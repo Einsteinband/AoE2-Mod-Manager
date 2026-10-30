@@ -178,14 +178,6 @@ Anything unavailable is shown as *not provided / unknown* together with the reas
 Not affiliated with Microsoft, Xbox Game Studios or Forgotten Empires. Age of Empires is a trademark of its respective owners.
 ---
 
-## ☕ Support the Development
-
-If this tool has helped you, consider buying me a coffee! Your support keeps the project alive.
-
-[![Sponsor](https://img.shields.io/badge/Sponsor_Afdian-☕-orange)](https://afdian.com/a/Einsteinband)
-
----
-
 ## License & Commercial Use
 
 This project is licensed under the **PolyForm Noncommercial License 1.0.0**. 

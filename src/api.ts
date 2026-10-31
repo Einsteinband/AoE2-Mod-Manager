@@ -42,8 +42,9 @@ export function checkUpdate(): Promise<UpdateInfo> {
 }
 
 /**
- * 启动时的静默检查：24 小时内自动查过就直接跳过，一个请求都不发。
- * 返回 null 表示被时间锁跳过（此时终端不会有任何 [update] 日志）。
+ * 启动时的静默检查：2 小时内已自动查过就直接跳过，一个请求都不发
+ *（只挡频繁重启，不再用 24 小时长锁，避免漏掉刚发布的新版本）。
+ * 返回 null 表示被防抖跳过（此时终端会有一行 `[update] auto check skipped` 诊断日志）。
  */
 export function checkUpdateAuto(): Promise<UpdateInfo | null> {
   return invoke<UpdateInfo | null>("check_update_auto");

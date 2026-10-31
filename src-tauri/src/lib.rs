@@ -2592,9 +2592,40 @@ async fn open_cache_dir(app: tauri::AppHandle, kind: String) -> Result<String, S
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 
+/// 退出闸门：已经在 CloseRequested 里请求过退出，避免重复 exit / 重复起看门狗
+static EXITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 硬退出兜底（斩草除根）。
+///
+/// 后台线程（在线索引、静默重登轮询、封面下载、翻译队列）全都是 `thread::spawn`
+/// 或 `spawn_blocking` 的分离线程，Rust 主线程一结束整进程就会被带走，
+/// 它们本身不会阻止退出；真正会卡住退出的是「事件循环还在跑」。
+/// 所以这里只做一件事：给优雅退出留 1.2 秒，超时就直接 OS 级强杀。
+fn spawn_exit_watchdog(delay: std::time::Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        log::error!(target: "app-exit", "优雅退出超时，强制终止进程 std::process::exit(0)");
+        std::process::exit(0);
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
-        // 日志插件要最先注册：日志统一输出到 Stdout，终端里可见
+        // ★ 单实例守护：必须是 Builder 上**第一个**注册的插件。
+        // 已有一个实例在跑时，再次双击图标 → 这里收到回调（新进程立刻退出），
+        // 只负责把已有主窗口从最小化/隐藏状态恢复并抢焦点。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            log::info!(target: "app-exit", "检测到重复启动：激活已有主窗口");
+            match app.get_webview_window("main") {
+                Some(win) => {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+                None => log::error!(target: "app-exit", "重复启动回调里找不到 label=main 的主窗口"),
+            }
+        }))
+        // 日志插件紧随其后：日志统一输出到 Stdout，终端里可见
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([tauri_plugin_log::Target::new(
@@ -2611,6 +2642,30 @@ pub fn run() {
         // 否则前端 asset: URL 读本地 jpg 会被拒绝。
         .setup(|app| {
             images::allow_scope(app.handle());
+            // ★ 关闭即退出：右上角 X 必须真正结束进程。
+            // 病灶：会话探测 / 静默重登会在后台常驻一个**隐藏**的账号 WebView2 窗口
+            // （session::ensure_account_window(…, visible=false)，见 online/session.rs:492），
+            // tauri 只要窗口表里还有窗口，就永远不认为"窗口全关"，
+            // RunEvent::ExitRequested 因此从不触发 → 主窗口关了、进程还活着，
+            // 反复开关就会堆出一串僵尸 aoe2-mod-manager.exe。
+            match app.get_webview_window("main") {
+                Some(main) => {
+                    let handle = app.handle().clone();
+                    main.on_window_event(move |event| {
+                        if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                            if EXITING.swap(true, Ordering::SeqCst) {
+                                return;
+                            }
+                            log::info!(target: "app-exit", "收到关闭请求：优雅退出 + 强杀兜底");
+                            // 先走正常退出：让 RunEvent::Exit / 插件清理有机会执行
+                            handle.exit(0);
+                            // 再挂 OS 级强杀：1.2 秒内没退干净就直接终结进程
+                            spawn_exit_watchdog(std::time::Duration::from_millis(1200));
+                        }
+                    });
+                }
+                None => log::error!(target: "app-exit", "未找到 label=main 的主窗口，关闭事件未挂载"),
+            }
             // v1.0：后台静默建立在线模组索引（中文搜索底座）。
             // 8 秒后才开始，绝不和首屏、登录校验、更新检查抢带宽。
             online_index::spawn_background(app.handle().clone());

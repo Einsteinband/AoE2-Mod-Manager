@@ -5,8 +5,13 @@
 //!   WebView2 里的 fetch 只会跟系统代理，用户设的手动代理会失效。
 //! - 匿名请求（不带 Cookie），GitHub 要求必须带 User-Agent，否则 403。
 //! - 只读 latest release；版本比较在本地完成。
-//! - 启动静默检查带 24 小时时间锁（settings.json 的 last_auto_update_check_ms），
-//!   时间锁命中时直接返回，连一条 `[update]` 日志都不会打；手动检查不受限制。
+//! - 启动静默检查带 2 小时防抖（settings.json 的 last_auto_update_check_ms），
+//!   命中时直接返回、不发请求，只打一条 `[update] auto check skipped` 诊断日志；
+//!   手动检查不受限制。
+//!
+//! 为什么不是 24 小时锁：旧实现用 24 小时，导致「刚发完新 Release，用户重启旧版本」
+//! 这段时间里自动检查被静默跳过，界面完全不提示——这正是被报上来的 bug。
+//! 现在只在 2 小时内已查过时省一次请求（匿名接口 60 req/h，正常使用绰绰有余）。
 
 use serde::Serialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,8 +23,10 @@ const RELEASES_LATEST: &str = "https://api.github.com/repos/Einsteinband/AoE2-Mo
 const NOTES_LIMIT: usize = 600;
 /// GitHub 强制要求 User-Agent，缺失会被直接判 403
 const USER_AGENT: &str = concat!("AoE2ModManager/", env!("CARGO_PKG_VERSION"), " (Windows)");
-/// 自动检查的最小间隔：24 小时（匿名接口只有 60 次/小时，启动时不该每次都去刷）
-pub const AUTO_CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+/// 自动检查的最小间隔：2 小时（用户 2026-10-31 确认的取值）。
+/// 24 小时锁会漏掉「刚发完却重启」的新版本；2 小时对普通用户足够温和，
+/// 也远低于匿名接口 60 req/h 的配额（最坑也才 1 req/2h，单日 ≈ 12 次）。
+pub const AUTO_CHECK_MIN_INTERVAL_MS: i64 = 2 * 60 * 60 * 1000;
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -240,6 +247,10 @@ fn parse_info(response: ureq::Response) -> Result<UpdateInfo, String> {
 
     let latest = normalize(&tag);
     let current = current_version();
+    // 诊断日志：下次「发了新版却不提示」时，这一行能直接看出是比对结论错、
+    // 还是拿到的 tag 不对（例如 Release 被勾成 pre-release，/releases/latest 不会返回它）
+    let has_update = is_newer(&latest, &current);
+    println!("[update] compare: current={current} latest={latest} tag={tag} has_update={has_update}");
     let release_url = value
         .get("html_url")
         .and_then(|v| v.as_str())
@@ -254,7 +265,7 @@ fn parse_info(response: ureq::Response) -> Result<UpdateInfo, String> {
         .filter(|text| !text.is_empty());
 
     Ok(UpdateInfo {
-        has_update: is_newer(&latest, &current),
+        has_update,
         current_version: current,
         latest_version: latest,
         release_url,
@@ -281,7 +292,7 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// 时间锁判定：距上次自动检查是否已满 24 小时。
+/// 防抖判定：距上次自动检查是否已过 [`AUTO_CHECK_MIN_INTERVAL_MS`]。
 /// `last_ms <= 0` 视为从未检查；时间戳在未来（用户改过系统时间）时不锁，避免永久卡死。
 pub fn auto_check_due(last_ms: i64) -> bool {
     if last_ms <= 0 {
@@ -291,10 +302,10 @@ pub fn auto_check_due(last_ms: i64) -> bool {
     if last_ms > now {
         return true;
     }
-    now - last_ms >= AUTO_CHECK_INTERVAL_MS
+    now - last_ms >= AUTO_CHECK_MIN_INTERVAL_MS
 }
 
-/// 启动静默检查：未满 24 小时直接返回 `Ok(None)`——不发请求、不打任何 `[update]` 日志。
+/// 启动静默检查：2 小时内已检查过就直接返回 `Ok(None)`——不发请求，只打一条 ASCII 诊断日志。
 /// 请求真的发出去过（含 403）就把时间戳写回 settings.json。
 pub fn fetch_latest_auto(
     app: &tauri::AppHandle,
@@ -302,6 +313,13 @@ pub fn fetch_latest_auto(
 ) -> Result<Option<UpdateInfo>, String> {
     let settings = crate::settings::load_for_app(app);
     if !auto_check_due(settings.last_auto_update_check_ms) {
+        let elapsed = now_ms() - settings.last_auto_update_check_ms;
+        println!(
+            "[update] auto check skipped: last check {}s ago (< {}s), current={}",
+            elapsed / 1000,
+            AUTO_CHECK_MIN_INTERVAL_MS / 1000,
+            current_version()
+        );
         return Ok(None);
     }
 
@@ -323,7 +341,7 @@ fn mark_auto_checked(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_check_due, is_newer, AUTO_CHECK_INTERVAL_MS};
+    use super::{auto_check_due, is_newer, AUTO_CHECK_MIN_INTERVAL_MS};
 
     #[test]
     fn compares_numeric_segments() {
@@ -338,13 +356,26 @@ mod tests {
         assert!(!is_newer("0.1.1-beta", "0.1.1"));
     }
 
+    /// 回归测试：GitHub tag 带 v 前缀（v0.4.0）也必须判定为比本地 0.3.5 新
     #[test]
-    fn applies_daily_lock() {
+    fn detects_v_prefixed_release() {
+        assert!(is_newer("v0.4.0", "0.3.5"));
+        assert!(is_newer("V0.4.0", "0.3.5"));
+        assert!(is_newer("v0.3.6", "0.3.5"));
+        assert!(is_newer("v0.3.10", "0.3.9"));
+        assert!(!is_newer("v0.3.5", "0.3.5"));
+        assert!(!is_newer("v0.3.4", "0.3.5"));
+    }
+
+    #[test]
+    fn applies_short_debounce() {
         let now = super::now_ms();
         assert!(auto_check_due(0));
         assert!(!auto_check_due(now));
-        assert!(!auto_check_due(now - AUTO_CHECK_INTERVAL_MS + 60_000));
-        assert!(auto_check_due(now - AUTO_CHECK_INTERVAL_MS - 1_000));
+        assert!(!auto_check_due(now - AUTO_CHECK_MIN_INTERVAL_MS + 60_000));
+        assert!(auto_check_due(now - AUTO_CHECK_MIN_INTERVAL_MS - 1_000));
+        // 关键回归：9 小时前查过（旧 24 小时锁会挡住）现在必须放行
+        assert!(auto_check_due(now - 9 * 60 * 60 * 1000));
         // 时间戳在未来（系统时间被改过）：不锁，避免永久发不出请求
         assert!(auto_check_due(now + 60_000));
     }

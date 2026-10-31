@@ -96,6 +96,13 @@ export interface DeleteReport {
   message: string;
 }
 
+/**
+ * v3.0 界面字体种类：黑体（出厂默认）/ 幼圆 / 跟随系统。
+ * 对应 CSS 变量 --app-font-family（真字体栈写在 style.css 的 --font-* 里）。
+ * v2.4 的旧值 "sans-serif" / "serif" / "system-ui" 一律静默归一化为这里的值。
+ */
+export type UiFontFamily = "hei" | "youyuan" | "system";
+
 export interface AppSettings {
   modRoot: string | null;
   lastScanMs: number | null;
@@ -107,6 +114,33 @@ export interface AppSettings {
   enableIndexing: boolean;
   /** 是否在在线页显示本地搜索框（设置 → 通用，默认关闭） */
   enableLocalSearch: boolean;
+  /** v1.6 本地列表视图：“grid” 大图网格 | “list” 紧凑列表 */
+  viewMode: string;
+  /** v1.6 网格模式卡片最小宽度（px，160..=320，步长 20） */
+  cardSize: number;
+  /** v2.2 界面主题："dark" 深色羊皮纸（默认）| "light" 明亮米白 */
+  theme: string;
+  /**
+   * v3.0 三层排版 —— 界面层：字体种类（"hei" | "youyuan" | "system"）
+   * 对应 CSS 变量 --app-font-family
+   */
+  uiFontFamily: UiFontFamily;
+  /** v3.0 界面层：字重（400 常规 / 700 加粗，默认 400）—— 对应 CSS 变量 --ui-font-weight */
+  uiFontWeight: number;
+  /** v2.4 界面层：全局缩放百分比（80..=150，默认 100）—— 对应 --global-scale（值 ÷ 100） */
+  globalFontScale: number;
+  /** v2.4 正文阅读层：基准字号（px，12..=24，默认 14）—— 对应 --reader-font-size */
+  readerFontSize: number;
+  /** v2.4 正文阅读层：行距（1.4 / 1.6 / 1.8，默认 1.6）—— 对应 --reader-line-height */
+  readerLineHeight: number;
+  /** v3.0 正文阅读层：字重（400 常规 / 700 加粗，默认 400）—— 对应 --reader-font-weight */
+  readerFontWeight: number;
+  /** v2.4 卡片列表层：字号（px，10..=16，默认 12）—— 对应 --card-font-size */
+  cardFontSize: number;
+  /** v2.3 遗留：扁平界面字号。v2.4 起只用于一次性迁移，新数据一律为 null，前端不再读取 */
+  uiFontSize?: number | null;
+  /** v2.3 遗留：扁平行距（已废弃，仅迁移用） */
+  uiLineHeight?: number | null;
 }
 
 /** v0.3 预设：一条记录对应 mod-status.json 里的一条 Mods 项 */

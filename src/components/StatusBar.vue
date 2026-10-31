@@ -243,9 +243,9 @@ onBeforeUnmount(() => {
   line-height: 1;
   letter-spacing: 0.3px;
   color: var(--muted);
-  background: linear-gradient(180deg, #14100b, #0b0806);
+  background: linear-gradient(180deg, var(--statusbar-top), var(--statusbar-bottom));
   border-top: 1px solid var(--line-soft);
-  box-shadow: inset 0 1px 0 rgba(201, 162, 77, 0.12);
+  box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.12);
   user-select: none;
 }
 
@@ -260,14 +260,13 @@ onBeforeUnmount(() => {
   border-radius: 0;
   background: transparent;
   color: var(--parch-dim);
-  font-family: var(--serif);
   font-size: 11px;
   letter-spacing: 0.4px;
   cursor: pointer;
 }
 .sb-account:hover {
   color: var(--gold-bright);
-  background: rgba(201, 162, 77, 0.1);
+  background: rgba(var(--accent-rgb), 0.1);
 }
 .sb-account.online {
   color: var(--gold);
@@ -279,7 +278,7 @@ onBeforeUnmount(() => {
   color: var(--muted);
 }
 .sb-account.network-error {
-  color: #d98a72;
+  color: var(--danger-text);
 }
 .sb-dot {
   font-size: 9px;
@@ -315,7 +314,7 @@ onBeforeUnmount(() => {
   padding: 2px 7px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: #14100c;
+  background: var(--bg-panel);
   color: var(--muted);
   font-size: 10px;
   white-space: nowrap;
@@ -335,14 +334,13 @@ onBeforeUnmount(() => {
   padding: 10px;
   border: 1px solid var(--gold-dim);
   border-radius: 4px;
-  background: linear-gradient(180deg, #221a10, #120d08);
-  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.62);
+  background: linear-gradient(180deg, var(--menu-top), var(--menu-bottom));
+  box-shadow: 0 14px 32px rgba(var(--shadow-rgb), 0.62);
   animation: sb-menu-in 0.14s ease-out;
 }
 .sb-menu-title {
   padding: 2px 2px 8px;
   color: var(--gold-bright);
-  font-family: var(--serif);
   font-size: 11.5px;
   letter-spacing: 1.2px;
   text-transform: uppercase;
@@ -357,7 +355,7 @@ onBeforeUnmount(() => {
   text-align: left;
   border: 1px solid var(--line);
   border-radius: 3px;
-  background: #14100b;
+  background: var(--bg-panel);
   color: var(--parch);
   cursor: pointer;
 }
@@ -366,10 +364,9 @@ onBeforeUnmount(() => {
 }
 .sb-menu-item.active {
   border-color: var(--gold);
-  background: linear-gradient(180deg, #2a2118, #1c1610);
+  background: linear-gradient(180deg, var(--item-active-top), var(--bg-hover));
 }
 .sb-menu-label {
-  font-family: var(--serif);
   font-size: 12px;
   color: var(--parch);
 }
@@ -399,7 +396,7 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 .sb-menu-note.err {
-  color: #d98a72;
+  color: var(--danger-text);
 }
 @keyframes sb-menu-in {
   from {

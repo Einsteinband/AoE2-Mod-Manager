@@ -101,7 +101,19 @@ function formatCount(n: number | null): string {
   white-space: nowrap;
 }
 .card-meta .author.missing {
-  color: #6b5940;
+  color: var(--text-dim);
   font-style: italic;
+}
+
+/* v3.2：在线卡片标题显式跟随全局字体，并固定 400 字重
+   （避免幼圆被“界面加粗”的合成描边写成方硬笔画）。 */
+.card-title,
+.card-sub,
+.card-meta {
+  font-family: var(--app-font-family);
+}
+.card-title,
+.card-sub {
+  font-weight: 400;
 }
 </style>

@@ -137,8 +137,9 @@ pub struct Settings {
     /// 手动代理地址（仅 proxy_mode == "manual" 时使用），形如 http://127.0.0.1:7897
     #[serde(default)]
     pub proxy_url: Option<String>,
-    /// 是否用 DPAPI 加密缓存会话 Cookie（体验优先，默认开启；可在高级设置里关闭）
-    #[serde(default = "default_true")]
+    /// 记住登录 7 天：开启后把会话 Cookie 续命成持久 Cookie 并用 DPAPI 加密缓存。
+    /// **默认关闭**——关闭时冷启动不落盘任何 AoE 凭证，改为隐藏窗口静默重登兜底。
+    #[serde(default)]
     pub remember_login: bool,
     /// 界面语言："en" | "zh"；空字符串 = 尚未选择（前端按系统语言推断后回写）
     #[serde(default)]
@@ -168,6 +169,269 @@ pub struct Settings {
     /// 只是一个界面开关：关闭时本地搜索入口会整个隐藏（不影响已有索引数据）。
     #[serde(default)]
     pub enable_local_search: bool,
+    /// 本地列表视图模式：“grid”（大图网格，默认）| “list”（紧凑列表）。
+    /// 纯界面偏好，越界值由 `set_view_prefs` 命令夹回合法档位。
+    #[serde(default = "default_view_mode")]
+    pub view_mode: String,
+    /// 网格模式下卡片的**最小宽度**（px，160..=320，步长 20）；列表模式不读取该值。
+    #[serde(default = "default_card_size")]
+    pub card_size: u32,
+    /// 界面主题："dark"（默认，深色羊皮纸）| "light"（明亮米白）。
+    /// 纯界面偏好，越界值由 `set_theme` 命令夹回 dark；老 settings.json 缺字段走默认值。
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// v3.0：界面字体种类 —— "hei"（黑体，默认）| "youyuan"（幼圆）| "system"（跟随系统）。
+    /// 纯界面偏好：前端把它翻译成 CSS 变量 --app-font-family，不影响任何业务逻辑。
+    /// v2.4 旧值 "sans-serif" / "serif" 载入时静默归一化为 hei，"system-ui" 归一化为 system。
+    #[serde(default = "default_ui_font_family")]
+    pub ui_font_family: String,
+    /// v3.0：界面字重（400 常规 / 700 加粗，默认 400）—— 对应 CSS 变量 --ui-font-weight。
+    /// v2.4 的遗留字段同名且为 `Option<u32>`，已升级为本字段（兼容旧文件里的 null）。
+    #[serde(default = "default_ui_font_weight", deserialize_with = "de_ui_font_weight")]
+    pub ui_font_weight: u32,
+    /// v2.4：全局缩放（百分比，80..=150，默认 100）—— 对应 CSS 变量 --global-scale（值 ÷ 100）。
+    /// 只放大 / 缩小「界面层」（侧边栏、顶栏、设置弹窗等）；正文与卡片各有独立字号。
+    #[serde(default = "default_global_font_scale")]
+    pub global_font_scale: u32,
+    /// v2.4：正文基准字号（px，12..=24，默认 14）—— 对应 CSS 变量 --reader-font-size。
+    #[serde(default = "default_reader_font_size")]
+    pub reader_font_size: u32,
+    /// v2.4：正文行距（1.4 / 1.6 / 1.8，默认 1.6）—— 对应 CSS 变量 --reader-line-height。
+    #[serde(default = "default_reader_line_height")]
+    pub reader_line_height: f32,
+    /// v2.4：正文字重（400 常规 / 700 加粗，默认 400）—— 对应 CSS 变量 --reader-font-weight。
+    #[serde(default = "default_reader_font_weight")]
+    pub reader_font_weight: u32,
+    /// v2.4：卡片列表字号（px，10..=16，默认 12）—— 对应 CSS 变量 --card-font-size。
+    #[serde(default = "default_card_font_size")]
+    pub card_font_size: u32,
+    /// v2.3 遗留：扁平的界面字号。v2.4 起只作为一次性迁移来源，
+    /// 由 `migrate_legacy_typography` 搬进 reader_* 后置空；之后写入一律为 null。
+    #[serde(default)]
+    pub ui_font_size: Option<u32>,
+    /// v2.3 遗留：扁平行距（迁移后置空）
+    #[serde(default)]
+    pub ui_line_height: Option<f32>,
+}
+
+impl Settings {
+    /// v2.4：把 v2.3 的扁平排版字段一次性迁移到「正文阅读」层。
+    ///
+    /// - 只有当分层字段仍是出厂默认值时才采纳旧值（用户已经调过新滑块就绝不覆盖）；
+    /// - 迁移后旧字段一律清空，因此反复读写 settings.json 不会重复迁移；
+    /// - v3.0：`ui_font_weight` 已改为界面层必填字段，v2.3 的扁平字重不再迁移；
+    /// - 返回 true 表示内存里的结构被改动过（调用方可决定是否立即写盘）。
+    pub fn migrate_legacy_typography(&mut self) -> bool {
+        if self.ui_font_size.is_none() && self.ui_line_height.is_none() {
+            return false;
+        }
+        let untouched = self.reader_font_size == READER_FONT_SIZE_DEFAULT
+            && (self.reader_line_height - READER_LINE_HEIGHT_DEFAULT).abs() < f32::EPSILON;
+        if untouched {
+            if let Some(size) = self.ui_font_size {
+                // v2.3 的取值范围 12..=20 完全落在 12..=24 之内，直接夹一次即可
+                self.reader_font_size = clamp_reader_font_size(size);
+            }
+            if let Some(line) = self.ui_line_height {
+                self.reader_line_height = normalize_reader_line_height(line);
+            }
+        }
+        self.ui_font_size = None;
+        self.ui_line_height = None;
+        true
+    }
+}
+
+// ---------------- v2.4：三层排版（界面 / 正文阅读 / 卡片列表） ----------------
+
+fn default_ui_font_family() -> String {
+    UI_FONT_FAMILY_DEFAULT.to_string()
+}
+
+fn default_ui_font_weight() -> u32 {
+    UI_FONT_WEIGHT_DEFAULT
+}
+
+/// 兼容 v2.4 写下的 `"ui_font_weight": null`（当时是 Option<u32>）：
+/// null / 缺省 → 默认 400；数字（含 v2.4 的 500）→ 归一化为 400 / 700。
+fn de_ui_font_weight<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<u32>::deserialize(deserializer)?;
+    Ok(raw.map(normalize_ui_font_weight).unwrap_or(UI_FONT_WEIGHT_DEFAULT))
+}
+
+fn default_global_font_scale() -> u32 {
+    GLOBAL_SCALE_DEFAULT
+}
+
+fn default_reader_font_size() -> u32 {
+    READER_FONT_SIZE_DEFAULT
+}
+
+fn default_reader_line_height() -> f32 {
+    READER_LINE_HEIGHT_DEFAULT
+}
+
+fn default_reader_font_weight() -> u32 {
+    READER_FONT_WEIGHT_DEFAULT
+}
+
+fn default_card_font_size() -> u32 {
+    CARD_FONT_SIZE_DEFAULT
+}
+
+/// 界面字体种类：黑体
+pub const UI_FONT_FAMILY_HEI: &str = "hei";
+/// 界面字体种类：幼圆
+pub const UI_FONT_FAMILY_YOUYUAN: &str = "youyuan";
+/// 界面字体种类：跟随系统
+pub const UI_FONT_FAMILY_SYSTEM: &str = "system";
+pub const UI_FONT_FAMILY_DEFAULT: &str = UI_FONT_FAMILY_HEI;
+
+/// 界面字重两档：常规 / 加粗（对应 CSS 变量 --ui-font-weight）
+pub const UI_FONT_WEIGHT_NORMAL: u32 = 400;
+pub const UI_FONT_WEIGHT_BOLD: u32 = 700;
+pub const UI_FONT_WEIGHT_DEFAULT: u32 = UI_FONT_WEIGHT_NORMAL;
+
+/// 字体种类归一化：只认 hei / youyuan / system，其余一律回黑体。
+/// v2.4 旧值静默改写："sans-serif" / "serif" → hei；"system-ui" → system（语义不变）。
+pub fn normalize_ui_font_family(family: &str) -> String {
+    let trimmed = family.trim();
+    if trimmed.eq_ignore_ascii_case(UI_FONT_FAMILY_YOUYUAN) {
+        UI_FONT_FAMILY_YOUYUAN.to_string()
+    } else if trimmed.eq_ignore_ascii_case(UI_FONT_FAMILY_SYSTEM)
+        || trimmed.eq_ignore_ascii_case("system-ui")
+    {
+        UI_FONT_FAMILY_SYSTEM.to_string()
+    } else {
+        UI_FONT_FAMILY_DEFAULT.to_string()
+    }
+}
+
+/// 界面字重归一化：只保留 400 / 700，阈值 600（与前端 normalizeUiFontWeight 一致）。
+pub fn normalize_ui_font_weight(weight: u32) -> u32 {
+    if weight >= 600 {
+        UI_FONT_WEIGHT_BOLD
+    } else {
+        UI_FONT_WEIGHT_NORMAL
+    }
+}
+
+/// 全局缩放档位（百分比，与前端滑块 min/max/step 保持一致）
+pub const GLOBAL_SCALE_MIN: u32 = 80;
+pub const GLOBAL_SCALE_MAX: u32 = 150;
+pub const GLOBAL_SCALE_DEFAULT: u32 = 100;
+
+/// 把任意缩放值夹进 80..=150（不报错，避免 0% / 1000% 这种坏值把界面撑爆）。
+pub fn clamp_global_font_scale(scale: u32) -> u32 {
+    scale.clamp(GLOBAL_SCALE_MIN, GLOBAL_SCALE_MAX)
+}
+
+/// 正文基准字号档位（px）
+pub const READER_FONT_SIZE_MIN: u32 = 12;
+pub const READER_FONT_SIZE_MAX: u32 = 24;
+pub const READER_FONT_SIZE_DEFAULT: u32 = 14;
+
+/// 正文行距三档：紧凑 / 标准 / 宽松
+pub const READER_LINE_HEIGHT_COMPACT: f32 = 1.4;
+pub const READER_LINE_HEIGHT_NORMAL: f32 = 1.6;
+pub const READER_LINE_HEIGHT_LOOSE: f32 = 1.8;
+pub const READER_LINE_HEIGHT_DEFAULT: f32 = 1.6;
+
+/// 正文字重两档：常规 / 加粗（v3.0 起 500 改为真加粗 700）
+pub const READER_FONT_WEIGHT_NORMAL: u32 = 400;
+pub const READER_FONT_WEIGHT_BOLD: u32 = 700;
+pub const READER_FONT_WEIGHT_DEFAULT: u32 = 400;
+
+/// 把任意字号夹进 12..=24（正文允许比界面基准更大，方便阅读）。
+pub fn clamp_reader_font_size(size: u32) -> u32 {
+    size.clamp(READER_FONT_SIZE_MIN, READER_FONT_SIZE_MAX)
+}
+
+/// 正文行距归一化：取最接近的合法档位；NaN / 非有限值一律回默认。
+pub fn normalize_reader_line_height(value: f32) -> f32 {
+    if !value.is_finite() {
+        return READER_LINE_HEIGHT_DEFAULT;
+    }
+    let mut best = READER_LINE_HEIGHT_NORMAL;
+    let mut best_diff = f32::MAX;
+    for candidate in [
+        READER_LINE_HEIGHT_COMPACT,
+        READER_LINE_HEIGHT_NORMAL,
+        READER_LINE_HEIGHT_LOOSE,
+    ] {
+        let diff = (value - candidate).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// 正文字重归一化：只保留 400 / 700，阈值 600（与前端下拉框一致）。
+/// v2.4 的 500（“偏粗”）落回 400，避免老用户升级后正文突然变粗。
+pub fn normalize_reader_font_weight(weight: u32) -> u32 {
+    if weight >= 600 {
+        READER_FONT_WEIGHT_BOLD
+    } else {
+        READER_FONT_WEIGHT_NORMAL
+    }
+}
+
+/// 卡片列表字号档位（px）
+pub const CARD_FONT_SIZE_MIN: u32 = 10;
+pub const CARD_FONT_SIZE_MAX: u32 = 16;
+pub const CARD_FONT_SIZE_DEFAULT: u32 = 12;
+
+/// 把任意字号夹进 10..=16（卡片标题 / 元信息共用这一档）。
+pub fn clamp_card_font_size(size: u32) -> u32 {
+    size.clamp(CARD_FONT_SIZE_MIN, CARD_FONT_SIZE_MAX)
+}
+
+fn default_view_mode() -> String {
+    VIEW_MODE_GRID.to_string()
+}
+
+fn default_theme() -> String {
+    THEME_DARK.to_string()
+}
+
+/// 界面主题：深色（默认）
+pub const THEME_DARK: &str = "dark";
+/// 界面主题：明亮
+pub const THEME_LIGHT: &str = "light";
+
+/// 主题归一化：只认 light，其余一律 dark（不报错，避免坏值把界面卡死）。
+pub fn normalize_theme(theme: &str) -> String {
+    if theme.trim().eq_ignore_ascii_case(THEME_LIGHT) {
+        THEME_LIGHT.to_string()
+    } else {
+        THEME_DARK.to_string()
+    }
+}
+
+fn default_card_size() -> u32 {
+    CARD_SIZE_DEFAULT
+}
+
+/// 视图模式：大图网格
+pub const VIEW_MODE_GRID: &str = "grid";
+/// 视图模式：紧凑列表
+pub const VIEW_MODE_LIST: &str = "list";
+/// 卡片宽度档位下限 / 上限 / 默认值（与前端滑块 min/max/step 保持一致）
+pub const CARD_SIZE_MIN: u32 = 160;
+pub const CARD_SIZE_MAX: u32 = 320;
+pub const CARD_SIZE_STEP: u32 = 20;
+/// 默认值取 200（紧贴旧版写死的 196px，且正好落在 20 的档位上）
+pub const CARD_SIZE_DEFAULT: u32 = 200;
+
+/// 把任意输入夹回合法档位：先取整到 20 的倍数，再夹进 160..=320。
+pub fn clamp_card_size(size: u32) -> u32 {
+    let snapped = ((size + CARD_SIZE_STEP / 2) / CARD_SIZE_STEP) * CARD_SIZE_STEP;
+    snapped.clamp(CARD_SIZE_MIN, CARD_SIZE_MAX)
 }
 
 fn default_proxy_mode() -> String {
@@ -178,9 +442,7 @@ fn default_translate_provider() -> String {
     "auto".to_string()
 }
 
-fn default_true() -> bool {
-    true
-}
+
 
 impl Default for Settings {
     fn default() -> Self {
@@ -200,6 +462,22 @@ impl Default for Settings {
             enable_indexing: false,
             // 默认不显示本地搜索框（需要时在设置里开启）
             enable_local_search: false,
+            // 默认大图网格 + 200px（紧贴旧版写死的 196px，老用户升级后观感基本不变）
+            view_mode: default_view_mode(),
+            card_size: default_card_size(),
+            theme: default_theme(),
+            // v3.0 三层排版默认值（与 style.css :root 里的变量初值一一对应）：
+            // 界面 黑体 / 400 字重 / 100% 缩放；正文 14px / 1.6 / 400；卡片 12px
+            ui_font_family: default_ui_font_family(),
+            ui_font_weight: default_ui_font_weight(),
+            global_font_scale: default_global_font_scale(),
+            reader_font_size: default_reader_font_size(),
+            reader_line_height: default_reader_line_height(),
+            reader_font_weight: default_reader_font_weight(),
+            card_font_size: default_card_font_size(),
+            // v2.3 遗留字段：新装 / 默认值里一律为空
+            ui_font_size: None,
+            ui_line_height: None,
         }
     }
 }

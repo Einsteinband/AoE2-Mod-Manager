@@ -1,43 +1,51 @@
-# v0.3.2
+# v0.3.4
 
-## v0.3.2 - Local Chinese Search & Batch Tools
+## v0.3.4 — UI & UX Revolution
 
-### Local Chinese search (new)
-- **Two separate search boxes**: the top bar only does official search and fires only on Enter / "Search". A new local box above the mod grid searches Chinese titles and authors with a 300 ms debounce and **zero network requests**; results render in the same card grid.
-- **Search while indexing**: local search queries both the index being built and everything already cached, so hits appear immediately instead of waiting for the full crawl.
-- **Live index status**: 🟡 syncing (N / M collected) · 🟢 ready · 🔴 failed, please sign in · ⚪ disabled — pushed from the backend in real time.
-- **Safer background sync**: the index is capped at 100,000 mods; on an expired cookie (401) the crawler stops immediately instead of retrying, and resumes automatically after you sign in again.
+### New Visual System
+- **Light Mode Added**: a global theme switcher for seamless toggling between dark and light modes. Easy on the eyes, day or night.
+- **Advanced Typography Engine**: switch between SimHei / YouYuan / Microsoft YaHei, with font size, line spacing and weight adjustable independently to eliminate visual fatigue.
+- **Responsive Modular Layout**: the global UI skeleton was refactored to fully solve window scaling, squeezing and jumping issues. The search box and toolbar are now more compact and professional.
 
-### One-click mod toggles
-- An enable/disable switch on every card, plus "Enable all / Disable all" in the toolbar for the current filtered list. The whole batch is written to `mod-status.json` once, behind a confirmation dialog.
+### Login & Security Optimization
+- **User-Controlled Persistent Login**: new "Remember me for 7 days" toggle.
+  - Benefit: when enabled, credentials are stored locally with DPAPI encryption, so restarting the app is instant.
+  - Risk: credentials stay on disk for 7 days. Do NOT enable this on public or shared computers.
+  - Default strategy: disabled by default for maximum security out of the box. When disabled, restarting triggers a silent Microsoft SSO verification that takes a few seconds.
 
-### Batch title translation
-- Settings → Translation: translate the English titles of indexed mods, one request per second, resumable and stoppable at any time. Results are cached locally.
+### Experience & Extensions
+- **Redesigned Details Panel**: mod descriptions moved to the top, action buttons reorganized by priority, and "Technical Info" collapsed for a more intuitive experience.
+- **Startup Update Popup**: after a major update the app shows the release notes on launch, so no new feature is missed.
+- **Built-in Update History**: browse the changelog of all historical versions anytime in Settings - About.
+- **Lanzou Cloud Backup Download**: a Lanzou Cloud entry in the About section for faster downloads in China.
 
-### Settings
-- Settings → General now has two switches, both **off by default**: "Local Chinese search & auto indexing" and "Local search box on the online page".
-- Existing caches, favorites and presets need no migration; missing `settings.json` fields fall back to defaults.
-
----
-
-## v0.3.2 - 本地中文搜索与批量工具
-
-### 本地中文搜索（全新）
-- **双搜索框**：顶栏只负责官方搜索，回车或点「搜索」才会发请求；列表上方新增本地搜索框，用中文标题 / 作者检索，300ms 防抖、**完全不发网络请求**，结果直接渲染进原卡片网格。
-- **边爬边搜**：本地搜索同时查询正在建立的索引和已缓存的所有条目，不用等全部爬完就能出结果。
-- **索引状态实时可见**：🟡 同步中（已收集 N / M）· 🟢 已就绪 · 🔴 同步失败请先登录 · ⚪ 未开启。
-- **后台同步更安全**：索引上限 10 万条；Cookie 过期（401）时立即停止而非反复重试，重新登录后自动续爬。
-
-### 模组一键开关
-- 每张卡片右下角可直接启用 / 禁用；工具栏可对当前筛选结果「全部启用 / 全部禁用」，整批只写一次 `mod-status.json`，并带二次确认。
-
-### 批量翻译标题
-- 设置 → 翻译：单线程每秒 1 条翻译索引里的英文标题，可随时停止、断点续跑，译文存本地。
-
-### 设置
-- 设置 → 通用新增两个开关，**默认都关闭**：「本地中文搜索与自动索引」和「在线页的本地搜索框」。
-- 已有缓存、收藏与预设数据无需迁移；`settings.json` 缺字段自动按默认值处理。
+### Fixes & Improvements
+- **Indexing Mechanism Optimization**: when local indexing is disabled in settings, the "Go to Settings" banner is hidden automatically instead of nagging repeatedly.
+- Optimized card rendering on both local and online pages, completely resolving physical jitter when switching categories.
+- Refactored the underlying business logic for faster performance and lower memory usage.
 
 ---
 
-> 完整说明 / Full documentation: [README.zh.md](README.zh.md) · [README.md](README.md)
+## v0.3.4 — 视觉与体验大革命
+
+### 全新视觉系统
+- **明亮模式上线**：新增全局明暗主题切换，支持一键无缝切换，白天黑夜都护眼。
+- **超强排版引擎**：支持「黑体 / 幼圆 / 微软雅黑」字体切换，字号、行距、粗细皆可独立调节，彻底告别视觉疲劳。
+- **响应式模块化布局**：重构了全局 UI 骨架，完美解决窗口缩放时的挤压与跳动问题，搜索框与工具栏布局更加紧凑专业。
+
+### 登录与安全机制优化
+- **持久登录自主可控**：新增「记住登录 7 天」开关。
+  - 好处：开启后，登录凭证以 DPAPI 加密形式保存在本机，重启软件无需再次验证，秒开即用。
+  - 风险：凭证会落盘 7 天，请勿在公共电脑上开启。
+  - 默认策略：该功能默认关闭，保障默认状态下的最高安全性；关闭时，重启软件会自动通过微软 SSO 进行静默验证（耗时数秒）。
+
+### 体验与扩展
+- **全新详情面板**：模组描述全面前置，操作按钮按主次重排，「技术信息」折叠收纳，阅读与操作更直观。
+- **首启更新弹窗**：每次大版本更新后，软件启动会自动展示新特性说明，不再错过任何更新。
+- **内置更新历史**：在「设置 - 关于」中可随时查看所有历史版本的更新日志。
+- **蓝奏云备用下载**：在「关于」页提供蓝奏云网盘入口，方便国内用户高速获取资源。
+
+### 修复与优化
+- **索引机制优化**：当在设置中关闭本地索引时，页面顶部的「前往开启」残留横幅会自动隐藏，不再反复打扰。
+- 优化了本地与在线页面的卡片渲染逻辑，彻底解决切换分类时的物理抖动。
+- 重构了底层业务逻辑代码，软件运行速度更快，内存占用更低。

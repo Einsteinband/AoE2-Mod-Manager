@@ -10,10 +10,12 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { appVersion, checkUpdate, getSettings, openExternalUrl, setEnableIndexing, setEnableLocalSearch, setLocale } from "../api";
+import ConfirmDialog from "./ConfirmDialog.vue";
+import { appVersion, checkUpdate, fetchGithubReleases, getSettings, openExternalUrl, renderReleaseMarkdown, setEnableIndexing, setEnableLocalSearch, setLocale } from "../api";
+import type { GithubRelease } from "../api";
 import { translateBackendMessage } from "../format";
 import { applyLocale, LOCALE_OPTIONS, type Locale } from "../i18n";
-import { getNetworkSettings, setNetworkSettings } from "../online/service";
+import { getNetworkSettings, setNetworkSettings, setRememberLogin } from "../online/service";
 import {
   getTranslateSettings,
   setTranslateSettings,
@@ -41,15 +43,273 @@ import {
 } from "../modUpdates";
 import type { CacheOverview, NetworkSettingsView, TitleJobStatus, TranslateSettingsView, TranslationCacheStat } from "../online/types";
 import type { UpdateInfo } from "../types";
+import { CARD_SIZE_MAX, CARD_SIZE_MIN, CARD_SIZE_STEP, clampCardSize } from "../composables/useViewPrefs";
+import {
+  CARD_FONT_SIZE_MAX,
+  CARD_FONT_SIZE_MIN,
+  GLOBAL_SCALE_MAX,
+  GLOBAL_SCALE_MIN,
+  GLOBAL_SCALE_STEP,
+  READER_FONT_SIZE_MAX,
+  READER_FONT_SIZE_MIN,
+  READER_FONT_WEIGHT_OPTIONS,
+  READER_LINE_HEIGHT_OPTIONS,
+  TYPOGRAPHY_DEFAULTS,
+  UI_FONT_FAMILY_OPTIONS,
+  UI_FONT_WEIGHT_OPTIONS,
+  clampCardFontSize,
+  clampGlobalScale,
+  clampReaderFontSize,
+  normalizeReaderFontWeight,
+  normalizeReaderLineHeight,
+  normalizeUiFontWeight,
+  type UiFontFamily,
+} from "../api";
 
-const emit = defineEmits<{ close: [] }>();
+/** 全局视图偏好：卡片大小与主界面用同一个 v-model（设置里拖完，列表立即跟着变） */
+const props = withDefaults(defineProps<{ /** 当前根目录（只用于展示，不参与业务） */ rootPath?: string }>(), {
+  rootPath: "",
+});
+
+const emit = defineEmits<{ close: []; "change-root": [] }>();
 const { t, locale } = useI18n();
 
-type Tab = "general" | "network" | "translate" | "about";
+type Tab = "general" | "appearance" | "network" | "local" | "online" | "about";
 const tab = ref<Tab>("general");
+
+/**
+ * 仅本弹窗使用的补充文案（本次改造不改语言包文件）。
+ */
+const ui = computed(() =>
+  String(locale.value).toLowerCase().startsWith("zh")
+    ? {
+        tabAppearance: "外观",
+        themeTitle: "主题模式",
+        themeNote: "切换后立即生效，不重启界面；选择会写进 settings.json",
+        themeDark: "深色",
+        themeLight: "明亮",
+        cardSize: "卡片大小",
+        cardSizeNote: "拖动后立即生效，只影响网格视图（160–320px）；设置会写进 settings.json",
+        cardSizeHint: "列表视图不受影响；顶栏的「网格 / 列表」按钮就在列表抬头右侧的批量操作组里。",
+        groupUi: "界面",
+        groupReader: "正文阅读",
+        groupCard: "卡片列表",
+        fontFamilyTitle: "字体种类",
+        fontFamilyNote: "切换后立即生效并写入设置",
+        fontFamilyHei: "黑体",
+        fontFamilyYouyuan: "幼圆",
+        fontFamilySystem: "跟随系统",
+        uiFontWeightTitle: "界面字重",
+        uiFontWeightNote: "导航、按钮与设置界面的描边粗细",
+        globalScaleTitle: "全局缩放",
+        globalScaleNote: "80%–150%：侧边栏、顶栏与设置界面同步缩放",
+        readerFontSizeTitle: "正文字号",
+        readerFontSizeNote: "12–24px：只作用于模组描述正文",
+        lineHeightTitle: "行距",
+        lineHeightNote: "只影响正文行间空白，不改变控件尺寸",
+        lineHeightCompact: "紧凑 1.4",
+        lineHeightStandard: "标准 1.6",
+        lineHeightLoose: "宽松 1.8",
+        fontWeightTitle: "正文字重",
+        fontWeightNote: "只影响模组描述正文的描边粗细",
+        weightNormal: "常规 400",
+        weightBold: "加粗 700",
+        resetTypography: "恢复默认排版",
+        resetTypographyTitle: "恢复默认排版",
+        resetTypographyMessage: "确定要将所有字体、字号、行距和字重恢复为默认吗？",
+        resetTypographyConfirm: "恢复默认",
+        cardFontSizeTitle: "卡片字号",
+        cardFontSizeNote: "10–16px：只影响卡片标题与元信息",
+        typographyHint: "界面、正文、卡片三层互不干扰，深色与明亮主题同样生效。",
+        rootTitle: "模组根目录",
+        rootNote: "更换后会自动重新扫描，并写入 settings.json；主界面信息栏会同步刷新。",
+        changeRoot: "更换根目录",
+        rootEmpty: "尚未设置根目录",
+        rootPath:
+          "模组扫描路径（根目录）已统一到「通用」Tab 里的「更换根目录」按钮管理。",
+      }
+    : {
+        tabAppearance: "Appearance",
+        themeTitle: "Theme",
+        themeNote: "Applies instantly without reloading; the choice is saved to settings.json",
+        themeDark: "Dark",
+        themeLight: "Light",
+        cardSize: "Card size",
+        cardSizeNote: "Applies instantly, grid view only (160–320px); saved to settings.json",
+        cardSizeHint:
+          "List view is unaffected; the Grid / List switch lives in the batch group at the right of the list heading.",
+        groupUi: "Interface",
+        groupReader: "Reading text",
+        groupCard: "Card list",
+        fontFamilyTitle: "Font family",
+        fontFamilyNote: "Applies instantly and is saved to settings",
+        fontFamilyHei: "Hei (SimHei)",
+        fontFamilyYouyuan: "YouYuan",
+        fontFamilySystem: "Follow system",
+        uiFontWeightTitle: "Interface weight",
+        uiFontWeightNote: "Stroke weight of navigation, buttons and settings",
+        globalScaleTitle: "Global scale",
+        globalScaleNote: "80%–150%: sidebar, toolbar and settings scale together",
+        readerFontSizeTitle: "Reader font size",
+        readerFontSizeNote: "12–24px: mod description body only",
+        lineHeightTitle: "Line height",
+        lineHeightNote: "Changes only the spacing of body text, not control sizes",
+        lineHeightCompact: "Compact 1.4",
+        lineHeightStandard: "Standard 1.6",
+        lineHeightLoose: "Loose 1.8",
+        fontWeightTitle: "Body weight",
+        fontWeightNote: "Applies to mod description text only",
+        weightNormal: "Normal 400",
+        weightBold: "Bold 700",
+        resetTypography: "Restore default layout",
+        resetTypographyTitle: "Restore default layout",
+        resetTypographyMessage:
+          "Reset every font, size, line height and weight to its default value?",
+        resetTypographyConfirm: "Restore defaults",
+        cardFontSizeTitle: "Card font size",
+        cardFontSizeNote: "10–16px: card title and meta only",
+        typographyHint:
+          "Interface, reading text and cards are independent layers, and both dark and light themes are supported.",
+        rootTitle: "Mod root folder",
+        rootNote: "Changing the root rescans automatically and is saved to settings.json.",
+        changeRoot: "Change root folder",
+        rootEmpty: "No root folder set yet",
+        rootPath:
+          "The mod scan root is now managed by \"Change root folder\" in the General tab.",
+      },
+);
+
+/** 卡片最小宽度：与主界面滑块、Rust 侧 clamp 同口径 */
+const cardSize = defineModel<number>("cardSize", { default: 200 });
+
+/** 界面主题："dark"（默认）| "light"；主界面 App.vue 持有真值并负责落盘 */
+const theme = defineModel<string>("theme", { default: "dark" });
+
+/** 主题选项（文案跟随界面语言，不新增 i18n key） */
+const THEME_OPTIONS = computed(() => [
+  { value: "dark", label: ui.value.themeDark },
+  { value: "light", label: ui.value.themeLight },
+]);
+
+/** 取整到 20 的倍数并夹进 160..=320：与 useViewPrefs / Rust 侧完全一致 */
+function snapCardSize() {
+  cardSize.value = clampCardSize(Number(cardSize.value));
+}
+
+/**
+ * v2.4：三层排版（界面 / 正文阅读 / 卡片列表）。
+ * 真值由 App.vue 持有，改动会立即写到 <html> 的 CSS 变量上（不重建组件树），
+ * 落盘由 App.vue 统一防抖（300ms）调用 api.saveTypographyPrefs。
+ */
+
+// 【界面】字体种类 + 界面字重 + 全局缩放
+const uiFontFamily = defineModel<UiFontFamily>("uiFontFamily", { default: "hei" });
+const uiFontWeight = defineModel<number>("uiFontWeight", { default: 400 });
+const globalFontScale = defineModel<number>("globalFontScale", { default: 100 });
+
+// 【正文阅读】字号 + 行距 + 字重
+const readerFontSize = defineModel<number>("readerFontSize", { default: 14 });
+const readerLineHeight = defineModel<number>("readerLineHeight", { default: 1.6 });
+const readerFontWeight = defineModel<number>("readerFontWeight", { default: 400 });
+
+// 【卡片列表】字号
+const cardFontSize = defineModel<number>("cardFontSize", { default: 12 });
+
+/** 字体种类下拉项（文案跟随界面语言） */
+const FONT_FAMILY_OPTIONS_LABELED = computed(() =>
+  UI_FONT_FAMILY_OPTIONS.map((value) => ({
+    value,
+    label:
+      value === "youyuan"
+        ? ui.value.fontFamilyYouyuan
+        : value === "system"
+          ? ui.value.fontFamilySystem
+          : ui.value.fontFamilyHei,
+  })),
+);
+
+/** 行距下拉项（文案跟随界面语言） */
+const LINE_HEIGHT_OPTIONS_LABELED = computed(() =>
+  READER_LINE_HEIGHT_OPTIONS.map((value) => ({
+    value,
+    label:
+      value === 1.4
+        ? ui.value.lineHeightCompact
+        : value === 1.8
+          ? ui.value.lineHeightLoose
+          : ui.value.lineHeightStandard,
+  })),
+);
+
+/** 字重下拉项（400 常规 / 700 加粗） */
+const FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
+  READER_FONT_WEIGHT_OPTIONS.map((value) => ({
+    value,
+    label: value >= 700 ? ui.value.weightBold : ui.value.weightNormal,
+  })),
+);
+
+/** 界面字重下拉项（同上文案，但作用于 --ui-font-weight） */
+const UI_FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
+  UI_FONT_WEIGHT_OPTIONS.map((value) => ({
+    value,
+    label: value >= 700 ? ui.value.weightBold : ui.value.weightNormal,
+  })),
+);
+
+/** 滑块松手时夹回合法档位（拖动过程中已经是合法值，这里只是兑底） */
+function snapGlobalScale() {
+  globalFontScale.value = clampGlobalScale(Number(globalFontScale.value));
+}
+function snapReaderFontSize() {
+  readerFontSize.value = clampReaderFontSize(Number(readerFontSize.value));
+}
+function snapCardFontSize() {
+  cardFontSize.value = clampCardFontSize(Number(cardFontSize.value));
+}
+
+/** 下拉框回写的值再归一化一次：坏值一律改成最近的合法档位 */
+function applyFontFamily(event: Event) {
+  const raw = (event.target as HTMLSelectElement).value;
+  uiFontFamily.value = (
+    UI_FONT_FAMILY_OPTIONS as readonly string[]
+  ).includes(raw)
+    ? (raw as UiFontFamily)
+    : "hei";
+}
+function applyLineHeight(event: Event) {
+  readerLineHeight.value = normalizeReaderLineHeight(Number((event.target as HTMLSelectElement).value));
+}
+function applyFontWeight(event: Event) {
+  readerFontWeight.value = normalizeReaderFontWeight(Number((event.target as HTMLSelectElement).value));
+}
+function applyUiFontWeight(event: Event) {
+  uiFontWeight.value = normalizeUiFontWeight(Number((event.target as HTMLSelectElement).value));
+}
+
+/** 恢复默认排版的二次确认开关 */
+const showResetConfirm = ref(false);
+
+/**
+ * 恢复默认排版：只重置「字体种类 / 界面字重 / 缩放 / 正文字号·行距·字重 / 卡片字号」
+ * 七个排版变量；卡片大小（cardSize）与主题模式（theme）不在其中，绝不会被误伤。
+ * 七个值一次性同步赋值 → App.vue 的 watch 会合并成一次 300ms 防抖写盘。
+ */
+function resetTypography() {
+  uiFontFamily.value = TYPOGRAPHY_DEFAULTS.fontFamily;
+  uiFontWeight.value = TYPOGRAPHY_DEFAULTS.uiFontWeight;
+  globalFontScale.value = TYPOGRAPHY_DEFAULTS.globalScale;
+  readerFontSize.value = TYPOGRAPHY_DEFAULTS.readerFontSize;
+  readerLineHeight.value = TYPOGRAPHY_DEFAULTS.readerLineHeight;
+  readerFontWeight.value = TYPOGRAPHY_DEFAULTS.readerFontWeight;
+  cardFontSize.value = TYPOGRAPHY_DEFAULTS.cardFontSize;
+  showResetConfirm.value = false;
+}
 
 const REPO_URL = "https://github.com/Einsteinband/AoE2-Mod-Manager";
 const AUTHOR_URL = "https://github.com/Einsteinband";
+/** 蓝奏云网盘（备用下载 / 资源）：界面上不显示明文链接，只能点按钮走系统浏览器 */
+const LANZOU_URL = "https://wwblm.lanzouv.com/b01i5yfj5e";
 
 function describe(e: unknown): string {
   if (typeof e === "string") return translateBackendMessage(e);
@@ -254,6 +514,59 @@ async function openAuthor() {
   }
 }
 
+// ---------------- 关于：蓝奏云网盘 + GitHub 更新历史（v3.1） ----------------
+
+/** 蓝奏云备用下载：地址不进界面，错误统一进关于页的提示行 */
+async function openCloud() {
+  try {
+    await openExternalUrl(LANZOU_URL);
+  } catch (e) {
+    checkError.value = describe(e);
+  }
+}
+
+/** 更新历史：第一次展开才拉取，之后本地缓存（不重复消耗 GitHub 匿名配额） */
+const historyOpen = ref(false);
+const historyLoading = ref(false);
+const historyError = ref<string | null>(null);
+const history = ref<GithubRelease[]>([]);
+let historyLoaded = false;
+
+async function toggleHistory() {
+  historyOpen.value = !historyOpen.value;
+  if (!historyOpen.value) return;
+  if (historyLoaded || historyLoading.value) return;
+  await loadHistory();
+}
+
+async function loadHistory() {
+  historyLoading.value = true;
+  historyError.value = null;
+  try {
+    const list = await fetchGithubReleases();
+    // 后端已按发布时间倒序；这里再兜一次，避免 JSON 顺序异常
+    history.value = [...list].sort((a, b) =>
+      String(b.publishedAt ?? "").localeCompare(String(a.publishedAt ?? "")),
+    );
+    historyLoaded = true;
+  } catch (e) {
+    historyError.value = describe(e);
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+/** ISO8601 → 本地 YYYY-MM-DD（解析失败就直接截前 10 位） */
+function formatReleaseDate(value: string): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const ts = Date.parse(raw);
+  if (Number.isNaN(ts)) return raw.slice(0, 10);
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 // ---------------- 通用：本地模组批量更新检测（用户点击才触发） ----------------
 
 const modStatusText = computed(() => {
@@ -285,7 +598,7 @@ async function runModCheck() {
 const netView = ref<NetworkSettingsView | null>(null);
 const netAuto = ref(true);
 const netUrl = ref("");
-const netRemember = ref(true);
+const netRemember = ref(false);
 const netSaving = ref(false);
 const netError = ref<string | null>(null);
 const netMessage = ref<string | null>(null);
@@ -383,6 +696,23 @@ async function loadNetwork() {
     netError.value = describe(e);
   } finally {
     netLoading.value = false;
+  }
+}
+
+/**
+ * 「记住登录 7 天」开关：改动立即落库（`set_remember_login` 只写配置，
+ * 真正的 Cookie 门控在 Rust 侧），不依赖后面的「保存」按钮。
+ */
+async function applyRememberLogin() {
+  if (netSaving.value) return;
+  netError.value = null;
+  netMessage.value = null;
+  try {
+    const enabled = await setRememberLogin(netRemember.value);
+    netRemember.value = enabled;
+    netMessage.value = t(enabled ? "online.rememberOn" : "online.rememberOff");
+  } catch (e) {
+    netError.value = describe(e);
   }
 }
 
@@ -731,6 +1061,14 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="settings-tab"
+            :class="{ active: tab === 'appearance' }"
+            @click="tab = 'appearance'"
+          >
+            🎨 {{ ui.tabAppearance }}
+          </button>
+          <button
+            type="button"
+            class="settings-tab"
             :class="{ active: tab === 'network' }"
             @click="tab = 'network'"
           >
@@ -739,10 +1077,18 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="settings-tab"
-            :class="{ active: tab === 'translate' }"
-            @click="tab = 'translate'"
+            :class="{ active: tab === 'local' }"
+            @click="tab = 'local'"
           >
-            🈯 {{ t("settings.tabTranslate") }}
+            🧩 {{ t("nav.local") }}
+          </button>
+          <button
+            type="button"
+            class="settings-tab"
+            :class="{ active: tab === 'online' }"
+            @click="tab = 'online'"
+          >
+            ☁ {{ t("nav.online") }}
           </button>
           <button
             type="button"
@@ -778,7 +1124,274 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
-            <!-- v1.2：本地中文搜索与自动索引（默认关闭，落盘 settings.json） -->
+            <!-- v2.1：模组根目录从「外观」搬回「通用」 -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.rootTitle }}</span>
+                <span class="row-note mono">{{ props.rootPath || ui.rootEmpty }}</span>
+              </div>
+              <button type="button" class="settings-check" @click="emit('change-root')">
+                {{ ui.changeRoot }}
+              </button>
+            </div>
+
+            <p class="settings-hint">{{ ui.rootNote }}</p>
+          </section>
+
+          <!-- 外观（v2.0 新增）：主题模式 + 卡片大小滑块 -->
+          <section v-else-if="tab === 'appearance'" class="settings-card">
+            <!-- v2.2：主题模式（深色 / 明亮），点一下立即换肤，不重载页面 -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.themeTitle }}</span>
+                <span class="row-note">{{ ui.themeNote }}</span>
+              </div>
+              <div class="settings-segment" role="radiogroup" :aria-label="ui.themeTitle">
+                <button
+                  v-for="option in THEME_OPTIONS"
+                  :key="option.value"
+                  type="button"
+                  role="radio"
+                  class="settings-segment-btn"
+                  :class="{ active: theme === option.value }"
+                  :aria-checked="theme === option.value"
+                  @click="theme = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
+
+            <div class="settings-sep"></div>
+
+            <!-- 【界面】：字体种类 + 全局缩放（卡片大小仍归这一层） -->
+            <h3 class="settings-group-title">{{ ui.groupUi }}</h3>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.fontFamilyTitle }}</span>
+                <span class="row-note">{{ ui.fontFamilyNote }}</span>
+              </div>
+              <select
+                class="settings-select typography-select"
+                :value="uiFontFamily"
+                :aria-label="ui.fontFamilyTitle"
+                @change="applyFontFamily"
+              >
+                <option v-for="opt in FONT_FAMILY_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.uiFontWeightTitle }}</span>
+                <span class="row-note">{{ ui.uiFontWeightNote }}</span>
+              </div>
+              <select
+                class="settings-select typography-select"
+                :value="uiFontWeight"
+                :aria-label="ui.uiFontWeightTitle"
+                @change="applyUiFontWeight"
+              >
+                <option v-for="opt in UI_FONT_WEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.globalScaleTitle }}</span>
+                <span class="row-note">{{ ui.globalScaleNote }}</span>
+              </div>
+              <div class="settings-range-wrap">
+                <input
+                  v-model.number="globalFontScale"
+                  class="settings-range"
+                  type="range"
+                  :min="GLOBAL_SCALE_MIN"
+                  :max="GLOBAL_SCALE_MAX"
+                  :step="GLOBAL_SCALE_STEP"
+                  :aria-label="ui.globalScaleTitle"
+                  :title="globalFontScale + '%'"
+                  @change="snapGlobalScale"
+                />
+                <span class="settings-range-value">{{ globalFontScale }}%</span>
+              </div>
+            </div>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.cardSize }}</span>
+                <span class="row-note">{{ ui.cardSizeNote }}</span>
+              </div>
+              <div class="settings-range-wrap">
+                <input
+                  v-model.number="cardSize"
+                  class="settings-range"
+                  type="range"
+                  :min="CARD_SIZE_MIN"
+                  :max="CARD_SIZE_MAX"
+                  :step="CARD_SIZE_STEP"
+                  :title="t('toolbar.cardSize', { n: cardSize })"
+                  :aria-label="t('toolbar.cardSize', { n: cardSize })"
+                  @change="snapCardSize"
+                />
+                <span class="settings-range-value">{{ cardSize }}px</span>
+              </div>
+            </div>
+
+            <p class="settings-hint">{{ ui.cardSizeHint }}</p>
+
+            <div class="settings-sep"></div>
+
+            <!-- 【正文阅读】：字号 12–24px / 行距 / 字重 -->
+            <h3 class="settings-group-title">{{ ui.groupReader }}</h3>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.readerFontSizeTitle }}</span>
+                <span class="row-note">{{ ui.readerFontSizeNote }}</span>
+              </div>
+              <div class="settings-range-wrap">
+                <input
+                  v-model.number="readerFontSize"
+                  class="settings-range"
+                  type="range"
+                  :min="READER_FONT_SIZE_MIN"
+                  :max="READER_FONT_SIZE_MAX"
+                  step="1"
+                  :aria-label="ui.readerFontSizeTitle"
+                  :title="readerFontSize + 'px'"
+                  @change="snapReaderFontSize"
+                />
+                <span class="settings-range-value">{{ readerFontSize }}px</span>
+              </div>
+            </div>
+
+            <div class="settings-sep"></div>
+
+            <!-- 行距（1.4 / 1.6 / 1.8） -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.lineHeightTitle }}</span>
+                <span class="row-note">{{ ui.lineHeightNote }}</span>
+              </div>
+              <select
+                class="settings-select typography-select"
+                :value="readerLineHeight"
+                :aria-label="ui.lineHeightTitle"
+                @change="applyLineHeight"
+              >
+                <option v-for="opt in LINE_HEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+
+            <div class="settings-sep"></div>
+
+            <!-- 字重（400 / 500） -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.fontWeightTitle }}</span>
+                <span class="row-note">{{ ui.fontWeightNote }}</span>
+              </div>
+              <select
+                class="settings-select typography-select"
+                :value="readerFontWeight"
+                :aria-label="ui.fontWeightTitle"
+                @change="applyFontWeight"
+              >
+                <option v-for="opt in FONT_WEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+
+            <div class="settings-sep"></div>
+
+            <!-- 【卡片列表】：字号 10–16px -->
+            <h3 class="settings-group-title">{{ ui.groupCard }}</h3>
+
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ ui.cardFontSizeTitle }}</span>
+                <span class="row-note">{{ ui.cardFontSizeNote }}</span>
+              </div>
+              <div class="settings-range-wrap">
+                <input
+                  v-model.number="cardFontSize"
+                  class="settings-range"
+                  type="range"
+                  :min="CARD_FONT_SIZE_MIN"
+                  :max="CARD_FONT_SIZE_MAX"
+                  step="1"
+                  :aria-label="ui.cardFontSizeTitle"
+                  :title="cardFontSize + 'px'"
+                  @change="snapCardFontSize"
+                />
+                <span class="settings-range-value">{{ cardFontSize }}px</span>
+              </div>
+            </div>
+
+            <p class="settings-hint">{{ ui.typographyHint }}</p>
+
+            <!-- v3.0：恢复默认排版（只盖排版七项，不动卡片大小与主题） -->
+            <div class="typography-reset-row">
+              <button type="button" class="typography-reset" @click="showResetConfirm = true">
+                {{ ui.resetTypography }}
+              </button>
+            </div>
+          </section>
+
+          <!-- 网络 -->
+          <section v-else-if="tab === 'network'" class="settings-card">
+            <p class="settings-summary">{{ netSummary }}</p>
+
+            <label class="settings-check-line">
+              <input v-model="netAuto" type="checkbox" :disabled="netSaving" />
+              {{ t("online.followSystem") }}
+            </label>
+
+            <input
+              v-if="!netAuto"
+              v-model="netUrl"
+              class="settings-input"
+              type="text"
+              placeholder="http://127.0.0.1:7897"
+              spellcheck="false"
+              :disabled="netSaving"
+            />
+
+            <label class="settings-check-line">
+              <input
+                v-model="netRemember"
+                type="checkbox"
+                :disabled="netSaving"
+                @change="applyRememberLogin"
+              />
+              {{ t("online.rememberLogin") }}
+            </label>
+            <p class="settings-hint">{{ t("online.rememberLoginHint") }}</p>
+
+            <div class="settings-actions">
+              <button type="button" :disabled="netSaving" @click="saveNetwork">
+                {{ netSaving ? t("online.saving") : t("online.save") }}
+              </button>
+              <button type="button" :disabled="netSaving || netLoading" @click="loadNetwork">
+                {{ t("online.detect") }}
+              </button>
+            </div>
+
+            <div v-if="netError" class="settings-msg error">{{ netError }}</div>
+            <div v-else-if="netMessage" class="settings-msg">{{ netMessage }}</div>
+          </section>
+
+          <!-- 本地模组：索引 / 搜索 / 批量更新检测 -->
+          <section v-else-if="tab === 'local'" class="settings-card">
             <div class="settings-row">
               <div class="row-label">
                 <span class="row-title">{{ t("settings.indexing") }}</span>
@@ -798,7 +1411,6 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
-            <!-- v1.2：在线页的本地搜索框（纯界面开关，默认关闭） -->
             <div class="settings-row">
               <div class="row-label">
                 <span class="row-title">{{ t("settings.localSearch") }}</span>
@@ -815,39 +1427,6 @@ onBeforeUnmount(() => {
               </label>
             </div>
             <div v-if="localSearchError" class="settings-msg error">{{ localSearchError }}</div>
-
-            <div class="settings-sep"></div>
-
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settings.update") }}</span>
-                <span class="row-note">{{ currentVersionText }}</span>
-              </div>
-              <button
-                type="button"
-                class="settings-check"
-                :disabled="!canCheck"
-                :title="t('settings.checkUpdate')"
-                @click="runCheck"
-              >
-                <span v-if="checking" class="spinner"></span>
-                {{ checking ? t("settings.checking") : t("settings.checkUpdate") }}
-              </button>
-            </div>
-
-            <p class="settings-status" :class="{ ok: cooldownLeft > 0 && !hasUpdate, bad: !!checkError }">
-              {{ checkStatusText }}
-            </p>
-
-            <div v-if="hasUpdate" class="settings-update-note">
-              <p>{{ t("settings.foundBody", { version: latest?.latestVersion ?? "" }) }}</p>
-              <p v-if="latest?.publishedAt" class="note">
-                {{ t("settings.publishedAt", { time: latest.publishedAt }) }}
-              </p>
-              <button type="button" class="settings-release" @click="openRelease">
-                {{ t("settings.openRelease") }}
-              </button>
-            </div>
 
             <div class="settings-sep"></div>
 
@@ -879,70 +1458,15 @@ onBeforeUnmount(() => {
 
             <p v-if="modReport && modReport.updateCount > 0" class="settings-hint">
               {{ t("settings.modUpdateHint") }}
-            </p>          </section>
+            </p>
 
-          <!-- 网络 -->
-          <section v-else-if="tab === 'network'" class="settings-card">
-            <p class="settings-summary">{{ netSummary }}</p>
-
-            <label class="settings-check-line">
-              <input v-model="netAuto" type="checkbox" :disabled="netSaving" />
-              {{ t("online.followSystem") }}
-            </label>
-
-            <input
-              v-if="!netAuto"
-              v-model="netUrl"
-              class="settings-input"
-              type="text"
-              placeholder="http://127.0.0.1:7897"
-              spellcheck="false"
-              :disabled="netSaving"
-            />
-
-            <label class="settings-check-line">
-              <input v-model="netRemember" type="checkbox" :disabled="netSaving" />
-              {{ t("online.rememberLogin") }}
-            </label>
-
-            <div class="settings-actions">
-              <button type="button" :disabled="netSaving" @click="saveNetwork">
-                {{ netSaving ? t("online.saving") : t("online.save") }}
-              </button>
-              <button type="button" :disabled="netSaving || netLoading" @click="loadNetwork">
-                {{ t("online.detect") }}
-              </button>
-            </div>
-
-            <div v-if="netError" class="settings-msg error">{{ netError }}</div>
-            <div v-else-if="netMessage" class="settings-msg">{{ netMessage }}</div>
-
-            <!-- v0.6：在线数据缓存（SWR）清理入口 -->
             <div class="settings-sep"></div>
 
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("cache.sectionTitle") }}</span>
-                <span class="row-note">{{ cacheStatusText }}</span>
-              </div>
-              <button
-                type="button"
-                class="settings-check"
-                :disabled="cacheBusy"
-                :title="t('cache.clearButton')"
-                @click="doClearCache"
-              >
-                <span v-if="cacheBusy" class="spinner"></span>
-                {{ cacheBusy ? t("cache.clearing") : t("cache.clearButton") }}
-              </button>
-            </div>
-
-            <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
-            <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
+            <p class="settings-hint">{{ ui.rootPath }}</p>
           </section>
 
-          <!-- 翻译 -->
-          <section v-else-if="tab === 'translate'" class="settings-card">
+          <!-- 在线模组：翻译 / 翻译缓存 / 批量标题翻译 / 在线数据缓存 -->
+          <section v-else-if="tab === 'online'" class="settings-card">
             <div class="settings-row">
               <div class="row-label">
                 <span class="row-title">{{ t("settings.translateTarget") }}</span>
@@ -1063,10 +1587,66 @@ onBeforeUnmount(() => {
             <p class="settings-hint">{{ titleJobText }}</p>
 
             <div v-if="titleJobError" class="settings-msg error">{{ titleJobError }}</div>
+
+            <div class="settings-sep"></div>
+
+            <!-- v0.6：在线数据缓存（SWR）清理入口 -->
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("cache.sectionTitle") }}</span>
+                <span class="row-note">{{ cacheStatusText }}</span>
+              </div>
+              <button
+                type="button"
+                class="settings-check"
+                :disabled="cacheBusy"
+                :title="t('cache.clearButton')"
+                @click="doClearCache"
+              >
+                <span v-if="cacheBusy" class="spinner"></span>
+                {{ cacheBusy ? t("cache.clearing") : t("cache.clearButton") }}
+              </button>
+            </div>
+
+            <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
+            <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
           </section>
 
-          <!-- 关于 -->
+          <!-- 关于（v2.0）：「软件更新」从通用 Tab 整体搬到这里（版本号 / 检查更新 / 发布页） -->
           <section v-else class="settings-card about-card">
+            <div class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("settings.update") }}</span>
+                <span class="row-note">{{ currentVersionText }}</span>
+              </div>
+              <button
+                type="button"
+                class="settings-check"
+                :disabled="!canCheck"
+                :title="t('settings.checkUpdate')"
+                @click="runCheck"
+              >
+                <span v-if="checking" class="spinner"></span>
+                {{ checking ? t("settings.checking") : t("settings.checkUpdate") }}
+              </button>
+            </div>
+
+            <p class="settings-status" :class="{ ok: cooldownLeft > 0 && !hasUpdate, bad: !!checkError }">
+              {{ checkStatusText }}
+            </p>
+
+            <div v-if="hasUpdate" class="settings-update-note">
+              <p>{{ t("settings.foundBody", { version: latest?.latestVersion ?? "" }) }}</p>
+              <p v-if="latest?.publishedAt" class="note">
+                {{ t("settings.publishedAt", { time: latest.publishedAt }) }}
+              </p>
+              <button type="button" class="settings-release" @click="openRelease">
+                {{ t("settings.openRelease") }}
+              </button>
+            </div>
+
+            <div class="settings-sep"></div>
+
             <div class="about-line">
               <span class="row-title">{{ t("settings.version") }}</span>
               <span class="about-value">v{{ version }}</span>
@@ -1079,33 +1659,104 @@ onBeforeUnmount(() => {
               <span class="row-title">{{ t("settings.author") }}</span>
               <button type="button" class="about-link" @click="openAuthor">{{ AUTHOR_URL }}</button>
             </div>
+
+            <div class="about-line about-cloud">
+              <span class="row-title">{{ t("settings.cloudTitle") }}</span>
+              <div class="about-cloud-actions">
+                <button type="button" class="about-link" @click="openCloud">
+                  {{ t("settings.cloudButton") }}
+                </button>
+                <span class="about-cloud-password">{{ t("settings.cloudPassword") }}</span>
+              </div>
+            </div>
+
+            <div class="settings-sep"></div>
+
+            <!-- v3.1：更新历史（GitHub Releases，由 Rust 拉取，前端不直连 API） -->
+            <div class="about-history-head">
+              <span class="row-title">{{ t("settings.changelogTitle") }}</span>
+              <button type="button" class="about-link" @click="toggleHistory">
+                {{ historyOpen ? t("settings.changelogHide") : t("settings.changelogShow") }}
+              </button>
+            </div>
+
+            <div v-if="historyOpen" class="about-history">
+              <p v-if="historyLoading" class="about-history-note">
+                {{ t("settings.changelogLoading") }}
+              </p>
+              <p v-else-if="historyError" class="about-history-note error">
+                {{ historyError }}
+                <button type="button" class="about-history-retry" @click="loadHistory">
+                  {{ t("settings.changelogRetry") }}
+                </button>
+              </p>
+              <template v-else-if="history.length">
+                <article v-for="release in history" :key="release.tagName" class="about-history-item">
+                  <header class="about-history-item-head">
+                    <span class="about-history-version">v{{ release.version || release.tagName }}</span>
+                    <span class="about-history-name">{{ release.name }}</span>
+                    <span class="about-history-date">{{ formatReleaseDate(release.publishedAt) }}</span>
+                  </header>
+                  <div
+                    v-if="release.body"
+                    class="release-notes"
+                    v-html="renderReleaseMarkdown(release.body)"
+                  ></div>
+                  <p v-else class="about-history-note">{{ t("settings.changelogEmptyBody") }}</p>
+                </article>
+              </template>
+              <p v-else class="about-history-note">{{ t("settings.changelogEmpty") }}</p>
+            </div>
           </section>
         </div>
       </div>
     </div>
+
+    <!-- v3.0：恢复默认排版的二次确认（叠在设置弹窗之上） -->
+    <ConfirmDialog
+      v-if="showResetConfirm"
+      :title="ui.resetTypographyTitle"
+      :message="ui.resetTypographyMessage"
+      :confirm-label="ui.resetTypographyConfirm"
+      :danger="false"
+      @confirm="resetTypography"
+      @cancel="showResetConfirm = false"
+    />
   </div>
 </template>
 
 <style scoped>
 .settings-modal {
-  width: min(680px, 100%);
+  width: min(720px, 100%);
 }
 
+/* 固定尺寸：左侧导航 + 右侧内容区都锁死在同一个高度里，
+   切换标签时弹窗不再跟着内容长短抽动（本次要把 max-height / min-height 全部拿掉）。 */
 .settings-layout {
-  display: grid;
-  grid-template-columns: 156px minmax(0, 1fr);
-  min-height: 320px;
-  max-height: min(70vh, 560px);
+  display: flex;
+  height: 520px;
+  overflow: hidden;
 }
 
+@media (max-height: 640px) {
+  /* 屏幕真实高度不够时整体降一档，仍然是一个定高容器，不会因标签内容而变 */
+  .settings-layout {
+    height: 420px;
+  }
+}
+
+/* 左栏：固定 180px，自身单独滚动 */
 .settings-tabs {
+  flex: 0 0 180px;
+  width: 180px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px 10px;
+  padding: 14px 12px;
   border-right: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(201, 162, 77, 0.05), transparent);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.05), transparent);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 .settings-tab {
   text-align: left;
@@ -1113,26 +1764,30 @@ onBeforeUnmount(() => {
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  font-family: var(--serif);
-  font-size: 12px;
+  font-size: calc(12px * var(--global-scale));
   letter-spacing: 0.8px;
   color: var(--muted);
 }
 .settings-tab:hover {
   color: var(--parch);
-  background: #181310;
+  background: var(--bg-panel);
   border-color: transparent;
 }
 .settings-tab.active {
-  color: #1b1409;
+  color: var(--text-on-accent);
   background: linear-gradient(180deg, var(--gold-bright), var(--gold));
   border-color: var(--gold-dim);
   font-weight: 600;
 }
 
+/* 右栏：吃掉剩余宽度，横向不溢出，纵向自己滚；
+   scrollbar-gutter: stable 保证从「没有滚动条」切到「有滚动条」时宽度不跳。 */
 .settings-pane {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-y: auto;
-  padding: 14px 16px 18px;
+  padding: 24px;
+  scrollbar-gutter: stable;
 }
 
 .settings-card {
@@ -1143,7 +1798,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel-lo);
-  box-shadow: inset 0 0 0 1px rgba(201, 162, 77, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.06);
 }
 
 .settings-row {
@@ -1152,6 +1807,30 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 12px;
 }
+/* v2.4：排版三层的子分组标题（界面 / 正文阅读 / 卡片列表）——
+   分组标题本身也跟随全局缩放，150% 时不会显得比正文还小 */
+.settings-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  min-width: 0;
+  font-size: calc(11px * var(--global-scale));
+  font-weight: 500;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--gold-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-group-title::after {
+  content: "";
+  flex: 1 1 auto;
+  min-width: 12px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line), transparent);
+}
 .row-label {
   display: flex;
   flex-direction: column;
@@ -1159,13 +1838,12 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .row-title {
-  font-family: var(--serif);
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--global-scale));
   letter-spacing: 0.8px;
   color: var(--parch);
 }
 .row-note {
-  font-size: 11px;
+  font-size: calc(11px * var(--global-scale));
   color: var(--muted);
   line-height: 1.6;
 }
@@ -1173,10 +1851,15 @@ onBeforeUnmount(() => {
 .settings-select,
 .settings-input {
   padding: 7px 9px;
-  font-size: 12px;
+  font-size: calc(12px * var(--global-scale));
 }
 .settings-select {
   min-width: 120px;
+}
+/* v2.3：排版下拉框固定窄宽，字号放大到 20px 时也不会把左侧标签挤掉 */
+.typography-select {
+  min-width: 108px;
+  max-width: 132px;
 }
 .settings-input {
   width: 100%;
@@ -1193,63 +1876,139 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 7px;
   padding: 7px 14px;
-  font-family: var(--serif);
   letter-spacing: 0.8px;
 }
 .settings-check:disabled {
   opacity: 0.6;
 }
 
+/* v2.2 外观 Tab：主题模式（分段按钮，深色 / 明亮）。
+   激活态沿用「金底 + 深字」，与非激活态拉开层级但同样安静。 */
+.settings-segment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-lo);
+}
+.settings-segment-btn {
+  min-width: 74px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--parch-dim);
+  letter-spacing: 0.8px;
+}
+.settings-segment-btn:hover:not(.active) {
+  color: var(--parch);
+  background: var(--bg-hover);
+}
+.settings-segment-btn.active {
+  color: var(--text-on-accent);
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  border-color: var(--gold-dim);
+  font-weight: 600;
+}
+
+/* v2.0 外观 Tab：卡片大小滑块（从主界面顶栏搬过来，尺寸口径与 useViewPrefs 一致） */
+.settings-range-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.settings-range {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 1 150px;
+  width: 150px;
+  min-width: 90px;
+  height: 4px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold));
+  cursor: pointer;
+}
+.settings-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1px solid var(--gold-bright);
+  background: var(--bg-panel-deep);
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.7);
+}
+.settings-range::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.95);
+}
+.settings-range-value {
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: right;
+  font-size: calc(11.5px * var(--global-scale));
+  color: var(--gold-text);
+  letter-spacing: 0.6px;
+}
+/* 根目录路径回显：等宽字体 + 允许折行，长路径不会把右侧按钮顶出去 */
+.row-note.mono {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: calc(10.5px * var(--global-scale));
+  word-break: break-all;
+  color: var(--parch-dim);
+}
+
 .settings-status {
   margin: 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--global-scale));
   line-height: 1.7;
   color: var(--muted);
-  font-family: var(--serif);
   letter-spacing: 0.4px;
 }
 .settings-status.ok {
-  color: #9fbf84;
+  color: var(--ok-text);
 }
 .settings-status.bad {
-  color: #dfae9e;
+  color: var(--danger-text);
 }
 
 .settings-update-note {
-  border: 1px solid rgba(201, 162, 77, 0.55);
+  border: 1px solid rgba(var(--accent-rgb), 0.55);
   border-radius: 4px;
   padding: 10px 12px;
-  background: rgba(201, 162, 77, 0.06);
+  background: rgba(var(--accent-rgb), 0.06);
 }
 .settings-update-note p {
   margin: 0 0 6px;
-  font-size: 12px;
+  font-size: calc(12px * var(--global-scale));
   line-height: 1.7;
   color: var(--parch);
 }
 .settings-update-note p.note {
   color: var(--muted);
-  font-size: 11px;
+  font-size: calc(11px * var(--global-scale));
 }
 .settings-release {
   padding: 6px 12px;
-  font-family: var(--serif);
   letter-spacing: 0.8px;
 }
 
 .settings-summary {
   margin: 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--global-scale));
   line-height: 1.7;
-  color: var(--gold-bright);
-  font-family: var(--serif);
+  color: var(--gold-text);
 }
 
 .settings-check-line {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--global-scale));
   color: var(--parch-dim);
 }
 
@@ -1260,18 +2019,40 @@ onBeforeUnmount(() => {
 
 .settings-hint {
   margin: 0;
-  font-size: 11px;
+  font-size: calc(11px * var(--global-scale));
   line-height: 1.7;
   color: var(--muted);
 }
 
+/* v3.0：恢复默认排版按钮（排版区块右下角，Ghot 风格，hover 点亮金色） */
+.typography-reset-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.typography-reset {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--parch-dim);
+  font-size: calc(12.5px * var(--global-scale));
+  padding: 5px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+.typography-reset:hover {
+  color: var(--gold-text);
+  border-color: var(--gold-dim);
+  background: rgba(var(--accent-rgb), 0.08);
+}
+
 .settings-msg {
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--global-scale));
   line-height: 1.7;
-  color: #9fbf84;
+  color: var(--ok-text);
 }
 .settings-msg.error {
-  color: #dfae9e;
+  color: var(--danger-text);
 }
 
 .about-card {
@@ -1284,9 +2065,8 @@ onBeforeUnmount(() => {
   gap: 10px;
 }
 .about-value {
-  font-family: var(--serif);
-  font-size: 13px;
-  color: var(--gold-bright);
+  font-size: calc(13px * var(--global-scale));
+  color: var(--gold-text);
   letter-spacing: 1px;
 }
 .about-link {
@@ -1294,14 +2074,108 @@ onBeforeUnmount(() => {
   padding: 4px 8px;
   border: 1px solid var(--line);
   border-radius: 3px;
-  background: #14100c;
+  background: var(--bg-panel);
   color: var(--parch-dim);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--global-scale));
   word-break: break-all;
   text-align: left;
 }
 .about-link:hover {
-  color: var(--gold-bright);
+  color: var(--gold-text);
+  border-color: var(--gold-dim);
+}
+
+/* v3.1：蓝奏云网盘行（右侧按钮 + 灰色密码提示） */
+.about-line.about-cloud {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.about-cloud-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.about-cloud-password {
+  font-size: calc(11px * var(--global-scale));
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* v3.1：更新历史折叠面板（面板内单独滚动，不拉长整个关于卡片） */
+.about-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.about-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-panel-deep);
+}
+.about-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.about-history-item:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.about-history-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.about-history-version {
+  font-size: calc(12.5px * var(--global-scale));
+  letter-spacing: 1px;
+  color: var(--gold-text);
+}
+.about-history-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: calc(11.5px * var(--global-scale));
+  color: var(--parch-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.about-history-date {
+  font-size: calc(11px * var(--global-scale));
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.about-history-note {
+  margin: 0;
+  font-size: calc(11.5px * var(--global-scale));
+  line-height: 1.7;
+  color: var(--muted);
+}
+.about-history-note.error {
+  color: var(--danger-text);
+}
+.about-history-retry {
+  margin-left: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--bg-panel);
+  color: var(--parch-dim);
+  font-size: calc(11px * var(--global-scale));
+}
+.about-history-retry:hover {
+  color: var(--gold-text);
   border-color: var(--gold-dim);
 }
 </style>

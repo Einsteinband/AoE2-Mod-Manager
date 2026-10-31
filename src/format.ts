@@ -39,6 +39,23 @@ export function translateBackendMessage(message: string | null | undefined): str
   return raw;
 }
 
+/**
+ * 任意异常 → 可展示文案（唯一出处）。
+ *
+ * 本地页的 `normalizeError` 与各 composable 里重复了同一段判断，
+ * 这里收敛成一处：字符串 / Error / 其它对象都先过一遍后端文案转写，
+ * 序列化也失败时才退回「未知错误」。
+ */
+export function normalizeBackendError(e: unknown): string {
+  if (typeof e === "string") return translateBackendMessage(e);
+  if (e instanceof Error) return translateBackendMessage(e.message);
+  try {
+    return translateBackendMessage(JSON.stringify(e));
+  } catch {
+    return translate("labels.unknown");
+  }
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];

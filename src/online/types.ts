@@ -423,6 +423,12 @@ export interface IndexStatus {
   cooldownUntilMs: number;
   path: string;
   maxItems: number;
+  /** 用户已暂停（按钮显示「继续索引」） */
+  paused: boolean;
+  /** 上一次中断原因（空 = 无） */
+  lastError: string;
+  /** 还有断点可继续（未完成 / 暂停中 / 中断过） */
+  resumable: boolean;
 }
 
 /** 本地索引搜索命中的一条：与 OnlineMod 同形，另带中文标题与命中字段 */

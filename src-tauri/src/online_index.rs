@@ -17,21 +17,23 @@
 //! 4. **写盘绝不能每页一次**：整文件原子替换很贵（1 万条 ≈ 2.5MB），
 //!    所以每 [`FLUSH_EVERY_PAGES`] 页 + 结束时各落一次盘。
 //!
-//! ## 断点与增量（v2 分区模型）
-//! 服务端**深翻页有截断**：`recentpopular` 从 start=851 起直接返回空页。
-//! 所以单游标永远只能扫到前 ~850 条（v1 的 bug：把空页当成「全网扫完」，
-//! 于是 `done=true` 卡在 850 条，每次启动都原地重扫）。
+//! ## 分页真相（v1.5，抓包确认）
+//! 官方 `/Find` 的 `start` 是**页码（从 1 起）**，不是偏移量！之前把 `start` 当偏移量用，
+//! 每次多 50，于是实际只翻到了第 1、51、101…页（采样），自然感觉「到 850 就断了」。
+//! 现在 `cursor` = 页码，每成功一页 `+1`，`order/count/filter/status/modid` 完全照拄官网。
 //!
-//! - `partitions` = 7 个排序窗口 + 每个分类一个窗口，每个分区**独立游标**；
-//! - 空页只把当前分区标成 `exhausted`，继续下一个窗口（并集覆盖全网）；
-//! - 全部窗口走完才算 `done`；下次启动只看全局总量与时效决定要不要重扫。
+//! - `partitions` = 主窗口（lastUpdate 全量翻到底）+ 其余排序 / q 前缀 / 分类窗口（各只取第 1 页）；
+//! - 主窗口 41114 条 / 每页 50 ≈ 823 页，一轮 ≈ 1 小时就能跑满全站；
+//! - `cursor` 是页码，`total` 是条数；到达 `ceil(total/PAGE_SIZE)` 或空页就 `exhausted`；
+//! - 已 `exhausted` 的窗口重启后**一个请求都不发**，直接跳过；
+//! - 中断 / 暂停一律 `done = false`，游标每 5 页落一次盘，下次从那一页接着爬。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -43,12 +45,19 @@ use crate::online::models::{pick_str, FindResult, OnlineModSummary};
 pub const FILE_NAME: &str = "online_index.json";
 /// 索引进度事件名：每写入一批数据推一次，前端据此实时刷新进度（不再轮询）
 pub const PROGRESS_EVENT: &str = "online://index-progress";
+/// 退出登录 / 会话结束时广播：前端据此立刻把登录态归零并停止在线请求
+pub const CANCEL_EVENT: &str = "online://index-cancelled";
+/// 中断原因（同时写进索引状态与日志）
+const CANCEL_MESSAGE: &str = "已退出登录，索引同步已中断";
 /// Cookie 失效 / 未登录时的统一文案（界面红点直接用这句）
 pub const NEED_LOGIN_MESSAGE: &str = "索引同步失败：请先登录";
 /// 2 = 分区遍历（v1 的单游标模型会把「深翻页截断」误判成「全网扫完」）
 pub const CURRENT_VERSION: u32 = 2;
 
-/// 官方 `/Find` 单页上限（与命令层 `count.clamp(1, 50)` 一致）
+/// `/Find` 的 `start` 是**页码（1 基）**，`count` 是每页条数（抓包确认）。
+/// 官网默认 `count=12`，但服务端接受 50（实测每页确实返回 50 条）：
+/// 41114 条从 3427 页降到 823 页，对服务端反而更友好。
+/// **页码与 count 绑定**：改 PAGE_SIZE 必须同时把 [`PLAN_VERSION`] +1（旧 cursor 会错位）。
 const PAGE_SIZE: i64 = 50;
 /// 两次请求之间的硬性间隔：宁可慢，也不能被限流
 const REQUEST_GAP_MS: u64 = 1_200;
@@ -58,10 +67,18 @@ const JITTER_MAX_MS: u64 = 300;
 /// 纯文本单条约 200 字节，10 万条 ≈ 20MB，内存与写盘都不成问题。
 /// 到顶仍会停止增长，绝不让异常数据把磁盘撑爆。
 pub const MAX_ITEMS: usize = 100_000;
-/// 单次运行最多拉几页（400 × 50 = 2 万条），到上限暂停，下次启动继续
-const MAX_PAGES_PER_RUN: u32 = 400;
-/// 每多少页落一次盘
-const FLUSH_EVERY_PAGES: u32 = 20;
+/// 单次运行最多拉几页（到上限暂停，下次启动 / 点「继续索引」接着爬）。
+/// 3000 页 ≈ 2 小时，足够一轮把 q 层 + 派生层跑完；仍留硬上限防止一个进程无限跑
+const MAX_PAGES_PER_RUN: u32 = 3000;
+/// 每成功爬完一页后的强制休眠：官方对连续翻页有静默限流，宁可慢也不能被掐断。
+/// 与 [`REQUEST_GAP_MS`] 的硬间隔叠加（1.2s + 0~300ms 抖动 + 0.5s），实际约 1.8s / 页。
+const PAGE_REST_MS: u64 = 500;
+/// 网络类错误（TLS close_notify / 连接重置 / 超时）自动重试次数
+const PAGE_RETRY_TIMES: u32 = 3;
+/// 每次重试前等待多久（给代理 / TLS 握手一个喘息时间）
+const PAGE_RETRY_DELAY_MS: u64 = 3_000;
+/// 每多少页落一次盘（断点续传：硬杀进程最多丢掉这么多页的游标与条目）
+const FLUSH_EVERY_PAGES: u32 = 5;
 /// 完整扫描的刷新周期：订阅数 / 下载量会漂移
 const FULL_SYNC_INTERVAL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// 距上次更新不足这个时间 → 启动时一个请求都不发
@@ -86,6 +103,16 @@ const SORTS: [&str; 7] = [
 ];
 /// 标签分区用「最多订阅」：每个标签只取最热门的那一截
 const TAG_SORT: &str = "popular";
+/// 遍历计划结构版本：4 = 页码语义（v1.5 抓包修正）
+///
+/// 只比 `CURRENT_VERSION` 轻：计划版本不匹配只重建「窗口列表」，
+/// 已爬到的 items 全部保留。但游标语义变了（偏移量 → 页码），
+/// 旧 cursor 是错的，所以 v3→v4 这一次会故意不继承游标（要从第 1 页重新翻一遍）。
+pub const PLAN_VERSION: u32 = 4;
+/// 单字符 q 前缀窗口的字符集（仅用于探测官方 q 参数是否生效）
+const PREFIX_CHARS: &str = "0123456789abcdefghijklmnopqrstuvwxyz";
+/// 遍历计划最多多少个窗口
+const MAX_PARTITIONS: usize = 1500;
 const ORDER: &str = "DESC";
 /// 搜索一次最多返回多少条（前端按 24 分页，这里留余量）
 const SEARCH_LIMIT_MAX: i64 = 60;
@@ -94,25 +121,48 @@ const SEARCH_LIMIT_MAX: i64 = 60;
 
 /// 一次遍历分区（一个排序窗口，或「某个分类 + 某个排序」）。
 ///
-/// 每个分区**独立游标**：某个窗口被服务端截断（空页）时，只把这个分区标成
-/// exhausted，然后继续下一个窗口——这才是绕开深翻页限制的正确姿势。
+/// 每个分区**独立游标**：`cursor` 是**页码**（1 基），不是偏移量。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Partition {
     pub sort: String,
     #[serde(default)]
     pub tags: Vec<i64>,
+    /// 该窗口的搜索前缀（`/Find` 的 q 参数）。空 = 全量窗口（不带 q）
+    #[serde(default)]
+    pub q: String,
     /// 可读名称（日志与状态展示用）
     #[serde(default)]
     pub label: String,
-    /// 下一页 start（从 1 起）
+    /// 下一页的 `start` —— 即**页码**（从 1 起）
     #[serde(default = "partition_default_cursor")]
     pub cursor: i64,
-    /// 该分区服务端总量（0 = 未知）
+    /// 该分区服务端总量（条数，0 = 未知）
     #[serde(default)]
     pub total: i64,
     #[serde(default)]
     pub exhausted: bool,
+}
+
+/// 该窗口最后一页的页码（1 基）
+fn last_page(total: i64) -> i64 {
+    if total <= 0 {
+        return i64::MAX;
+    }
+    (total + PAGE_SIZE - 1) / PAGE_SIZE
+}
+
+/// 该窗口最多爬几页。
+///
+/// 只有「主窗口」（lastUpdate、无 q、无 tags）才允许翻到服务端总量 —— 它一份就包含全站；
+/// 其余排序 / q 前缀 / 分类窗口只取第 1 页（拿来刷新最新模组字段 + 探测 q 是否生效）。
+/// 这样一轮约 823 页（≈1 小时）就能把 4 万条爬满，而不是 7 个排序窗口各爬 823 页。
+fn page_limit(part: &Partition) -> i64 {
+    if part.q.is_empty() && part.tags.is_empty() && part.sort == SORTS[0] {
+        i64::MAX
+    } else {
+        1
+    }
 }
 
 fn partition_default_cursor() -> i64 {
@@ -168,9 +218,20 @@ pub struct Store {
     pub active: usize,
     #[serde(default)]
     pub done: bool,
+    /// 上一次中断的原因（空 = 没中断过）：被服务端/代理掐断后从这里看「断在哪」
+    #[serde(default)]
+    pub last_error: String,
+    #[serde(default)]
+    pub last_error_at_ms: u64,
+    /// 用户主动暂停：true 时启动后不再自动续爬，必须点「继续索引」
+    #[serde(default)]
+    pub paused: bool,
     /// 上一次完整扫描完成的时间（>7 天触发全量重扫）
     #[serde(default)]
     pub full_synced_at_ms: u64,
+    /// 遍历计划版本（< PLAN_VERSION 时只重建窗口列表，条目全部保留）
+    #[serde(default)]
+    pub plan_version: u32,
     /// modId 字符串 → 条目：增量补充天然幂等，不会出现重复
     #[serde(default)]
     pub items: BTreeMap<String, IndexItem>,
@@ -189,7 +250,11 @@ impl Default for Store {
             partitions: Vec::new(),
             active: 0,
             done: false,
+            last_error: String::new(),
+            last_error_at_ms: 0,
+            paused: false,
             full_synced_at_ms: 0,
+            plan_version: 0,
             items: BTreeMap::new(),
         }
     }
@@ -220,6 +285,12 @@ pub struct IndexStatus {
     pub cooldown_until_ms: u64,
     pub path: String,
     pub max_items: usize,
+    /// 用户已暂停（前端按钮据此显示「继续索引」）
+    pub paused: bool,
+    /// 上一次中断原因（空 = 无）
+    pub last_error: String,
+    /// 还有断点可继续（未完成 / 暂停中 / 中断过）
+    pub resumable: bool,
 }
 
 /// 一轮同步的结果
@@ -324,6 +395,24 @@ static RUNTIME: Mutex<Runtime> = Mutex::new(Runtime {
     message: String::new(),
     cooldown_until_ms: 0,
 });
+
+/// 「暂停」请求：同步线程在每个循环开头读它，读到就收手并保留分区游标。
+/// 用 AtomicBool 而不是锁：命令层要能在一页请求进行中就立刻生效。
+static PAUSE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 请求暂停（命令层调用，立即返回；线程最多再等当前这一页）
+pub fn request_pause() {
+    PAUSE_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// 清掉暂停请求（继续爬之前调，避免上一次的暂停标记把新一轮直接误停）
+pub fn clear_pause_request() {
+    PAUSE_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub fn is_pause_requested() -> bool {
+    PAUSE_REQUESTED.load(Ordering::SeqCst)
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -486,6 +575,7 @@ fn api_client(app: &tauri::AppHandle, anonymous: bool) -> Result<ApiClient, ApiF
 /// 所以「降级到匿名通道重试」只会白打一次请求、把日志刷满（v1.1 的老逻辑）。
 /// 现在记下 `auth_failed`，本轮后续请求一个都不发，直接让上层把状态改成
 /// 「索引同步失败：请先登录」，等用户重新登录后由前端重新触发。
+/// v1.5：401 不再直接放弃，由 [`relogin_and_refresh`] 静默重登一次后重试同一页（每轮最多 1 次）。
 struct Fetcher {
     client: ApiClient,
     auth_failed: bool,
@@ -502,12 +592,31 @@ impl Fetcher {
         Ok(Self { client, auth_failed: false })
     }
 
-    fn find(&mut self, start: i64, sort: &str, tags: &[i64]) -> Result<FindResult, ApiFailure> {
+    /// 401 后已拿到新 Cookie：重建底层客户端，并清掉本轮的失权标记
+    fn refresh(&mut self, app: &tauri::AppHandle) -> Result<(), ApiFailure> {
+        let fresh = Fetcher::new(app)?;
+        self.client = fresh.client;
+        self.auth_failed = false;
+        Ok(())
+    }
+
+    /// 拉一页。`query` = q 前缀（空串 = 全量窗口），`tags` = 分类过滤。
+    ///
+    /// v1.3：加 q 参数是为绕开服务端「start > 850 一律返回空页」的深翻页截断：
+    /// 同一个排序窗口只能看到前 850 条，但加上 q 前缀就把「同一批数据」切成互不重叠的子集，
+    /// 每个子集都能从 start=1 重新翻一遍。
+    fn find(
+        &mut self,
+        start: i64,
+        sort: &str,
+        tags: &[i64],
+        query: &str,
+    ) -> Result<FindResult, ApiFailure> {
         // 本轮已经确认失权：一个请求都不再发（彻底断掉 401 刷屏）
         if self.auth_failed {
             return Err(auth_failed_error());
         }
-        match self.client.find("", start, PAGE_SIZE, sort, ORDER, tags) {
+        match self.client.find(query, start, PAGE_SIZE, sort, ORDER, tags) {
             Ok(result) => Ok(result),
             Err(err) if err.kind == "unauthenticated" => {
                 self.auth_failed = true;
@@ -538,6 +647,39 @@ impl Fetcher {
     }
 }
 
+/// 401 兜底：隐藏窗口自动重登一次，换到新 Cookie 后重建客户端。
+/// 每轮同步只允许调一次（由调用处的 `relogin_used` 保证），
+/// 避免“Cookie 永远不生效”时无限拉起窗口。失败返回可直接展示的错误。
+fn relogin_and_refresh(
+    app: &tauri::AppHandle,
+    fetcher: &mut Fetcher,
+    page: i64,
+) -> Result<(), ApiFailure> {
+    if crate::online::session::is_sync_cancelled() {
+        log::warn!(
+            target: "index",
+            "会话已结束：跳过自动重登（第 {page} 页），直接中断索引"
+        );
+        return Err(ApiFailure::new(
+            "cancelled",
+            CANCEL_MESSAGE.to_string(),
+            Some(401),
+        ));
+    }
+    set_phase("syncing", "登录态已过期，正在自动重新登录…");
+    emit_progress(app);
+    log::warn!(target: "index", "第 {page} 页返回 401：开始静默自动重登");
+
+    crate::online::session::ensure_session(app).map_err(|e| {
+        log::warn!(target: "index", "自动重登失败：{e}");
+        ApiFailure::new("unauthenticated", e, Some(401))
+    })?;
+
+    fetcher.refresh(app)?;
+    log::info!(target: "index", "自动重登成功，重试第 {page} 页（断点未丢）");
+    Ok(())
+}
+
 /// 把当前索引进度推给前端（纯内存读，每批一次，开销可忽略）
 pub fn emit_progress(app: &tauri::AppHandle) {
     let status = status_for_app(app);
@@ -558,6 +700,21 @@ pub fn spawn_now(app: tauri::AppHandle) {
             log::info!(
                 target: "index",
                 "开关触发的索引同步未执行：{}（kind={}）",
+                err.message,
+                err.kind
+            );
+        }
+    });
+}
+
+/// 「继续索引」：**强制续爬**（跳过 24h / 7d 新鲜度闸门），后台线程跑。
+/// `reason = "resume"` 是 [`scan`] 里 force 的唯一来源，别改这个名字。
+pub fn spawn_resume(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        if let Err(err) = sync_blocking(&app, "resume") {
+            log::info!(
+                target: "index",
+                "继续索引未执行：{}（kind={}）",
                 err.message,
                 err.kind
             );
@@ -587,6 +744,9 @@ struct Snapshot {
     done: bool,
     updated_at_ms: u64,
     full_synced_at_ms: u64,
+    paused: bool,
+    last_error: String,
+    plan_version: u32,
 }
 
 fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, ApiFailure> {
@@ -602,6 +762,9 @@ fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, ApiFailure> {
         done: mem.store.done,
         updated_at_ms: mem.store.updated_at_ms,
         full_synced_at_ms: mem.store.full_synced_at_ms,
+        paused: mem.store.paused,
+        last_error: mem.store.last_error.clone(),
+        plan_version: mem.store.plan_version,
     })
 }
 
@@ -686,19 +849,96 @@ fn apply_global_page(
     Ok(written)
 }
 
-/// 重建遍历计划：7 个排序窗口 + 每个分类一个窗口
+/// 窗口唯一键：`sort|tags|q`。重建计划时用它把旧窗口的断点（cursor / exhausted）
+/// 接过来，绝不因为换计划就把几万条进度归零。
+fn partition_key(sort: &str, tags: &[i64], q: &str) -> String {
+    let tags = tags.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+    format!("{sort}|{tags}|{q}")
+}
+
+/// 继承旧窗口的断点；返回 `(窗口, 是否命中旧窗口)`
+fn inherit_partition(
+    previous: &std::collections::HashMap<String, Partition>,
+    mut next: Partition,
+) -> (Partition, bool) {
+    let key = partition_key(&next.sort, &next.tags, &next.q);
+    match previous.get(&key) {
+        Some(old) => {
+            next.cursor = old.cursor;
+            next.total = old.total;
+            next.exhausted = old.exhausted;
+            (next, true)
+        }
+        None => (next, false),
+    }
+}
+
+/// 重建遍历计划：主窗口（lastUpdate 全量）+ 其余排序 + 36 个 q 前缀 + 分类。
+///
+/// **增量重建**：按 `sort|tags|q` 匹配旧窗口并继承 `cursor / exhausted`，只有真正新增的
+/// 窗口才从第 1 页开爬；`active` 直接指向第一个未完成的窗口，所以「重启 / 点继续」不会重爬。
+///
+/// **唯一的例外**：`plan_version < PLAN_VERSION` 时（例如 v3→v4 从「偏移量」改成「页码」），
+/// 旧 cursor 的语义已经过期，必须不继承 —— 这是唯一一次从头翻，之后永远精确续传。
 fn build_plan(app: &tauri::AppHandle, fetcher: &mut Fetcher) -> Result<(), ApiFailure> {
-    let mut partitions: Vec<Partition> = SORTS
-        .iter()
-        .map(|sort| Partition {
+    // 先把旧窗口拍平成 map（只读内存，不碰网络）；版本不一致时故意留空
+    let previous: std::collections::HashMap<String, Partition> = {
+        let guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
+        match guard.as_ref() {
+            Some(mem) if mem.store.plan_version == PLAN_VERSION => mem
+                .store
+                .partitions
+                .iter()
+                .map(|p| (partition_key(&p.sort, &p.tags, &p.q), p.clone()))
+                .collect(),
+            Some(mem) => {
+                log::warn!(
+                    target: "index",
+                    "计划版本 {} → {}：游标语义已变（偏移量 → 页码），本次从第 1 页重新翻一遍（条目全部保留）",
+                    mem.store.plan_version,
+                    PLAN_VERSION
+                );
+                std::collections::HashMap::new()
+            }
+            None => std::collections::HashMap::new(),
+        }
+    };
+    let mut inherited = 0usize;
+    let mut partitions: Vec<Partition> = Vec::new();
+    for sort in SORTS.iter() {
+        let next = Partition {
             sort: (*sort).to_string(),
             tags: Vec::new(),
+            q: String::new(),
             label: (*sort).to_string(),
             cursor: 1,
             total: 0,
             exhausted: false,
-        })
-        .collect();
+        };
+        let (next, hit) = inherit_partition(&previous, next);
+        if hit {
+            inherited += 1;
+        }
+        partitions.push(next);
+    }
+    // ① q 前缀窗口：每前缀只取第 1 页（探测官方 q 是否生效，不指望靠它切全集）
+    for ch in PREFIX_CHARS.chars() {
+        let next = Partition {
+            sort: SORTS[0].to_string(),
+            tags: Vec::new(),
+            q: ch.to_string(),
+            label: format!("q={ch}"),
+            cursor: 1,
+            total: 0,
+            exhausted: false,
+        };
+        let (next, hit) = inherit_partition(&previous, next);
+        if hit {
+            inherited += 1;
+        }
+        partitions.push(next);
+    }
+    // ② 分类窗口（保留：每个标签只看最热门的一截，成本很低）
     match fetcher.tags() {
         Ok(tags) => {
             let mut seen = std::collections::HashSet::new();
@@ -706,52 +946,108 @@ fn build_plan(app: &tauri::AppHandle, fetcher: &mut Fetcher) -> Result<(), ApiFa
                 if tag.mod_type_id <= 0 || !seen.insert(tag.mod_type_id) {
                     continue;
                 }
-                partitions.push(Partition {
+                if partitions.len() >= MAX_PARTITIONS {
+                    break;
+                }
+                let next = Partition {
                     sort: TAG_SORT.to_string(),
                     tags: vec![tag.mod_type_id],
+                    q: String::new(),
                     label: tag.mod_type_name.clone(),
                     cursor: 1,
                     total: 0,
                     exhausted: false,
-                });
+                };
+                let (next, hit) = inherit_partition(&previous, next);
+                if hit {
+                    inherited += 1;
+                }
+                partitions.push(next);
             }
         }
         Err(err) => log::warn!(
             target: "index",
-            "拉取分类字典失败（{}），本轮只扫排序窗口",
+            "拉取分类字典失败（{}），本轮只扫排序与 q 前缀窗口",
             err.message
         ),
     }
+    // q 参数探测：官方到底认不认 q（1 个请求，失败不影响计划）。
+    // 认不认都不影响主窗口的全量翻页，只是给日志一个结论。
+    let known_total = snapshot(app).map(|s| s.total).unwrap_or(0);
+    match fetcher.find(1, SORTS[0], &[], "a") {
+        Ok(probe) => {
+            let q_total = probe.total_count.unwrap_or(0);
+            let effective = known_total > 0 && (q_total as f64) < known_total as f64 * 0.95;
+            log::info!(
+                target: "index",
+                "q 参数探测：q=a → 该窗口总量 {}（全局 {}）→ {}",
+                q_total,
+                known_total,
+                if effective { "生效" } else { "未生效/被忽略" }
+            );
+        }
+        Err(err) => log::warn!(target: "index", "q 参数探测失败：{}", err.message),
+    }
+    // 旧计划里派生出来的窗口（本次没重建到的）也要保留，否则派生层的断点就丢了
+    let mut kept_appended = 0usize;
+    for (key, old) in previous.iter() {
+        if partitions.iter().any(|p| partition_key(&p.sort, &p.tags, &p.q) == *key) {
+            continue;
+        }
+        if partitions.len() >= MAX_PARTITIONS {
+            break;
+        }
+        partitions.push(old.clone());
+        kept_appended += 1;
+    }
+    // active 指向第一个未完成的窗口：已完成的窗口重启后一律跳过（不发请求）
+    let active = partitions.iter().position(|p| !p.exhausted).unwrap_or(partitions.len());
+    let done = active >= partitions.len();
+    let resume = partitions.get(active).map(|p| (p.label.clone(), p.q.clone(), p.cursor));
+
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
         .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
-    log::info!(target: "index", "索引遍历计划已重建：{} 个窗口", partitions.len());
+    log::info!(
+        target: "index",
+        "索引遍历计划已重建（v{PLAN_VERSION}）：{} 个窗口（排序 {} + q 前缀 {} + 分类/派生 {}），继承断点 {} 个，保留旧派生窗口 {} 个",
+        partitions.len(),
+        SORTS.len(),
+        PREFIX_CHARS.chars().count(),
+        partitions.len().saturating_sub(SORTS.len() + PREFIX_CHARS.chars().count()),
+        inherited,
+        kept_appended
+    );
+    if let Some((label, q, cursor)) = resume {
+        log::info!(
+            target: "index",
+            "断点续传：从窗口「{}」（q={}）的 start={} 继续，已完成 {} / {} 个窗口",
+            label,
+            if q.is_empty() { "-" } else { q.as_str() },
+            cursor,
+            active,
+            partitions.len()
+        );
+    }
     mem.store.partitions = partitions;
-    mem.store.active = 0;
-    mem.store.done = false;
+    mem.store.active = active;
+    mem.store.done = done;
+    // 老计划换新：清掉「上次中断」标记，否则状态栏会一直挂着上一轮的错误
+    mem.store.last_error.clear();
+    mem.store.last_error_at_ms = 0;
+    mem.store.plan_version = PLAN_VERSION;
     mem.store.updated_at_ms = now_ms();
     mem.dirty = true;
     Ok(())
 }
 
-/// 全量重扫：所有分区游标归零（条目保留，只是重走一遍把旧数据刷新）
-fn reset_plan(app: &tauri::AppHandle) -> Result<(), ApiFailure> {
-    let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
-    let mem = guard
-        .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
-    for part in mem.store.partitions.iter_mut() {
-        part.cursor = 1;
-        part.total = 0;
-        part.exhausted = false;
-    }
-    mem.store.active = 0;
-    mem.store.done = false;
-    mem.store.updated_at_ms = now_ms();
-    mem.dirty = true;
-    Ok(())
-}
+/// v1.5：**已删除 derive_next_level / mark_partition_truncated**。
+/// 所谓「start=851 深翻页截断」其实是把页码当偏移量用的 bug（见模块注释），
+/// 修正分页后根本不存在截断，也就不再需要派生窗口。
+
+/// v1.4：**已删除 reset_plan**。原逻辑会在「全局总量变化 / 满 7 天 / 点继续」时
+/// 把所有游标归 1，等于让几万条从头重爬（几小时）。现在任何路径都不再重置游标。
 
 fn current_partition(app: &tauri::AppHandle) -> Result<Option<Partition>, ApiFailure> {
     let guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
@@ -771,7 +1067,7 @@ fn advance_partition(app: &tauri::AppHandle) -> Result<(), ApiFailure> {
     Ok(())
 }
 
-/// 标记当前分区扫完（空页 = 该窗口被服务端截断，**不是**全网扫完）
+/// 标记当前分区扫完（真空页 / 游标越过总量：这窗口真的没数据了）
 fn mark_partition_exhausted(app: &tauri::AppHandle, part_total: i64) -> Result<(), ApiFailure> {
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
@@ -797,6 +1093,9 @@ fn finalize(app: &tauri::AppHandle, done: bool) -> Result<(), ApiFailure> {
     mem.store.updated_at_ms = now;
     if done {
         mem.store.full_synced_at_ms = now;
+        // 完整扫完：上一次的中断原因不再有意义，不清掉会让 24h 闸门永久失效
+        mem.store.last_error.clear();
+        mem.store.last_error_at_ms = 0;
     }
     mem.dirty = true;
     prune(&mut mem.store);
@@ -807,6 +1106,33 @@ fn set_phase(phase: &str, message: &str) {
     let mut rt = lock_runtime();
     rt.phase = phase.to_string();
     rt.message = message.to_string();
+}
+
+/// 把「用户主动暂停」落到索引文件：重启后界面仍然是「已暂停」，不会自动续爬
+fn mark_paused(app: &tauri::AppHandle, paused: bool) {
+    if let Ok(mut guard) = ensure_loaded(app) {
+        if let Some(mem) = guard.as_mut() {
+            if mem.store.paused != paused {
+                mem.store.paused = paused;
+                mem.dirty = true;
+            }
+        }
+    }
+    flush(app);
+}
+
+/// 记录中断原因 + 把 `done` 拉回 false（**被掐断绝不能留下 🟢 已就绪**）。
+/// 分区游标已经在每页成功后写进内存，这里 flush 一次就等于「存盘断点」。
+fn mark_interrupted(app: &tauri::AppHandle, message: &str) {
+    if let Ok(mut guard) = ensure_loaded(app) {
+        if let Some(mem) = guard.as_mut() {
+            mem.store.last_error = message.to_string();
+            mem.store.last_error_at_ms = now_ms();
+            mem.store.done = false;
+            mem.dirty = true;
+        }
+    }
+    flush(app);
 }
 
 // ---------------- 同步主流程 ----------------
@@ -867,10 +1193,20 @@ pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport,
     if !is_enabled(app) {
         return Err(ApiFailure::new("disabled", "本地索引未开启", None));
     }
+    // 会话已结束（退出登录）：一个请求都不发，避免拿失效 Cookie 把 401 刷满
+    if crate::online::session::is_sync_cancelled() {
+        set_phase("needLogin", CANCEL_MESSAGE);
+        emit_progress(app);
+        return Err(ApiFailure::new("cancelled", CANCEL_MESSAGE.to_string(), None));
+    }
     begin_run()?;
+    // 能走到这一步说明用户点了「继续索引」或触发了新一轮：
+    // 清掉暂停标记、清掉上次中断原因，否则上一轮的残留会把这一轮直接误停。
+    clear_pause_request();
+    mark_paused(app, false);
     let started = now_ms();
     // 无论成功失败都把已拿到的进度落盘：断点续传的前提
-    let mut result = scan(app);
+    let mut result = scan(app, reason == "resume");
     flush(app);
     match &mut result {
         Ok(report) => {
@@ -904,6 +1240,9 @@ pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport,
             } else {
                 err.message.clone()
             };
+            // 被网络/代理/服务端掐断：分区游标已落到磁盘，但 done 必须回 false，
+            // 否则下次启动会被 24h 新鲜度闸门当成「已就绪」直接跳过（老 bug）。
+            mark_interrupted(app, &message);
             end_run(phase, &message, cooldown);
             emit_progress(app);
             result
@@ -911,15 +1250,27 @@ pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport,
     }
 }
 
-fn scan(app: &tauri::AppHandle) -> Result<SyncReport, ApiFailure> {
+fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
     let mut report = SyncReport::default();
     let snap = snapshot(app)?;
     report.indexed = snap.items;
     report.total_count = snap.total;
     report.done = snap.done;
+    // 老计划（没有 q 前缀窗口）：只重建窗口列表，条目全部保留
+    let plan_stale = snap.partitions > 0 && snap.plan_version < PLAN_VERSION;
 
-    // ① 新鲜度闸门：完整扫过一轮且在 24h 内 → 一个请求都不发
-    if snap.done && now_ms().saturating_sub(snap.updated_at_ms) < INCREMENTAL_INTERVAL_MS {
+    // ① 新鲜度闸门：完整扫过一轮且在 24h 内 → 一个请求都不发。
+    //    以下三种情况绝不放行闸门：
+    //    - 有断点（暂停中 / 上次中断过）；
+    //    - 计划结构过期（老版本没有 q 窗口，必须重建后接着爬）；
+    //    - 用户点了「继续索引」（force = true，强探一次，不受 24h / 7d 限制）。
+    let interrupted = snap.paused || !snap.last_error.is_empty();
+    if snap.done
+        && !interrupted
+        && !plan_stale
+        && !force
+        && now_ms().saturating_sub(snap.updated_at_ms) < INCREMENTAL_INTERVAL_MS
+    {
         report.skipped = true;
         report.message = format!("索引已是最新（{} 条）", snap.items);
         return Ok(report);
@@ -938,13 +1289,39 @@ fn scan(app: &tauri::AppHandle) -> Result<SyncReport, ApiFailure> {
     let mut fetcher = Fetcher::new(app)?;
     let mut global_total = snap.total;
 
-    // ② 计划：没有就建一个；完整扫过一轮则先探一个窗口，判断要不要重扫
-    if snap.partitions == 0 {
+    // 重启后先把「从哪里继续」写进日志，方便核对断点是否生效
+    if snap.partitions > 0 {
+        if let Ok(Some(part)) = current_partition(app) {
+            log::info!(
+                target: "index",
+                "断点续传：从窗口「{}」（q={}）的 start={} 继续，已完成 {} / {} 个窗口，已收录 {} 条",
+                part.label,
+                if part.q.is_empty() { "-" } else { part.q.as_str() },
+                part.cursor,
+                snap.active,
+                snap.partitions,
+                snap.items
+            );
+        }
+    }
+
+    // ② 计划：没有就建一个；计划结构过期（没有 q 窗口）一律重建；
+    //    完整扫过一轮则先探一个窗口，判断要不要重扫
+    if snap.partitions == 0 || plan_stale {
+        if plan_stale {
+            log::info!(
+                target: "index",
+                "遍历计划结构过期（文件={} 期望={}）：保留 {} 条已爬数据，只重建窗口列表",
+                snap.plan_version,
+                PLAN_VERSION,
+                snap.items
+            );
+        }
         build_plan(app, &mut fetcher)?;
         report.pages += 1; // /Tags 也算一次请求
     } else if snap.done {
         sleep_gap();
-        let probe = fetcher.find(1, SORTS[0], &[])?;
+        let probe = fetcher.find(1, SORTS[0], &[], "")?;
         report.pages += 1;
         if let Some(total) = probe.total_count {
             global_total = total;
@@ -952,26 +1329,47 @@ fn scan(app: &tauri::AppHandle) -> Result<SyncReport, ApiFailure> {
         report.fetched += apply_global_page(app, &probe.items, global_total)?;
         let stale_full = now_ms().saturating_sub(snap.full_synced_at_ms) >= FULL_SYNC_INTERVAL_MS;
         let grown = global_total != snap.total;
-        if !stale_full && !grown {
-            report.indexed = snapshot(app).map(|s| s.items).unwrap_or(report.indexed);
-            report.total_count = global_total;
-            report.done = true;
-            report.message = format!("索引已是最新（{} 条）", report.indexed);
-            return Ok(report);
-        }
         log::info!(
             target: "index",
-            "索引需要重扫（距上次完整扫描过久={stale_full}，全局总量变化={grown}：现在={global_total} 上次={}）",
-            snap.total
+            "索引已完成过一轮（距离上次完整扫描过久={stale_full}，全局总量变化={grown}：{} → {}）：只做增量探测，不重爬已有窗口，盯目标总数",
+            snap.total,
+            global_total
         );
-        reset_plan(app)?;
+        // v1.4：**绝不再因为「总量变化 / 满 7 天 / 点继续」把游标归零**。
+        // 完成后只做一件有价值的事：把主窗口第 1 页 upsert 一次（上面已做），不重爬。
+        report.indexed = snapshot(app).map(|s| s.items).unwrap_or(report.indexed);
+        report.total_count = global_total;
+        report.done = true;
+        report.message = format!("索引已是最新（{} 条）", report.indexed);
+        return Ok(report);
     }
 
     // ③ 分区遍历：每个窗口独立游标；空页只代表「这个窗口到头了」
     let mut capped = false;
+    // 401 自动重登预算：每轮同步最多一次
+    let mut relogin_used = false;
     let mut stop_note = String::new();
     let mut done = false;
     loop {
+        // 每一页开始前先看「会话是否已结束」：退出登录后立刻收手，
+        // 绝不再拿失效 Cookie 去刷 401（旧实现正是死循环的源头）
+        if crate::online::session::is_sync_cancelled() {
+            log::warn!(
+                target: "index",
+                "会话已结束：本轮第 {} 个请求之前中断索引同步",
+                report.pages + 1
+            );
+            mark_interrupted(app, CANCEL_MESSAGE);
+            stop_note = CANCEL_MESSAGE.to_string();
+            emit_progress(app);
+            break;
+        }
+        // 用户点了「暂停」：保留分区游标立即收手，done 绝不置 true
+        if is_pause_requested() {
+            mark_paused(app, true);
+            stop_note = "索引已暂停，点「继续索引」从断点接着爬".to_string();
+            break;
+        }
         if report.pages >= MAX_PAGES_PER_RUN {
             stop_note = "本次同步已达单轮上限，剩余部分下次启动继续".to_string();
             break;
@@ -991,10 +1389,13 @@ fn scan(app: &tauri::AppHandle) -> Result<SyncReport, ApiFailure> {
             break;
         };
         if part.exhausted {
+            // 已完成的窗口重启后直接跳过，一个请求都不发
             advance_partition(app)?;
             continue;
         }
-        if part.total > 0 && part.cursor > part.total {
+        // 页码语义：`cursor` = 第几页。主窗口一直翻到最后一页，其余窗口只取第 1 页
+        let limit = page_limit(&part);
+        if part.cursor > limit || (part.total > 0 && part.cursor > last_page(part.total)) {
             mark_partition_exhausted(app, part.total)?;
             advance_partition(app)?;
             continue;
@@ -1002,58 +1403,168 @@ fn scan(app: &tauri::AppHandle) -> Result<SyncReport, ApiFailure> {
         if report.pages > 0 {
             sleep_gap();
         }
-        let result = match fetcher.find(part.cursor, &part.sort, &part.tags) {
-            Ok(result) => result,
-            Err(err) => {
-                flush(app);
-                return Err(err);
+        // 网络类错误（TLS close_notify / 连接重置 / 超时）不当作任务失败：
+        // 等 3 秒重试**同一页**，连续 3 次都失败才真正中断（断点已落盘，下次接着爬）。
+        // 401（unauthenticated）/限流都不是重试能解决的，一律立即返回。
+        let mut attempt = 0u32;
+        let result = loop {
+            match fetcher.find(part.cursor, &part.sort, &part.tags, &part.q) {
+                Ok(result) => break result,
+                Err(err) => {
+                    // 会话已结束（退出登录）：**绝不自动重登**，
+                    // 否则 ensure_session 会把凭证重新拉回来，形成 401 死循环
+                    if crate::online::session::is_sync_cancelled() {
+                        log::warn!(
+                            target: "index",
+                            "会话已结束：第 {} 页返回 {}，中断本轮同步（不尝试自动重登）",
+                            part.cursor,
+                            err.kind
+                        );
+                        mark_interrupted(app, CANCEL_MESSAGE);
+                        emit_progress(app);
+                        flush(app);
+                        return Err(ApiFailure::new(
+                            "cancelled",
+                            CANCEL_MESSAGE.to_string(),
+                            err.status,
+                        ));
+                    }
+                    // 401：先静默重登一次（每轮最多 1 次），成功就重试同一页，断点不丢
+                    if err.kind == "unauthenticated" && !relogin_used {
+                        relogin_used = true;
+                        if let Err(fail) = relogin_and_refresh(app, &mut fetcher, part.cursor) {
+                            flush(app);
+                            set_phase("needLogin", NEED_LOGIN_MESSAGE);
+                            emit_progress(app);
+                            return Err(fail);
+                        }
+                        continue;
+                    }
+                    if err.kind != "network" || attempt >= PAGE_RETRY_TIMES {
+                        if attempt > 0 {
+                            log::warn!(
+                                target: "index",
+                                "第 {} 页重试 {} 次仍失败，中断本轮：{}",
+                                part.cursor,
+                                attempt,
+                                err.message
+                            );
+                        }
+                        flush(app);
+                        return Err(err);
+                    }
+                    attempt += 1;
+                    log::warn!(
+                        target: "index",
+                        "第 {} 页请求失败（{}）：{}，{}ms 后重试（{}/{}）",
+                        part.cursor,
+                        err.kind,
+                        err.message,
+                        PAGE_RETRY_DELAY_MS,
+                        attempt,
+                        PAGE_RETRY_TIMES
+                    );
+                    // 状态栏也告诉用户「在重试」，不要看起来像卡死了
+                    set_phase(
+                        "syncing",
+                        &format!(
+                            "网络不稳定，正在重试第 {} 页（{}/{}）",
+                            part.cursor, attempt, PAGE_RETRY_TIMES
+                        ),
+                    );
+                    emit_progress(app);
+                    std::thread::sleep(Duration::from_millis(PAGE_RETRY_DELAY_MS));
+                }
             }
         };
         report.pages += 1;
         let part_total = result.total_count.unwrap_or(0);
-        if part.tags.is_empty() && part_total > 0 {
+        // 全局总量只允许由「主窗口」（无 q、无 tags、lastUpdate）提供，否则会被子集总量污染
+        if part.tags.is_empty() && part.q.is_empty() && part.sort == SORTS[0] && part_total > 0 {
             global_total = part_total;
         }
-        if result.items.is_empty() {
-            // 深翻页截断：只把这个窗口标成结束，绝不当作「全网扫完」
+        // q 参数探测（run 只取第 1 页，代价 1 个请求）：验证官方到底认不认 q
+        if !part.q.is_empty() && part.cursor <= 1 {
+            let effective = global_total > 0
+                && (part_total as f64) < (global_total as f64) * 0.95;
             log::info!(
                 target: "index",
-                "窗口「{}」在 start={} 处返回空页，该窗口结束（服务端深翻页截断）",
+                "q 参数探测：q={} → 该窗口总量 {}（全局 {}）→ {}",
+                part.q,
+                part_total,
+                global_total,
+                if effective { "生效" } else { "未生效/被忽略" }
+            );
+            if !effective {
+                mark_partition_exhausted(app, part_total)?;
+                advance_partition(app)?;
+                continue;
+            }
+        }
+        if result.items.is_empty() {
+            // 页码越过末页：真没数据了，该窗口结束
+            log::info!(
+                target: "index",
+                "窗口「{}」（q={}）第 {} 页为空，该窗口结束（总量 {}）",
                 part.label,
-                part.cursor
+                if part.q.is_empty() { "-" } else { part.q.as_str() },
+                part.cursor,
+                part.total.max(part_total)
             );
             mark_partition_exhausted(app, part_total)?;
             advance_partition(app)?;
             continue;
         }
-        let batch = result.items.len() as i64;
-        report.fetched +=
-            apply_partition_page(app, &result.items, part.cursor + batch, part_total, global_total)?;
+        // 页码 +1（不是 + 每页条数）：这就是之前「只能爬到 850」的根源
+        let next_page = part.cursor + 1;
+        report.fetched += apply_partition_page(
+            app,
+            &result.items,
+            next_page,
+            part_total,
+            global_total,
+        )?;
         let current = snapshot(app)?;
         report.indexed = current.items;
         report.total_count = global_total;
         set_phase(
             "syncing",
             &format!(
-                "正在建立索引 {} 条（窗口 {}/{}）",
+                "正在建立索引 {} 条（第 {} 页，窗口 {}/{}）",
                 current.items,
+                next_page.saturating_sub(1),
                 (current.active + 1).min(current.partitions),
                 current.partitions
             ),
         );
         // 每批成功入库就推一次进度：前端边爬边搜，不用等全部爬完
         emit_progress(app);
+        // 每成功一页强制休眠：官方对连续翻页会静默返回空页（等于把你掐断）
+        std::thread::sleep(Duration::from_millis(PAGE_REST_MS));
         if report.pages % FLUSH_EVERY_PAGES == 0 {
             flush(app);
         }
-        if part_total > 0 && part.cursor + batch > part_total {
-            mark_partition_exhausted(app, part_total)?;
+        // 下一页越过上限 / 超过末页：该窗口收尾
+        if next_page > limit || (part_total > 0 && next_page > last_page(part_total)) {
+            mark_partition_exhausted(app, part_total.max(part.total))?;
             advance_partition(app)?;
         }
     }
 
     let finished = done && !capped;
     finalize(app, finished)?;
+    // 计划全部走完但覆盖严重不足：先把事实写进日志（现在是真正的异常，不再正常）
+    if finished && global_total > 0 {
+        let reach = snapshot(app).map(|s| s.items).unwrap_or(0);
+        if (reach as f64) < global_total as f64 * 0.9 {
+            log::warn!(
+                target: "index",
+                "遍历计划已全部走完，但只覆盖 {} / {} 条：检查主窗口（lastUpdate）是否被提前标成 exhausted",
+                reach,
+                global_total
+            );
+        }
+    }
     report.done = finished;
     report.capped = capped;
     report.indexed = snapshot(app).map(|s| s.items).unwrap_or(report.indexed);
@@ -1088,6 +1599,13 @@ pub fn spawn_background(app: tauri::AppHandle) {
             log::info!(target: "index", "未登录，跳过后台索引同步（登录后会自动继续）");
             return;
         }
+        // 上一轮是用户主动暂停的：启动后不自动续爬，等用户点「继续索引」
+        if snapshot(&app).map(|s| s.paused).unwrap_or(false) {
+            set_phase("paused", "索引已暂停，点「继续索引」从断点接着爬");
+            emit_progress(&app);
+            log::info!(target: "index", "索引处于暂停状态，跳过后台自动续爬");
+            return;
+        }
         match sync_blocking(&app, "startup") {
             Ok(_) => {}
             Err(err) => log::info!(
@@ -1103,26 +1621,45 @@ pub fn spawn_background(app: tauri::AppHandle) {
 // ---------------- 对外命令实现 ----------------
 
 pub fn status_for_app(app: &tauri::AppHandle) -> IndexStatus {
-    let (indexed, total, scanned, done, updated_at_ms, full_synced_at_ms) = match snapshot(app) {
-        Ok(snap) => (
-            snap.items,
-            snap.total,
-            snap.items as i64,
-            snap.done,
-            snap.updated_at_ms,
-            snap.full_synced_at_ms,
-        ),
-        Err(_) => (0, 0, 0, false, 0, 0),
-    };
+    let snap = snapshot(app).unwrap_or_else(|_| Snapshot {
+        items: 0,
+        partitions: 0,
+        active: 0,
+        total: 0,
+        done: false,
+        updated_at_ms: 0,
+        full_synced_at_ms: 0,
+        paused: false,
+        last_error: String::new(),
+        plan_version: 0,
+    });
+    let indexed = snap.items;
+    let total = snap.total;
+    let scanned = snap.items as i64;
+    let done = snap.done;
+    let updated_at_ms = snap.updated_at_ms;
+    let full_synced_at_ms = snap.full_synced_at_ms;
+    let paused = snap.paused;
+    let last_error = snap.last_error.clone();
+    // 有断点：未完成 / 主动暂停 / 上次中断过
+    let resumable = !done || paused || !last_error.is_empty();
     let rt = lock_runtime();
     // v1.2：开关关闭时一律报「disabled」，前端指示灯直接用 ⚪（不展示同步中）
     let enabled = is_enabled(app);
     let phase = if !enabled {
         "disabled".to_string()
+    } else if !rt.syncing && paused {
+        // 用户主动暂停：即使上一轮的 phase 还停在 syncing，也一律报 paused
+        "paused".to_string()
     } else if rt.phase.is_empty() {
         "idle".to_string()
     } else {
         rt.phase.clone()
+    };
+    let message = if phase == "paused" && rt.message.is_empty() {
+        "索引已暂停，点「继续索引」从断点接着爬".to_string()
+    } else {
+        rt.message.clone()
     };
     IndexStatus {
         indexed,
@@ -1132,12 +1669,15 @@ pub fn status_for_app(app: &tauri::AppHandle) -> IndexStatus {
         syncing: rt.syncing,
         indexing_enabled: enabled,
         phase,
-        message: rt.message.clone(),
+        message,
         updated_at_ms,
         full_synced_at_ms,
         cooldown_until_ms: rt.cooldown_until_ms,
         path: path_for(app).map(|p| p.display().to_string()).unwrap_or_default(),
         max_items: MAX_ITEMS,
+        paused,
+        last_error,
+        resumable,
     }
 }
 

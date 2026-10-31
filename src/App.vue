@@ -1,43 +1,74 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import ModCard from "./components/ModCard.vue";
 import ModDetail from "./components/ModDetail.vue";
+import AppShell from "./components/layout/AppShell.vue";
+import PageShell from "./components/layout/PageShell.vue";
+import ModToolbar from "./components/common/ModToolbar.vue";
+import ViewSwitch from "./components/common/ViewSwitch.vue";
+import ModGrid from "./components/common/ModGrid.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import FirstRunWizard from "./components/FirstRunWizard.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
 import PresetManager from "./components/PresetManager.vue";
 import SettingsModal from "./components/SettingsModal.vue";
-import StatusBar from "./components/StatusBar.vue";
-import { useI18n } from "vue-i18n";
+import LocalSidebar from "./components/local/LocalSidebar.vue";
 import {
-  batchToggleMods,
-  checkUpdateAuto,
-  detectRootCandidates,
+  FONT_FAMILY_VARS,
+  TYPOGRAPHY_DEFAULTS,
+  appVersion,
+  fetchGithubReleases,
   getSettings,
-  modStats,
+  normalizeTypography,
+  normalizeVersion,
   openExternalUrl,
-  pickFolder,
-  scanMods,
+  renderReleaseMarkdown,
+  saveTypographyPrefs,
   setLocale as persistLocale,
-  setModRoot,
-  updateModPriority,
+  setTheme,
+  type TypographyPrefs,
+  type UiFontFamily,
 } from "./api";
-import { attachDragSort, type DragEndPayload } from "./dragSort";
-import { formatDateTime, translateBackendMessage } from "./format";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
-import { getTranslateSettings, installMod } from "./online/service";
+import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
-import { itemsById, markUpdated, updateIds } from "./modUpdates";
+import { itemsById, updateIds } from "./modUpdates";
 import {
   applyTranslateSettings,
   hydrateTranslations,
   syncUiLocale,
   translationLangEpoch,
 } from "./online/translation";
-import { ensureSession, localSearchEnabled, openSettingsNonce, sessionEpoch, sessionPhase } from "./sessionState";
-import { customNameOf, displayTitle, ensureUserData, isFavorite } from "./userData";
-import { TAG_ZH, SORT_OPTIONS, localizedTagName } from "./online/types";
-import type { BatchTarget, ModEntry, ModStats, ScanReport, SortKey, SourceFilter, StatusFilter } from "./types";
+import {
+  ensureStartupSession,
+  localSearchEnabled,
+  openSettingsNonce,
+  sessionEpoch,
+} from "./sessionState";
+import { ensureUserData } from "./userData";
+import { SORT_OPTIONS } from "./online/types";
+import type { ModEntry, SortKey } from "./types";
+import { useToast } from "./composables/useToast";
+import {
+  useViewPrefs,
+} from "./composables/useViewPrefs";
+import { useScrollRestore } from "./composables/useScrollRestore";
+import { useLocalScan } from "./composables/local/useLocalScan";
+import { useLocalFilters } from "./composables/local/useLocalFilters";
+import { useSortMode } from "./composables/local/useSortMode";
+import { useLocalModActions } from "./composables/local/useLocalModActions";
+import { useBatchToggle } from "./composables/local/useBatchToggle";
+import { usePresets } from "./composables/local/usePresets";
+import { useLocalUpdate } from "./composables/local/useLocalUpdate";
+
+/**
+ * 页面入口只做四件事：**页面级状态（模式 / 在线筛选）/ 组件协调 / 状态连接 / 启动引导**。
+ * 具体业务全部在 composable 里，按「数据源 → 筛选 → 排序 → 单条操作 → 批量 → 预设 → 更新」分层，
+ * 依赖方向单向向下，不存在循环引用。
+ */
+
+// ---------------- 页面级状态：模式切换 + 顶栏在线筛选 ----------------
 
 /** 顶部模式：本地扫描 / 在线官方服务 */
 const mode = ref<"local" | "online">("local");
@@ -79,11 +110,6 @@ watch(sessionEpoch, (epoch) => {
   if (epoch > 0) void kickIndexSync(epoch);
 });
 
-/** v1.2：在线页「本地索引未开启 → 前往设置」的快捷入口 */
-watch(openSettingsNonce, () => {
-  showSettings.value = true;
-});
-
 const { t, locale } = useI18n();
 /** 当前界面语言（语言切换本身已迁到 SettingsModal，这里只用于排序区域） */
 const currentLocale = computed(() => String(locale.value));
@@ -92,43 +118,365 @@ const collationLocale = computed(() =>
   currentLocale.value === "zh" ? "zh-Hans-CN" : currentLocale.value,
 );
 
-const report = ref<ScanReport | null>(null);
-const loading = ref(false);
-const error = ref<string | null>(null);
-const search = ref("");
-const source = ref<SourceFilter>("all");
-const status = ref<StatusFilter>("all");
-/** v0.5：只看收藏（只过滤 isFavorite === true，按 WorkshopID 匹配） */
-const favoritesOnly = ref(false);
-const sortKey = ref<SortKey>("name");
-const selectedId = ref<string | null>(null);
-const candidates = ref<string[]>([]);
+// ---------------- 组合各业务层（顺序即依赖方向） ----------------
 
-const stats = ref<ModStats | null>(null);
-const statsLoading = ref(false);
-const statsError = ref<string | null>(null);
+const { toast, showToast } = useToast();
+const { viewMode, cardSize, applyFromSettings: applyViewPrefs } = useViewPrefs();
+
+// ---------------- v2.2：主题（dark 深色羊皮纸 / light 明亮米白） ----------------
+// settings.json 是唯一真源；localStorage 只做首帧防闪缓存：
+// script setup 在首次渲染前同步执行，先打上缓存主题，onMounted 再用 settings.json 校正。
+type Theme = "dark" | "light";
+const THEME_CACHE_KEY = "aoe2mm.theme";
+
+/** 主题归一化：只认 light，其余一律 dark（与 Rust 侧 models::normalize_theme 同口径） */
+function normalizeTheme(raw: unknown): Theme {
+  return String(raw ?? "").toLowerCase() === "light" ? "light" : "dark";
+}
+
+/** 读首帧缓存（隐私模式下 localStorage 可能抛错：静默回落 dark） */
+function readCachedTheme(): Theme {
+  try {
+    return normalizeTheme(window.localStorage.getItem(THEME_CACHE_KEY));
+  } catch {
+    return "dark";
+  }
+}
+
+/**
+ * 应用主题：只改 <html data-theme>，CSS 变量整体换值，
+ * 不重载页面、不重建组件树、不动滚动位置。
+ */
+function applyTheme(next: Theme) {
+  document.documentElement.setAttribute("data-theme", next);
+  try {
+    window.localStorage.setItem(THEME_CACHE_KEY, next);
+  } catch {
+    /* 忽略：settings.json 仍是唯一真源 */
+  }
+}
+
+const theme = ref<Theme>(readCachedTheme());
+/** 首屏回填 settings.json 期间禁止回写，避免“读 → 写 → 再读”的无谓往返 */
+let themeReady = false;
+
+// 脚本建立阶段就把主题打到 <html> 上（早于首帧渲染，避免开屏闪一下另一个主题）
+applyTheme(theme.value);
+
+/** 切换主题：先改 DOM（瞬间生效），再异步落盘；写盘失败只提示，不回滚界面 */
+watch(theme, (next) => {
+  applyTheme(next);
+  if (!themeReady) return;
+  // v2.3：invoke 统一收口到 api.ts（setTheme），App.vue 不再直接碰 Tauri 命令
+  void setTheme(next).catch((e) => {
+    console.warn("[theme] 保存主题失败", e);
+  });
+});
+
+// ---------------- v2.4：三层排版（界面 / 正文阅读 / 卡片列表） ----------------
+// settings.json 是唯一真源，localStorage 只做首帧防闪缓存。
+// 变量写在 <html> 的 inline style 上 —— 只有一处真源，且必然盖住 :root / [data-theme] 里的默认值，
+// 因此拖动滑块时全站（侧边栏 / 顶栏 / 设置弹窗 / 卡片 / 详情正文）都是逐帧联动的。
+const TYPO_CACHE_KEY = "aoe2mm.typography.v2";
+
+/** 读首帧缓存；缺失 / 损坏 / 隐私模式抛错 → 全部回出厂默认值 */
+function readCachedTypography(): TypographyPrefs {
+  try {
+    const raw = window.localStorage.getItem(TYPO_CACHE_KEY);
+    if (!raw) return { ...TYPOGRAPHY_DEFAULTS };
+    return normalizeTypography(JSON.parse(raw));
+  } catch {
+    return { ...TYPOGRAPHY_DEFAULTS };
+  }
+}
+
+/**
+ * 把三层排版写到 <html> 的 style 上（所见即所得的核心）：
+ *   --app-font-family / --ui-font-weight / --global-scale   → 界面层（侧边栏、顶栏、设置弹窗…）
+ *   --reader-font-size / -line-height / -font-weight → 正文阅读层（详情描述…）
+ *   --card-font-size                                 → 卡片列表层（卡片标题 / 元信息）
+ * 三者互不干扰；只改 CSS 变量，不重建组件树、不丢滚动位置。
+ * 字体种类只切「用哪一套字体栈」，真字体名在 style.css 的 --font-* 里。
+ */
+function applyTypography(next: TypographyPrefs) {
+  const root = document.documentElement;
+  const prefs = normalizeTypography(next);
+  root.style.setProperty("--app-font-family", FONT_FAMILY_VARS[prefs.fontFamily]);
+  root.style.setProperty("--ui-font-weight", String(prefs.uiFontWeight));
+  root.style.setProperty("--global-scale", String(prefs.globalScale / 100));
+  root.style.setProperty("--reader-font-size", `${prefs.readerFontSize}px`);
+  root.style.setProperty("--reader-line-height", String(prefs.readerLineHeight));
+  root.style.setProperty("--reader-font-weight", String(prefs.readerFontWeight));
+  root.style.setProperty("--card-font-size", `${prefs.cardFontSize}px`);
+  try {
+    window.localStorage.setItem(TYPO_CACHE_KEY, JSON.stringify(prefs));
+  } catch {
+    /* 忽略：settings.json 仍是唯一真源 */
+  }
+}
+
+const cachedTypography = readCachedTypography();
+const uiFontFamily = ref<UiFontFamily>(cachedTypography.fontFamily);
+const uiFontWeight = ref<number>(cachedTypography.uiFontWeight);
+const globalFontScale = ref<number>(cachedTypography.globalScale);
+const readerFontSize = ref<number>(cachedTypography.readerFontSize);
+const readerLineHeight = ref<number>(cachedTypography.readerLineHeight);
+const readerFontWeight = ref<number>(cachedTypography.readerFontWeight);
+const cardFontSize = ref<number>(cachedTypography.cardFontSize);
+
+/** 当前七项快照（归一化后的值，保证和 Rust 侧写盘结果一致） */
+function currentTypography(): TypographyPrefs {
+  return normalizeTypography({
+    fontFamily: uiFontFamily.value,
+    uiFontWeight: uiFontWeight.value,
+    globalScale: globalFontScale.value,
+    readerFontSize: readerFontSize.value,
+    readerLineHeight: readerLineHeight.value,
+    readerFontWeight: readerFontWeight.value,
+    cardFontSize: cardFontSize.value,
+  });
+}
+
+/** 首屏回填 settings.json 期间禁止回写（与 themeReady 同理） */
+let typographyReady = false;
+/** 最近一次已经写进 settings.json 的值：避免“启动回填 → 监听器又写一遍”的无谓写盘 */
+let persistedTypography: TypographyPrefs = { ...cachedTypography };
+/** 连续拖动合并成一次落盘：300ms 内无新值才写 settings.json */
+let typographyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function sameTypography(a: TypographyPrefs, b: TypographyPrefs): boolean {
+  return (
+    a.fontFamily === b.fontFamily &&
+    a.uiFontWeight === b.uiFontWeight &&
+    a.globalScale === b.globalScale &&
+    a.readerFontSize === b.readerFontSize &&
+    a.readerLineHeight === b.readerLineHeight &&
+    a.readerFontWeight === b.readerFontWeight &&
+    a.cardFontSize === b.cardFontSize
+  );
+}
+
+// 脚本建立阶段先打上缓存值，避免开屏时字号 / 字体跳一下
+applyTypography(cachedTypography);
+
+watch(
+  [uiFontFamily, uiFontWeight, globalFontScale, readerFontSize, readerLineHeight, readerFontWeight, cardFontSize],
+  () => {
+    const next = currentTypography();
+    // 1）先改 DOM：即时预览（不重建组件树、不丢滚动位置）
+    applyTypography(next);
+    if (!typographyReady) return;
+    // 2）值没变就不写盘
+    if (sameTypography(next, persistedTypography)) return;
+    // 3）合并连续拖动，300ms 后只写最后一次
+    if (typographyTimer) clearTimeout(typographyTimer);
+    typographyTimer = setTimeout(() => {
+      if (sameTypography(next, persistedTypography)) return;
+      persistedTypography = next;
+      void saveTypographyPrefs(next).catch((e) => {
+        console.warn("[typography] 保存排版失败", e);
+      });
+    }, 300);
+  },
+);
+
+onBeforeUnmount(() => {
+  if (typographyTimer) clearTimeout(typographyTimer);
+});
+const scan = useLocalScan();
+const {
+  report,
+  mods,
+  warnings,
+  loading,
+  error,
+  candidates,
+  choosingRoot,
+  showWizard,
+  selected,
+  lastScanText,
+  chooseRoot,
+} = scan;
+
+const filters = useLocalFilters({ mods: scan.mods, collationLocale });
+const {
+  search,
+  source,
+  status,
+  favoritesOnly,
+  activeTag,
+  sourceCounts,
+  statusCounts,
+  sorted,
+  officialTagList,
+  inferredTagList,
+  heading,
+  contentHint,
+  favoriteLocalCount,
+  pickSource,
+  pickStatus,
+  pickTag,
+  toggleFavorites,
+  clearFilters,
+} = filters;
+
+const sort = useSortMode({
+  mods: scan.mods,
+  loading: scan.loading,
+  collationLocale,
+  filters,
+  hasReport: () => !!scan.report.value,
+  showToast,
+});
+const {
+  sortMode,
+  sortSaving,
+  dragList,
+  showDiscardConfirm,
+  sortDirty,
+  excludedSortCount,
+  enterSortMode,
+  requestExitSortMode,
+  discardSortChanges,
+  saveSortOrder,
+  onSortHotkey,
+} = sort;
+
+const actions = useLocalModActions({
+  report: scan.report,
+  selectedId: scan.selectedId,
+  patchModEnabled: scan.patchModEnabled,
+  sort,
+  normalizeError: scan.normalizeError,
+  showToast,
+});
+const { stats, statsLoading, statsError, selectMod, handleToggle, handleCardToggled, handleCardToggleError, handleRemoved } =
+  actions;
+
+const batch = useBatchToggle({
+  sorted: filters.sorted,
+  report: scan.report,
+  patchModEnabled: scan.patchModEnabled,
+  normalizeError: scan.normalizeError,
+  showToast,
+});
+const { batchAsk, batchBusy, batchError, batchTargets, askBatch, runBatchToggle, cancelBatch } = batch;
+
+/**
+ * 重扫的唯一入口：先看排序模式有没有未保存改动（不许静默丢弃），
+ * 再退出排序模式（重扫会重排整个列表，拖拽索引会对不上），最后才真正扫描。
+ */
+async function refresh(root?: string | null): Promise<void> {
+  if (sort.blocksRescan.value) {
+    showToast(t("sort.unsavedBlock"), "error");
+    return;
+  }
+  sort.exitSortMode();
+  await scan.refresh(root);
+}
+
+const presets = usePresets({ mods: scan.mods, rescan: () => refresh() });
+const { showPresets, lastAppliedPresetId, handlePresetApplied } = presets;
+
+const update = useLocalUpdate({
+  blocksRescan: sort.blocksRescan,
+  rescan: () => refresh(),
+  normalizeError: scan.normalizeError,
+  showToast,
+});
+const { updateNotice, updatingEntryId, handleUpdateMod, runStartupUpdateCheck, openUpdatePage } = update;
+
+/** 本地列表的滚动位置记忆（模式切换时滚动容器会被销毁重建） */
+const { el: localScrollEl } = useScrollRestore();
+
+/**
+ * ModGrid 就绪回调：把内部真实的滚动容器 / 网格节点交给上层。
+ * - scrollEl → 本地列表的滚动位置还原（切页再切回不回到顶部）
+ * - gridEl   → 排序模式的 Sortable 挂载点（不再靠模板 ref，网格永远是同一个 DOM）
+ */
+function onLocalGridReady(payload: {
+  scrollEl: HTMLElement | null;
+  gridEl: HTMLElement | null;
+}) {
+  localScrollEl.value = payload.scrollEl;
+  sort.gridEl.value = payload.gridEl;
+}
+
+// ---------------- 页面级 UI 状态（弹窗 / 提示） ----------------
 
 const showWarnings = ref(false);
-/** v0.3：预设管理器模态框 */
-const showPresets = ref(false);
-/** 最近一次成功应用的预设（脏检查靠它判断是否还能显示“当前已应用”） */
-const lastAppliedPresetId = ref<string | null>(null);
-/** 应用后重扫得到的「启用集合指纹」 */
-const appliedFingerprint = ref("");
-/** 应用流程正在进行：此期间的扫描结果不应被当成“用户手动改动” */
-let presetApplying = false;
-const choosingRoot = ref(false);
-/** 首次启动引导：没有可用根目录时自动弹出 */
-const showWizard = ref(false);
 /** v0.4 独立设置弹窗（语言 / 网络 / 关于） */
 const showSettings = ref(false);
-/** 启动时检查到的版本更新提示（右下角常驻，可点击跳转、可手动关闭） */
-const updateNotice = ref<{ version: string; url: string } | null>(null);
-/** v0.4：正在覆盖安装的模组（ModEntry.id），用于禁用详情页按钮 */
-const updatingEntryId = ref<string | null>(null);
 
-const mods = computed<ModEntry[]>(() => report.value?.mods ?? []);
-const warnings = computed<string[]>(() => report.value?.warnings ?? []);
+/** v1.2：在线页「本地索引未开启 → 前往设置」的快捷入口 */
+watch(openSettingsNonce, () => {
+  showSettings.value = true;
+});
+
+function closeSettings() {
+  showSettings.value = false;
+}
+
+function closeWizard() {
+  scan.showWizard.value = false;
+}
+
+function closePresets() {
+  presets.showPresets.value = false;
+}
+
+function cancelDiscardSort() {
+  sort.showDiscardConfirm.value = false;
+}
+
+function toggleWarnings() {
+  showWarnings.value = !showWarnings.value;
+}
+
+/** 作者 GitHub 主页：交给 Rust 用系统浏览器打开，绝不在 WebView 里导航 */
+const AUTHOR_URL = "https://github.com/Einsteinband";
+
+async function openAuthorPage() {
+  try {
+    await openExternalUrl(AUTHOR_URL);
+  } catch (e) {
+    showToast(scan.normalizeError(e), "error");
+  }
+}
+
+// ---------------- 顶栏模型（本地 / 在线共用一套控件） ----------------
+
+/**
+ * ModToolbar 的排序下拉绑定的是 string，而本地 sortKey 是收窄的 SortKey 联合类型，
+ * 用一个 computed 代理做窄化写入，避免在子组件里放宽类型。
+ */
+const sortModel = computed<string>({
+  get: () => filters.sortKey.value,
+  set: (value) => {
+    filters.sortKey.value = value as SortKey;
+  },
+});
+
+/** 本地排序项：中文文案由 i18n 提供，顺序与历史上完全一致 */
+const localSortOptions = computed(() => [
+  { value: "name", label: t("toolbar.sortName") },
+  { value: "updated", label: t("toolbar.sortUpdated") },
+  { value: "priority", label: t("toolbar.sortPriority") },
+  { value: "folder", label: t("toolbar.sortFolder") },
+]);
+
+/** 在线排序项：直接复用官方 SORT_OPTIONS，标签由 i18n 翻译 */
+const onlineSortOptions = computed(() =>
+  SORT_OPTIONS.map((opt) => ({ value: opt.value, label: t(opt.labelKey) })),
+);
+
+/** 在线升降序下拉的文案 */
+const onlineOrderLabels = computed(() => ({
+  desc: t("online.sortDesc"),
+  asc: t("online.sortAsc"),
+}));
+
+// ---------------- 本地译文（只读缓存，零网络） ----------------
 
 /**
  * 本地列表变化 / 目标语言切换后，把已缓存的译文接回来（**只读缓存，零网络**）。
@@ -156,659 +504,147 @@ watch(
   { immediate: true },
 );
 
-const sourceCounts = computed(() => ({
-  all: mods.value.length,
-  local: mods.value.filter((m) => m.kind === "local").length,
-  subscribed: mods.value.filter((m) => m.kind === "subscribed").length,
-}));
+// ---------------- v3.1：新版本首启弹窗（每个版本只弹一次） ----------------
 
-const statusCounts = computed(() => {
-  const counts = { enabled: 0, disabled: 0, unknown: 0 };
-  for (const m of mods.value) {
-    if (m.enabled === true) counts.enabled += 1;
-    else if (m.enabled === false) counts.disabled += 1;
-    else counts.unknown += 1;
-  }
-  return counts;
-});
+/** localStorage 记录「上次启动时已经展示过更新说明的版本」（settings.json 不新增字段） */
+const LAST_SEEN_VERSION_KEY = "aoe2.lastSeenVersion";
 
-const filtered = computed<ModEntry[]>(() => {
-  const q = search.value.trim().toLowerCase();
-  /**
-   * 收藏视图与「来源 / 状态 / 官方分类」互斥：
-   * 两套条件叠加时侧栏计数（3 个收藏）与列表条数（48/1037）必然对不上，
-   * 所以收藏视图下只按 isFavorite 过滤（外加搜索关键字）。
-   */
-  const fav = favoritesOnly.value;
-  return mods.value.filter((m) => {
-    if (fav && !isFavorite(m.workshopId)) return false;
-    if (!fav) {
-      if (source.value !== "all" && m.kind !== source.value) return false;
-      if (status.value === "enabled" && m.enabled !== true) return false;
-      if (status.value === "disabled" && m.enabled !== false) return false;
-      if (status.value === "unknown" && m.enabled !== null) return false;
-      if (activeTag.value && !m.contentTags.includes(activeTag.value)) return false;
-    }
-    if (!q) return true;
-    const haystack = [
-      displayTitle(m.workshopId, m.displayName),
-      customNameOf(m.workshopId) ?? "",
-      m.displayName,
-      m.nameFromFolder,
-      m.folderName,
-      m.author ?? "",
-      m.description ?? "",
-      m.workshopId === null ? "" : String(m.workshopId),
-    ];
-    return haystack.some((v) => v.toLowerCase().includes(q));
-  });
-});
-
-const sorted = computed<ModEntry[]>(() => {
-  const list = [...filtered.value];
-  const collator = new Intl.Collator(collationLocale.value, { numeric: true, sensitivity: "base" });
-  list.sort((a, b) => {
-    switch (sortKey.value) {
-      case "updated": {
-        const av = a.lastUpdateMs ?? -1;
-        const bv = b.lastUpdateMs ?? -1;
-        return bv - av;
-      }
-      case "priority": {
-        const av = a.priority ?? Number.MAX_SAFE_INTEGER;
-        const bv = b.priority ?? Number.MAX_SAFE_INTEGER;
-        return av - bv;
-      }
-      case "folder":
-        return collator.compare(a.folderName, b.folderName);
-      case "name":
-      default:
-        return collator.compare(
-          displayTitle(a.workshopId, a.displayName),
-          displayTitle(b.workshopId, b.displayName),
-        );
-    }
-  });
-  return list;
-});
-
-const selected = computed<ModEntry | null>(
-  () => mods.value.find((m) => m.id === selectedId.value) ?? null,
-);
-
-const lastScanText = computed(() =>
-  report.value ? formatDateTime(report.value.scannedAtMs) : t("rootbar.neverScanned"),
-);
-
-const heading = computed(() => {
-  if (favoritesOnly.value) return t("favorites.heading");
-  if (source.value === "local") return t("content.localMods");
-  if (source.value === "subscribed") return t("content.subscribedMods");
-  return t("content.allMods");
-});
-
-/** v0.5：本地列表里的收藏数（侧栏计数） */
-const favoriteLocalCount = computed(
-  () => mods.value.filter((m) => isFavorite(m.workshopId)).length,
-);
-
-/** 内容区副标题右侧的状态文案 */
-const statusText = computed(() => {
-  if (status.value === "enabled") return t("content.statusEnabled");
-  if (status.value === "disabled") return t("content.statusDisabled");
-  if (status.value === "unknown") return t("content.statusUnknown");
-  return t("content.statusAll");
-});
-
-/** 内容区副标题：收藏视图下明确说明「分类已让位」，避免用户以为分类还在生效 */
-const contentHint = computed(() =>
-  favoritesOnly.value
-    ? t("favorites.scopeHint")
-    : `${activeTagLabel.value} · ${statusText.value}`,
-);
-
-/**
- * 侧栏「⭐ 我的收藏」开关。
- * 进入收藏视图时把来源 / 状态 / 分类全部复位：只按收藏过滤，计数与列表条数才一致。
- */
-function toggleFavorites() {
-  favoritesOnly.value = !favoritesOnly.value;
-  if (!favoritesOnly.value) return;
-  source.value = "all";
-  status.value = "all";
-  activeTag.value = null;
+interface VersionNotes {
+  /** 当前运行的版本号 */
+  version: string;
+  /** Release 标题（无标题时回落 v{version}） */
+  title: string;
+  /** 已渲染好的安全 HTML（空串 = 拉不到 / 正文为空，走兜底文案） */
+  html: string;
 }
 
-/** 点来源 / 状态 / 分类：先退出收藏视图，否则条件叠加又会出现计数错位 */
-function pickSource(next: SourceFilter) {
-  favoritesOnly.value = false;
-  source.value = next;
-}
+const versionNotes = ref<VersionNotes | null>(null);
+/** 首次启动向导优先：向导没关就先攒着，关掉再弹，避免两个浮层叠在一起 */
+let versionNotesPending = false;
 
-function pickStatus(next: StatusFilter) {
-  favoritesOnly.value = false;
-  status.value = next;
-}
-
-function pickTag(next: string | null) {
-  favoritesOnly.value = false;
-  activeTag.value = next;
-}
-
-function normalizeError(e: unknown): string {
-  if (typeof e === "string") return translateBackendMessage(e);
-  if (e instanceof Error) return translateBackendMessage(e.message);
+function readLastSeenVersion(): string {
   try {
-    return translateBackendMessage(JSON.stringify(e));
+    return window.localStorage.getItem(LAST_SEEN_VERSION_KEY) ?? "";
   } catch {
-    return t("labels.unknown");
+    return "";
   }
 }
 
-async function refresh(root?: string | null) {
-  // 重扫会重排整个列表，排序模式必须退出（否则拖拽索引会对不上）
-  // 有未保存的排序改动时不允许静默丢弃
-  if (sortMode.value && sortDirty.value) {
-    showToast(t("sort.unsavedBlock"), "error");
+function writeLastSeenVersion(version: string) {
+  try {
+    window.localStorage.setItem(LAST_SEEN_VERSION_KEY, version);
+  } catch (e) {
+    // 隐私模式 / 存储被禁用：下次启动会再弹一次，不影响主流程
+    console.warn("[version-notes] 写入 lastSeenVersion 失败", e);
+  }
+}
+
+/** 版本号归一化后比较：v 前缀 / 大小写 / 空白都不算差异 */
+function sameVersion(a: string, b: string): boolean {
+  return normalizeVersion(a) === normalizeVersion(b);
+}
+
+async function showVersionNotesIfNeeded() {
+  let current = "";
+  try {
+    current = await appVersion();
+  } catch (e) {
+    console.warn("[version-notes] 读取当前版本失败", e);
     return;
   }
-  exitSortMode();
-  loading.value = true;
-  error.value = null;
+  if (!current) return;
+  // 这个版本已经弹过（或用户已点「我知道了」）就安静启动
+  if (sameVersion(readLastSeenVersion(), current)) return;
+
   try {
-    const next = await scanMods(root);
-    report.value = next;
-    if (!next.mods.some((m) => m.id === selectedId.value)) {
-      selectedId.value = next.mods[0]?.id ?? null;
-    }
+    const releases = await fetchGithubReleases();
+    const hit = releases.find((release) => sameVersion(release.version || release.tagName, current));
+    versionNotes.value = {
+      version: current,
+      title: hit?.name?.trim() || `v${current}`,
+      html: hit ? renderReleaseMarkdown(hit.body ?? "") : "",
+    };
   } catch (e) {
-    error.value = normalizeError(e);
-  } finally {
-    loading.value = false;
+    // 网络不通 / 未发版：不拦启动，只显示一句兜底文案，并引导去设置页看详情
+    console.warn("[version-notes] 拉取更新说明失败", e);
+    versionNotes.value = { version: current, title: `v${current}`, html: "" };
   }
 }
 
-async function chooseRoot() {
-  if (choosingRoot.value) return;
-  choosingRoot.value = true;
-  try {
-    const picked = await pickFolder(report.value?.root ?? candidates.value[0] ?? null);
-    if (!picked) return;
-    loading.value = true;
-    error.value = null;
-    const next = await setModRoot(picked);
-    report.value = next;
-    selectedId.value = next.mods[0]?.id ?? null;
-    if (!candidates.value.includes(picked)) candidates.value.unshift(picked);
-  } catch (e) {
-    error.value = normalizeError(e);
-  } finally {
-    choosingRoot.value = false;
-    loading.value = false;
-  }
-}
-
-function selectMod(mod: ModEntry) {
-  // 拖拽松手时浏览器仍会补一个 click：这段时间内忽略，避免排序时误切换选中项
-  if (Date.now() < suppressClickUntil) return;
-  selectedId.value = mod.id;
-}
-
-/**
- * 启用/禁用后的局部刷新：只 patch 这一条记录的字段，不重扫、不重置筛选、不重算体积。
- * 后端已把真实写入结果回传，这里不做任何推测。
- */
-function patchModEnabled(id: string, enabled: boolean) {
-  const list = report.value?.mods;
-  if (!list) return;
-  const mod = list.find((m) => m.id === id);
-  if (!mod) return;
-  mod.enabled = enabled;
-  mod.issues = mod.issues.filter((issue) => !issue.startsWith("mod-status.json 中没有该模组的记录"));
-}
-
-function handleToggle(payload: { enabled: boolean }) {
-  const id = selectedId.value;
-  if (!id) return;
-  patchModEnabled(id, payload.enabled);
-}
-
-/** v0.9：卡片右下角快捷开关写入成功 → 只改这一条 */
-function handleCardToggled(payload: { id: string; enabled: boolean }) {
-  patchModEnabled(payload.id, payload.enabled);
-}
-
-/** v0.9：卡片快捷开关失败 / 未登记 → 统一走右下角 Toast */
-function handleCardToggleError(message: string) {
-  showToast(message, "error");
-}
-
-// ---------------- v0.9：工具栏批量启用 / 禁用 ----------------
-
-/** null = 未弹窗；true = 全部启用；false = 全部禁用 */
-const batchAsk = ref<boolean | null>(null);
-const batchBusy = ref(false);
-const batchError = ref<string | null>(null);
-
-/** 只传当前筛选出的列表：WorkshopID 优先，local 模组靠 kind + 文件夹名定位 */
-const batchTargets = computed<BatchTarget[]>(() =>
-  sorted.value.map((mod) => ({
-    workshopId: mod.workshopId && mod.workshopId > 0 ? mod.workshopId : null,
-    kind: mod.kind,
-    folderName: mod.folderName,
-  })),
-);
-
-function askBatch(enable: boolean) {
-  if (batchBusy.value) return;
-  if (!batchTargets.value.length) {
-    showToast(t("batch.empty"), "error");
+function scheduleVersionNotes() {
+  if (scan.showWizard.value) {
+    versionNotesPending = true;
     return;
   }
-  batchError.value = null;
-  batchAsk.value = enable;
+  void showVersionNotesIfNeeded();
 }
 
-/**
- * 批量写入：后端整批只写一次盘（一次进程检测 → 一份备份 → 原子替换 → 回读校验），
- * 所以不会出现“前面改了、后面没改”。成功后只就地 patch 已登记（enabled !== null）的条目，
- * 不重扫、不重置筛选；未登记的条目由后端计入 notInStatus 并在 Toast 里告知。
- */
-async function runBatchToggle() {
-  if (batchAsk.value === null || batchBusy.value) return;
-  const enable = batchAsk.value;
-  const targets = batchTargets.value;
-  if (!targets.length) {
-    batchAsk.value = null;
-    showToast(t("batch.empty"), "error");
-    return;
-  }
-  const keys = new Set(targets.map((target) => `${target.kind}//${target.folderName}`));
-  batchBusy.value = true;
-  batchError.value = null;
-  try {
-    const result = await batchToggleMods(enable, targets);
-    for (const mod of report.value?.mods ?? []) {
-      if (mod.enabled === null) continue;
-      if (!keys.has(`${mod.kind}//${mod.folderName}`)) continue;
-      patchModEnabled(mod.id, result.enabled);
-    }
-    batchAsk.value = null;
-    if (result.notInStatus >= result.requested) {
-      showToast(t("batch.allUnregistered"), "error");
-    } else if (!result.wrote) {
-      showToast(t("batch.noChange"));
-    } else {
-      const text =
-        t(enable ? "batch.doneEnable" : "batch.doneDisable", {
-          updated: result.updated,
-          already: result.already,
-        }) + (result.notInStatus > 0 ? t("batch.skipped", { n: result.notInStatus }) : "");
-      showToast(text);
-    }
-  } catch (e) {
-    batchError.value = normalizeError(e);
-  } finally {
-    batchBusy.value = false;
-  }
-}
-
-/**
- * 删除后的局部移除：只把这一条从数组里摘掉，不重扫、不重置筛选。
- * 删的可能刚好是当前选中项，所以顺手把选中项回退到同位置上的一条。
- */
-function handleRemoved(payload: { id: string }) {
-  const list = report.value?.mods;
-  if (!list) return;
-  const index = list.findIndex((m) => m.id === payload.id);
-  if (index < 0) return;
-  const wasSelected = selectedId.value === payload.id;
-  list.splice(index, 1);
-  if (!wasSelected) return;
-  const next = list[index] ?? list[index - 1] ?? null;
-  selectedId.value = next?.id ?? null;
-}
-
-// ---------------- v0.2：手动拖拽排序（Priority） ----------------
-
-/** 排序模式：只有开启时卡片才可拖拽，关闭时保持正常的点击选中 */
-const sortMode = ref(false);
-const sortSaving = ref(false);
-/** 可拖拽的列表：与 report.mods 是同一批对象引用，改 Priority 无需重扫 */
-const dragList = ref<ModEntry[]>([]);
-/** 游戏尚未登记（priority 为 null）的模组，无法参与排序，单独列在下方 */
-const unsortable = ref<ModEntry[]>([]);
-/** 最近一次成功写入磁盘的顺序（判断“有没有未保存改动”，失败时也按它回滚） */
-const savedOrder = ref<string[]>([]);
-/** 有未保存改动时退出排序模式的二次确认 */
-const showDiscardConfirm = ref(false);
-/** 进入排序模式前的筛选快照，退出时还原 */
-let sortSnapshot: {
-  search: string;
-  source: SourceFilter;
-  status: StatusFilter;
-  activeTag: string | null;
-  sortKey: SortKey;
-  favoritesOnly: boolean;
-} | null = null;
-/** 本次排序是否真的改过顺序（决定退出后是否停在“按加载优先级”） */
-let orderChanged = false;
-/** 拖拽结束后短时间内屏蔽 click，避免松手时把卡片误选中 */
-let suppressClickUntil = 0;
-
-const dragEl = ref<HTMLElement | null>(null);
-let disposeDrag: (() => void) | null = null;
-
-/** 右下角 Toast（排序已保存等轻量提示） */
-const toast = ref<{ text: string; kind: "ok" | "error" } | null>(null);
-let toastTimer: number | null = null;
-function showToast(text: string, kind: "ok" | "error" = "ok") {
-  toast.value = { text, kind };
-  if (toastTimer !== null) window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => {
-    toast.value = null;
-    toastTimer = null;
-  }, kind === "error" ? 7000 : 3200);
-}
-
-/** 作者 GitHub 主页：交给 Rust 用系统浏览器打开，绝不在 WebView 里导航 */
-const AUTHOR_URL = "https://github.com/Einsteinband";
-
-async function openAuthorPage() {
-  try {
-    await openExternalUrl(AUTHOR_URL);
-  } catch (e) {
-    showToast(normalizeError(e), "error");
-  }
-}
-
-/**
- * v0.4：把本地模组覆盖安装到服务端最新版。
- * 直接复用现有的 online_install 管线（下载 → 解压 → 原子更换 → 写 mod-status.json）；
- * force=true 表示目标目录已存在时也允许覆盖（旧目录会先备份，不直接删）。
- * 分类 Tag 不回传，由 Rust 从 mod_metadata.json 里沿用上次安装记录。
- */
-async function handleUpdateMod(mod: ModEntry) {
-  const modId = mod.workshopId ?? 0;
-  if (modId <= 0 || updatingEntryId.value) return;
-  // v0.6：离线状态下必须拦截下载（本地收藏/备注仍然可用）
-  if (sessionPhase.value !== "online") {
-    showToast(t("online.offlineBlocked"), "error");
-    return;
-  }
-  if (sortMode.value && sortDirty.value) {
-    showToast(t("sort.unsavedBlock"), "error");
-    return;
-  }
-  updatingEntryId.value = mod.id;
-  try {
-    await installMod(modId, mod.displayName, true);
-    markUpdated(mod.id);
-    showToast(t("update.modDoneToast"));
-    await refresh();
-  } catch (e) {
-    showToast(normalizeError(e), "error");
-  } finally {
-    updatingEntryId.value = null;
-  }
-}
-
-/**
- * 启动时只跑一次版本检查（不轮询、不重试）。
- * 24 小时内自动查过就直接跳过——时间锁在 Rust 侧判定，连一条 [update] 日志都不会打。
- * 失败静默：没网 / GitHub 限流不应该在界面上刷错误，用户仍可到设置里手动点“检查更新”。
- */
-async function runStartupUpdateCheck() {
-  try {
-    const info = await checkUpdateAuto();
-    if (!info?.hasUpdate) return;
-    updateNotice.value = { version: info.latestVersion, url: info.releaseUrl };
-  } catch {
-    /* 静默失败 */
-  }
-}
-
-/** 点击右下角提示：拉系统浏览器到 Release 页面（不在 WebView 里跳转） */
-async function openUpdatePage() {
-  const url = updateNotice.value?.url;
-  if (!url) return;
-  try {
-    await openExternalUrl(url);
-    updateNotice.value = null;
-  } catch (e) {
-    showToast(normalizeError(e), "error");
-  }
-}
-
-function compareByPriority(a: ModEntry, b: ModEntry): number {
-  const collator = new Intl.Collator(collationLocale.value, { numeric: true, sensitivity: "base" });
-  const av = a.priority ?? Number.MAX_SAFE_INTEGER;
-  const bv = b.priority ?? Number.MAX_SAFE_INTEGER;
-  return av === bv
-    ? collator.compare(
-        displayTitle(a.workshopId, a.displayName),
-        displayTitle(b.workshopId, b.displayName),
-      )
-    : av - bv;
-}
-
-/**
- * 进入排序模式。
- * 关键决策：手动排序只对**全量列表**有意义——过滤后的子集一旦拖拽，
- * 拖出来的相对顺序会和全局顺序冲突（且无法推断插到哪个槽位），
- * 所以进入时清空搜索/筛选并把左侧栏置灰锁定，列表固定按 Priority 升序。
- */
-async function enterSortMode() {
-  if (loading.value || sortSaving.value || !report.value || !mods.value.length) return;
-  sortSnapshot = {
-    search: search.value,
-    source: source.value,
-    status: status.value,
-    activeTag: activeTag.value,
-    sortKey: sortKey.value,
-    favoritesOnly: favoritesOnly.value,
-  };
-  search.value = "";
-  source.value = "all";
-  status.value = "all";
-  activeTag.value = null;
-  favoritesOnly.value = false;
-  sortKey.value = "priority";
-
-  const byPriority = [...mods.value].sort(compareByPriority);
-  dragList.value = byPriority.filter((m) => m.priority !== null);
-  unsortable.value = byPriority.filter((m) => m.priority === null);
-  savedOrder.value = dragList.value.map((m) => m.id);
-  orderChanged = false;
-  sortMode.value = true;
-  // 必须等 DOM 真正渲染出 .sort-grid 再挂载（否则 dragEl 还是 null）
-  await mountDragSortable();
-}
-
-function exitSortMode() {
-  if (!sortMode.value) return;
-  sortMode.value = false;
-  showDiscardConfirm.value = false;
-  unmountDragSortable();
-  const snapshot = sortSnapshot;
-  sortSnapshot = null;
-  if (!snapshot) return;
-  // 筛选还原；但本次真的排过序就停在“按加载优先级”，否则拖完看不到结果
-  search.value = snapshot.search;
-  source.value = snapshot.source;
-  status.value = snapshot.status;
-  activeTag.value = snapshot.activeTag;
-  favoritesOnly.value = snapshot.favoritesOnly;
-  sortKey.value = orderChanged ? "priority" : snapshot.sortKey;
-}
-
-function handleDragEnd({ oldIndex, newIndex }: DragEndPayload) {
-  const list = dragList.value;
-  if (oldIndex < 0 || oldIndex >= list.length) return;
-  const [moved] = list.splice(oldIndex, 1);
-  if (!moved) return;
-  list.splice(Math.min(newIndex, list.length), 0, moved);
-  suppressClickUntil = Date.now() + 150;
-  // 只改内存顺序，不写盘：等用户点“保存排序”才调 update_mod_priority
-}
-
-/** 有未保存的改动？只比顺序，不比内容 */
-const sortDirty = computed(() => {
-  const ids = dragList.value.map((m) => m.id);
-  return (
-    ids.length !== savedOrder.value.length || ids.some((id, i) => id !== savedOrder.value[i])
-  );
-});
-
-/**
- * 手动保存：只有点“保存排序”（或排序模式下按 Ctrl+S）才写盘。
- * 成功后**只**改内存里的 Priority（同一批对象引用），绝不重扫：不闪、滚动条不复位。
- */
-async function saveSortOrder() {
-  if (sortSaving.value || !sortMode.value || !sortDirty.value) return;
-  const list = [...dragList.value];
-  const ids = list.map((m) => m.id);
-
-  sortSaving.value = true;
-  try {
-    const outcome = await updateModPriority(ids);
-    list.forEach((mod, index) => {
-      mod.priority = index + 1;
-    });
-    savedOrder.value = ids;
-    orderChanged = true;
-    showToast(t("sort.savedToast", { n: outcome.updated }));
-  } catch (e) {
-    // 磁盘没写成功 → 界面顺序回到上一次成功保存的样子
-    const byId = new Map(dragList.value.map((m) => [m.id, m]));
-    dragList.value = savedOrder.value
-      .map((id) => byId.get(id))
-      .filter((m): m is ModEntry => Boolean(m));
-    showToast(normalizeError(e), "error");
-  } finally {
-    sortSaving.value = false;
-  }
-}
-
-/** 退出排序模式：有未保存改动时先二次确认 */
-function requestExitSortMode() {
-  if (!sortMode.value || sortSaving.value) return;
-  if (sortDirty.value) {
-    showDiscardConfirm.value = true;
-    return;
-  }
-  exitSortMode();
-}
-
-/** 放弃更改：内存里的 Priority 本来就没动，直接退出，列表自然回到磁盘顺序 */
-function discardSortChanges() {
-  showDiscardConfirm.value = false;
-  exitSortMode();
-}
-
-/** 启用集合指纹：只取 id，排序后拼串。任何开关 / 增删都会改变它 */
-function enabledFingerprint(list: ModEntry[]): string {
-  return list
-    .filter((m) => m.enabled === true)
-    .map((m) => m.id)
-    .sort()
-    .join("|");
-}
-
-/** 应用预设后：重扫 → 用重扫结果记下指纹 → 标记“当前已应用” */
-async function handlePresetApplied(presetId: string) {
-  presetApplying = true;
-  try {
-    await refresh();
-    appliedFingerprint.value = enabledFingerprint(mods.value);
-    lastAppliedPresetId.value = presetId;
-  } finally {
-    presetApplying = false;
-  }
-}
-
-/**
- * 脏检查：指纹一变就解除所有预设按钮的置灰。
- * 覆盖三条来源：软件内开关（handleToggle 局部 patch，无需重扫）、
- * 游戏里改完再点“重新扫描”、以及安装/删除模组。
- */
-watch(
-  () => enabledFingerprint(mods.value),
-  (next) => {
-    if (presetApplying || !lastAppliedPresetId.value) return;
-    if (next === appliedFingerprint.value) return;
-    lastAppliedPresetId.value = null;
-    appliedFingerprint.value = "";
-  },
-);
-
-watch(selectedId, async (id) => {
-  stats.value = null;
-  statsError.value = null;
-  if (!id) return;
-  const mod = mods.value.find((m) => m.id === id);
-  if (!mod) return;
-  statsLoading.value = true;
-  try {
-    stats.value = await modStats(mod.path);
-  } catch (e) {
-    statsError.value = normalizeError(e);
-  } finally {
-    statsLoading.value = false;
-  }
-});
-
-/** 本地列表的滚动位置：mode 切换时 .grid-scroll 被 v-if 销毁重建，故靠 ref 变化钩子静默还原 */
-const localScrollEl = ref<HTMLElement | null>(null);
-let localScrollTop = 0;
-let localScrollBound: HTMLElement | null = null;
-
-function rememberLocalScroll() {
-  const el = localScrollEl.value;
-  if (!el) return;
-  // 只有真有滚动高度时才记录，避免元素脱离文档后被归零的值覆盖掉
-  if (el.scrollHeight > el.clientHeight) localScrollTop = el.scrollTop;
+/** 「我知道了」：写入 lastSeenVersion 并关弹窗（关闭后才写，防刷新时被误记为已看过） */
+function dismissVersionNotes() {
+  const version = versionNotes.value?.version;
+  versionNotes.value = null;
+  if (version) writeLastSeenVersion(version);
 }
 
 watch(
-  localScrollEl,
-  (el) => {
-    if (localScrollBound) {
-      localScrollBound.removeEventListener("scroll", rememberLocalScroll);
-      localScrollBound = null;
-    }
-    if (!el) return;
-    el.addEventListener("scroll", rememberLocalScroll, { passive: true });
-    localScrollBound = el;
-
-    const target = localScrollTop;
-    if (target <= 0) return;
-    void nextTick(() => {
-      el.scrollTop = target;
-      // 缩略图 / 字体回流会让高度暂时不足导致 scrollTop 被截断，下一帧再补一次
-      if (el.scrollTop < target) {
-        requestAnimationFrame(() => {
-          if (el.scrollTop < target) el.scrollTop = target;
-        });
-      }
-    });
+  () => scan.showWizard.value,
+  (open) => {
+    if (open || !versionNotesPending) return;
+    versionNotesPending = false;
+    void showVersionNotesIfNeeded();
   },
-  { flush: "post" },
 );
+
+// ---------------- 启动引导 ----------------
 
 onMounted(async () => {
-  // v0.6：启动即静默校验登录态——不 await、不阻塞首屏，
-  // 底栏自己从 🟡 变成 🟢/⚪；在线页通过 watch(sessionEpoch) 收到刷新信号
-  void ensureSession();
+  // v1.3：启动即静默校验登录态——持久登录关闭时 Rust 侧会自己跑一次隐藏窗口静默重登，
+  // 同样不 await、不阻塞首屏，底栏先显示「正在恢复登录…」再变 🟢/⚪
+  void ensureStartupSession();
   // v0.5：收藏/备注只读一次磁盘，失败不阻塞本地页
   void ensureUserData().catch(() => undefined);
   // 启动即检查一次新版本（只此一次，失败静默）
   void runStartupUpdateCheck();
   try {
-    candidates.value = (await detectRootCandidates()).map((c) => c.path);
+    await scan.loadCandidates();
     const settings = await getSettings();
     // v1.2：在线页本地搜索框开关（默认关闭，设置页可改）
     localSearchEnabled.value = settings.enableLocalSearch === true;
+    // v1.6：视图模式与卡片大小（老 settings.json 缺字段 → 后端给 grid / 200）
+    applyViewPrefs(settings);
+    // v2.2：主题（老 settings.json 缺字段 → 后端给 dark）；缓存与设置不一致时以设置为准
+    theme.value = normalizeTheme(settings.theme);
+    applyTheme(theme.value);
+    themeReady = true;
+    // v2.4：三层排版（老 settings.json 缺字段 → 后端已给默认值；
+    // v2.3 的扁平字段由 Rust 侧 migrate_legacy_typography 一次性搬进 reader_*）
+    const typoPrefs = normalizeTypography({
+      fontFamily: settings.uiFontFamily,
+      uiFontWeight: settings.uiFontWeight,
+      globalScale: settings.globalFontScale,
+      readerFontSize: settings.readerFontSize,
+      readerLineHeight: settings.readerLineHeight,
+      readerFontWeight: settings.readerFontWeight,
+      cardFontSize: settings.cardFontSize,
+    });
+    uiFontFamily.value = typoPrefs.fontFamily;
+    uiFontWeight.value = typoPrefs.uiFontWeight;
+    globalFontScale.value = typoPrefs.globalScale;
+    readerFontSize.value = typoPrefs.readerFontSize;
+    readerLineHeight.value = typoPrefs.readerLineHeight;
+    readerFontWeight.value = typoPrefs.readerFontWeight;
+    cardFontSize.value = typoPrefs.cardFontSize;
+    applyTypography(typoPrefs);
+    // 回填后同步“已落盘值”，避免监听器把刚读到的值又写回去
+    persistedTypography = { ...typoPrefs };
+    typographyReady = true;
+    // v3.0：旧字体名（sans-serif / serif / system-ui）静默重写成 hei / system，
+    // 顺手把 settings.json 里的旧值覆盖掉（否则每次启动都要重新归一化一遍）。
+    if (String(settings.uiFontFamily ?? "").trim().toLowerCase() !== typoPrefs.fontFamily) {
+      void saveTypographyPrefs(typoPrefs).catch((e) => {
+        console.warn("[typography] 旧字体配置重写失败", e);
+      });
+    }
     // 语言：已保存的优先，否则按系统语言决定（并把结果回写，以后不再依赖 navigator）
     const savedLocale = normalizeLocale(settings.locale);
     applyLocale(savedLocale ?? detectSystemLocale());
@@ -825,14 +661,16 @@ onMounted(async () => {
     if (settings.modRoot) {
       await refresh(settings.modRoot);
       // 记录的路径被移动 / 磁盘未连接时，直接回到引导而不是只留一个错误面板
-      if (!report.value || !report.value.rootExists) showWizard.value = true;
+      if (!scan.report.value || !scan.report.value.rootExists) scan.showWizard.value = true;
     } else {
-      showWizard.value = true;
+      scan.showWizard.value = true;
     }
   } catch (e) {
-    error.value = normalizeError(e);
-    showWizard.value = true;
+    scan.error.value = scan.normalizeError(e);
+    scan.showWizard.value = true;
   }
+  // v3.1：版本变了才弹「新版本特性」（首次启动同样算一次，走兜底文案）
+  scheduleVersionNotes();
 });
 
 /**
@@ -843,284 +681,99 @@ watch(locale, (next) => {
   syncUiLocale(String(next));
 });
 
-/** 引导完成：后端已写入 settings.json 并吐回完整扫描结果 */
-function handleWizardDone(next: ScanReport) {
-  report.value = next;
-  selectedId.value = next.mods[0]?.id ?? null;
-  error.value = null;
-  showWizard.value = false;
-  if (next.root && !candidates.value.includes(next.root)) candidates.value.unshift(next.root);
-}
-/** 官方 17 项分类的固定顺序（直接复用在线页的 TAG_ZH，保证两侧排列一致） */
-const TAG_ORDER: Record<string, number> = Object.fromEntries(
-  Object.values(TAG_ZH).map((name, index) => [name, index]),
-);
-
-interface TagOption {
-  name: string;
-  count: number;
-}
-
-/** 左侧选中的官方/推断标签；null = 全部内容 */
-const activeTag = ref<string | null>(null);
-
-/**
- * 标签索引：官方与推断同名标签合并计数，
- * 保证“侧栏显示的数量”与“点击后的结果数量”一致。
- */
-const tagIndex = computed(() => {
-  const map = new Map<string, { count: number; official: boolean }>();
-  for (const mod of mods.value) {
-    const isOfficial = mod.categorySource === "official";
-    for (const tag of mod.contentTags) {
-      const current = map.get(tag) ?? { count: 0, official: false };
-      current.count += 1;
-      if (isOfficial) current.official = true;
-      map.set(tag, current);
-    }
-  }
-  return map;
-});
-
-/** 官方分类：只来自 mod_metadata.json 记录过的模组，按官方字典顺序排 */
-const officialTagList = computed<TagOption[]>(() =>
-  [...tagIndex.value.entries()]
-    .filter(([, value]) => value.official)
-    .map(([name, value]) => ({ name, count: value.count }))
-    .sort((a, b) => {
-      const ai = TAG_ORDER[a.name] ?? Number.MAX_SAFE_INTEGER;
-      const bi = TAG_ORDER[b.name] ?? Number.MAX_SAFE_INTEGER;
-      return ai === bi ? a.name.localeCompare(b.name, collationLocale.value) : ai - bi;
-    }),
-);
-
-/** 特征推断：本地扫描兜底得出的标签，按命中数降序 */
-const inferredTagList = computed<TagOption[]>(() =>
-  [...tagIndex.value.entries()]
-    .filter(([, value]) => !value.official)
-    .map(([name, value]) => ({ name, count: value.count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, collationLocale.value)),
-);
-
-const activeTagLabel = computed(() => activeTag.value ?? t("sidebar.allContent"));
-
-// 重新扫描/卸装后选中的标签可能消失：自动退回“全部内容”，避免莫名空列表
-watch([officialTagList, inferredTagList], () => {
-  if (!activeTag.value) return;
-  const stillExists =
-    officialTagList.value.some((t) => t.name === activeTag.value) ||
-    inferredTagList.value.some((t) => t.name === activeTag.value);
-  if (!stillExists) activeTag.value = null;
-});
-
-// ---------------- v0.2：拖拽实例的生命周期 ----------------
-
-/**
- * 挂载 Sortable。
- * 必须等 sortMode 变 true 且 DOM 真正渲染出 .sort-grid 之后（nextTick）再做：
- * 旧实现靠 watch([dragEl, sortMode]) 兑，一旦 el 与 sortMode 在同一次 patch 里变化，
- * 回调可能在 dragEl 还是 null 时就跑完（之后不会再补一次），
- * 结果就是“能进排序模式、但卡片完全拖不动且无任何报错”。
- */
-async function mountDragSortable() {
-  await nextTick();
-  const el = dragEl.value;
-  if (!el) {
-    console.warn("[sort] 排序网格未渲染出来，拖拽未挂载");
-    return;
-  }
-  disposeDrag?.();
-  disposeDrag = attachDragSort(el, handleDragEnd);
-}
-
-function unmountDragSortable() {
-  disposeDrag?.();
-  disposeDrag = null;
-}
-
 /** 切到在线页时强制退出排序模式（本地网格会被销毁） */
 watch(mode, (next) => {
   if (next === "local") return;
   // 有未保存改动就不让切页：切走会销毁本地网格，等于静默丢弃
-  if (sortMode.value && sortDirty.value) {
+  if (sort.blocksRescan.value) {
     mode.value = "local";
     showToast(t("sort.unsavedBlock"), "error");
     return;
   }
-  exitSortMode();
+  sort.exitSortMode();
 });
 
 /** 排序模式下 Ctrl+S 手动保存 */
-function onSortHotkey(event: KeyboardEvent) {
-  if (!sortMode.value) return;
-  if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
-  event.preventDefault();
-  void saveSortOrder();
-}
 window.addEventListener("keydown", onSortHotkey);
 
 onBeforeUnmount(() => {
-  unmountDragSortable();
   window.removeEventListener("keydown", onSortHotkey);
-  if (toastTimer !== null) window.clearTimeout(toastTimer);
 });
 </script>
 
 <template>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="brand">
-        <span class="crest">⚔</span>
-        <div>
-          <h1>{{ t("app.name") }}</h1>
-          <p class="tagline">
-            {{ t("app.taglinePrefix") }}<a
-              class="author-link"
-              :href="AUTHOR_URL"
-              :title="t('app.authorTitle')"
-              @click.prevent="openAuthorPage"
-              >{{ t("app.author") }}</a
-            >
-          </p>
-        </div>
-      </div>
-
-      <nav class="mode-tabs">
-        <button type="button" :class="{ active: mode === 'local' }" @click="mode = 'local'">
-          {{ t("nav.local") }}
-        </button>
-        <button type="button" :class="{ active: mode === 'online' }" @click="mode = 'online'">
-          {{ t("nav.online") }}
-        </button>
-      </nav>
-
-      <div v-if="mode === 'local'" class="search-box">
-        <span class="glyph">⌕</span>
-        <input
-          v-model="search"
-          type="search"
-          :placeholder="sortMode ? t('sort.searchDisabled') : t('search.placeholder')"
-          :disabled="sortMode"
-          spellcheck="false"
-        />
-        <button
-          v-if="search"
-          class="clear"
-          type="button"
-          :title="t('search.clear')"
-          :aria-label="t('search.clear')"
-          @click="search = ''"
-        >
-          ✕
-        </button>
-      </div>
-
-      <!-- v1.1：在线模式的搜索框 = **官方搜索**。输入过程中绝不发请求，
-           只有回车 / 点「搜索」才写入 onlineQuery 去请求官方接口。 -->
-      <div v-else class="search-box official-search">
-        <span class="glyph">⌕</span>
-        <input
-          v-model="onlineQueryDraft"
-          type="search"
-          :title="t('online.officialSearchHint')"
-          :placeholder="t('online.officialSearchPlaceholder')"
-          spellcheck="false"
-          @keyup.enter="submitOnlineSearch"
-        />
-        <button
-          v-if="onlineQueryDraft || onlineQuery"
-          class="clear"
-          type="button"
-          :title="t('search.clear')"
-          :aria-label="t('search.clear')"
-          @click="resetOnlineSearch"
-        >
-          ✕
-        </button>
-        <button type="button" class="go" @click="submitOnlineSearch">
-          {{ t("online.officialSearchGo") }}
-        </button>
-      </div>
-
-      <div v-if="mode === 'local'" class="toolbar">
-        <select
-          v-model="sortKey"
-          :title="sortMode ? t('sort.sortDisabled') : t('toolbar.sortLabel')"
-          :disabled="sortMode"
-        >
-          <option value="name">{{ t("toolbar.sortName") }}</option>
-          <option value="updated">{{ t("toolbar.sortUpdated") }}</option>
-          <option value="priority">{{ t("toolbar.sortPriority") }}</option>
-          <option value="folder">{{ t("toolbar.sortFolder") }}</option>
-        </select>
-        <button type="button" :disabled="loading || !report" @click="refresh()">
-          {{ t("toolbar.rescan") }}
-        </button>
-        <button type="button" :disabled="loading || choosingRoot" @click="chooseRoot">
-          {{ t("toolbar.changeRoot") }}
-        </button>
-        <button type="button" class="preset-entry" @click="showPresets = true">
-          {{ t("toolbar.presets") }}
-        </button>
-        <button
-          type="button"
-          class="batch-enable"
-          :disabled="loading || !report || !sorted.length || batchBusy"
-          :title="t('toolbar.enableAllTitle')"
-          @click="askBatch(true)"
-        >
-          {{ batchBusy ? t("batch.working") : t("toolbar.enableAll") }}
-        </button>
-        <button
-          type="button"
-          class="batch-disable"
-          :disabled="loading || !report || !sorted.length || batchBusy"
-          :title="t('toolbar.disableAllTitle')"
-          @click="askBatch(false)"
-        >
-          {{ batchBusy ? t("batch.working") : t("toolbar.disableAll") }}
-        </button>
-        <button
-          type="button"
-          class="sort-toggle"
-          :class="{ active: sortMode }"
-          :disabled="loading || !report || !mods.length"
-          :title="sortMode ? t('sort.exitTitle') : t('sort.enterTitle')"
-          @click="sortMode ? requestExitSortMode() : enterSortMode()"
-        >
-          {{ sortMode ? t("sort.exit") : t("sort.enter") }}
-        </button>
-      </div>
-
-      <!-- 在线模式：同一行右侧换成排序 / 升降序 / 刷新 -->
-      <div v-else class="toolbar">
-        <select v-model="onlineSort" :title="t('toolbar.sortLabel')">
-          <option v-for="opt in SORT_OPTIONS" :key="opt.value" :value="opt.value">
-            {{ t(opt.labelKey) }}
-          </option>
-        </select>
-        <select v-model="onlineOrder" :title="t('online.orderLabel')">
-          <option value="DESC">{{ t("online.sortDesc") }}</option>
-          <option value="ASC">{{ t("online.sortAsc") }}</option>
-        </select>
-        <button type="button" :title="t('online.refreshTitle')" @click="onlineRef?.refresh()">
-          {{ t("online.refresh") }}
-        </button>
-      </div>
-
-      <!-- v0.4：语言切换已迁入设置弹窗，顶栏只保留齿轮入口（占原语言下拉那一列） -->
-      <button
-        type="button"
-        class="settings-entry"
-        :title="t('settings.open')"
-        :aria-label="t('settings.open')"
-        @click="showSettings = true"
+  <!-- 应用外壳：顶栏 / 信息栏 / 主体 / 状态栏四层统一由 AppShell 持有；
+       本地与在线共用同一个顶栏、同一个底栏，不再各自拼一套外层容器。 -->
+  <AppShell
+    v-model:mode="mode"
+    :author-url="AUTHOR_URL"
+    :local-count="mods.length"
+    @open-author="openAuthorPage"
+    @open-settings="showSettings = true"
+  >
+    <!-- 顶栏中间：纹章 / 模式切换 / 齿轮由 TopBar 负责，这里只填工具栏。
+         本地与在线用的是同一个组件、同一串 props，按钮排列与防挤压行为完全一致。 -->
+    <template #toolbar>
+      <!-- 本地模式：搜索 + 排序 +【重新扫描】+ 视图切换（网格 / 列表）
+           v2.0 顶栏做减法：更换根目录 → 设置·外观；卡片大小滑块 → 设置·外观；
+           预设管理器 / 全部启用 / 全部禁用 / 排序模式 → 列表抬头右侧的 .batch-actions -->
+      <ModToolbar
+        v-if="mode === 'local'"
+        v-model:search="search"
+        v-model:sort="sortModel"
+        v-model:view-mode="viewMode"
+        :search-placeholder="sortMode ? t('sort.searchDisabled') : t('search.placeholder')"
+        :search-disabled="sortMode"
+        :sort-options="localSortOptions"
+        :sort-disabled="sortMode"
+        :sort-title="sortMode ? t('sort.sortDisabled') : t('toolbar.sortLabel')"
+        :show-view-switch="false"
       >
-        ⚙
-      </button>
-    </header>
+        <template #extra>
+          <button type="button" :disabled="loading || !report" @click="refresh()">
+            {{ t("toolbar.rescan") }}
+          </button>
+        </template>
+      </ModToolbar>
 
-    <div class="rootbar">
+      <!-- 在线模式：搜索框变成官方搜索（回车 / 点「搜索」才发请求），排序换成官方排序 + 升降序 -->
+      <ModToolbar
+        v-else
+        v-model:search="onlineQueryDraft"
+        v-model:sort="onlineSort"
+        v-model:order="onlineOrder"
+        v-model:view-mode="viewMode"
+        submit-mode
+        :submit-label="t('online.officialSearchGo')"
+        :search-placeholder="t('online.officialSearchPlaceholder')"
+        :search-title="t('online.officialSearchHint')"
+        :clear-visible="Boolean(onlineQueryDraft || onlineQuery)"
+        :sort-options="onlineSortOptions"
+        :sort-title="t('toolbar.sortLabel')"
+        :order-labels="onlineOrderLabels"
+        :order-title="t('online.orderLabel')"
+        :show-view-switch="false"
+        @submit="submitOnlineSearch"
+        @clear="resetOnlineSearch"
+      >
+        <template #extra>
+          <button type="button" :title="t('online.refreshTitle')" @click="onlineRef?.refresh()">
+            {{ t("online.refresh") }}
+          </button>
+        </template>
+      </ModToolbar>
+
+      <!-- 顶栏右端（设置齿轮左侧）：网格 / 列表切换。
+           两种模式共用同一个位置，切页时按钮不会跳动；
+           排序模式仍留在本地页列表抬头的 .batch-actions 里。 -->
+      <div class="topbar-actions">
+        <ViewSwitch v-model:view-mode="viewMode" />
+      </div>
+    </template>
+
+    <!-- 信息栏（本地 / 在线共用同一条，内容由页面决定） -->
+    <template #info>
+      <div class="rootbar">
       <span>{{ t("rootbar.root") }}</span>
       <span class="path" :title="report?.root ?? ''">{{ report?.root ?? t("rootbar.notSet") }}</span>
       <span class="sep">|</span>
@@ -1136,138 +789,37 @@ onBeforeUnmount(() => {
         v-if="warnings.length"
         type="button"
         class="warn-pill"
-        @click="showWarnings = !showWarnings"
+        @click="toggleWarnings"
       >
         ⚠ {{ t("rootbar.warnings", { n: warnings.length }) }}
       </button>
-    </div>
+      </div>
+    </template>
 
-    <div class="body-grid" :class="{ 'online-mode': mode === 'online' }">
-      <aside v-if="mode === 'local'" class="sidebar" :class="{ 'sort-locked': sortMode }">
-        <div v-if="sortMode" class="sort-lock-note">{{ t("sort.sidebarLocked") }}</div>
-        <div class="side-group">
-          <div class="side-title">{{ t("sidebar.source") }}</div>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: source === 'all' && !favoritesOnly }"
-            @click="pickSource('all')"
-          >
-            <span class="label">{{ t("sidebar.allMods") }}</span>
-          </button>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: source === 'local' && !favoritesOnly }"
-            @click="pickSource('local')"
-          >
-            <span class="label">{{ t("sidebar.local") }}</span>
-          </button>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: source === 'subscribed' && !favoritesOnly }"
-            @click="pickSource('subscribed')"
-          >
-            <span class="label">{{ t("sidebar.subscribed") }}</span>
-          </button>
-        </div>
+    <!-- 主体：本地页与在线页共用同一个 <PageShell> 三栏骨架 -->
+    <PageShell v-if="mode === 'local'" :sidebar-class="sortMode ? 'sort-locked' : ''">
+      <!-- 左：来源 / 收藏 / 官方分类 / 推断分类 / 状态筛选（LocalSidebar 只负责展示与上抛事件） -->
+      <template #sidebar>
+        <LocalSidebar
+          :sort-mode="sortMode"
+          :source="source"
+          :status="status"
+          :favorites-only="favoritesOnly"
+          :active-tag="activeTag"
+          :official-tag-list="officialTagList"
+          :inferred-tag-list="inferredTagList"
+          :source-counts="sourceCounts"
+          :status-counts="statusCounts"
+          :favorite-local-count="favoriteLocalCount"
+          @pick-source="pickSource"
+          @pick-status="pickStatus"
+          @pick-tag="pickTag"
+          @toggle-favorites="toggleFavorites"
+        />
+      </template>
 
-        <!-- v0.5：我的收藏（只过滤 isFavorite，按 WorkshopID 匹配 user_data.json） -->
-        <div class="side-group">
-          <div class="side-title">{{ t("favorites.groupTitle") }}</div>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: favoritesOnly }"
-            :disabled="sortMode"
-            @click="toggleFavorites"
-          >
-            <span class="label">⭐ {{ t("favorites.label") }}</span>
-            <span class="count">{{ favoriteLocalCount }}</span>
-          </button>
-        </div>
-
-        <div class="side-group">
-          <div class="side-title">{{ t("sidebar.officialTags") }}</div>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: activeTag === null && !favoritesOnly }"
-            @click="pickTag(null)"
-          >
-            <span class="label">{{ t("sidebar.allContent") }}</span>
-          </button>
-          <button
-            v-for="item in officialTagList"
-            :key="item.name"
-            type="button"
-            class="side-item"
-            :class="{ active: activeTag === item.name && !favoritesOnly }"
-            :title="t('sidebar.tagCount', { name: localizedTagName(item.name), n: item.count })"
-            @click="pickTag(item.name)"
-          >
-            <span class="label">{{ localizedTagName(item.name) }}</span>
-          </button>
-          <div v-if="!officialTagList.length" class="side-note note" style="padding: 4px 10px">
-            {{ t("sidebar.officialEmpty") }}
-          </div>
-        </div>
-
-        <div v-if="inferredTagList.length" class="side-group">
-          <div class="side-title">{{ t("sidebar.inferredTags") }}</div>
-          <button
-            v-for="item in inferredTagList"
-            :key="item.name"
-            type="button"
-            class="side-item"
-            :class="{ active: activeTag === item.name && !favoritesOnly }"
-            :title="t('sidebar.tagCount', { name: localizedTagName(item.name), n: item.count })"
-            @click="pickTag(item.name)"
-          >
-            <span class="label">{{ localizedTagName(item.name) }}</span>
-          </button>
-        </div>
-
-        <div class="side-group">
-          <div class="side-title">{{ t("sidebar.status") }}</div>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: status === 'all' && !favoritesOnly }"
-            @click="pickStatus('all')"
-          >
-            <span class="label">{{ t("sidebar.all") }}</span><span class="count">{{ sourceCounts.all }}</span>
-          </button>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: status === 'enabled' && !favoritesOnly }"
-            @click="pickStatus('enabled')"
-          >
-            <span class="label">{{ t("sidebar.enabled") }}</span><span class="count">{{ statusCounts.enabled }}</span>
-          </button>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: status === 'disabled' && !favoritesOnly }"
-            @click="pickStatus('disabled')"
-          >
-            <span class="label">{{ t("sidebar.disabled") }}</span><span class="count">{{ statusCounts.disabled }}</span>
-          </button>
-          <button
-            type="button"
-            class="side-item"
-            :class="{ active: status === 'unknown' && !favoritesOnly }"
-            @click="pickStatus('unknown')"
-          >
-            <span class="label">{{ t("sidebar.unknown") }}</span><span class="count">{{ statusCounts.unknown }}</span>
-          </button>
-        </div>
-
-      </aside>
-
-      <section v-if="mode === 'local'" class="content">
+      <!-- 中：抬头 + 卡片网格（滚动区由 ModGrid 提供） -->
+      <template #content>
         <div v-if="showWarnings" class="warn-panel">
           <strong>{{ t("state.warningsTitle") }}</strong>
           <ul class="warn-list">
@@ -1278,9 +830,52 @@ onBeforeUnmount(() => {
         <div class="content-head">
           <h2>{{ heading }}</h2>
           <span class="hint">{{ contentHint }}</span>
+
+          <!-- v2.6 批量操作组：预设 / 全部启用 / 全部禁用 / 排序模式 / 视图切换（网格·列表），
+               贴在列表标题（说明文字）右侧、整组右靠。视图切换与在线页列表抬头的位置一致。 -->
+          <div v-if="mode === 'local'" class="batch-actions">
+            <button type="button" class="batch-btn preset-entry" @click="showPresets = true">
+              {{ t("toolbar.presets") }}
+            </button>
+            <button
+              type="button"
+              class="batch-btn batch-enable"
+              :disabled="loading || !report || !sorted.length || batchBusy"
+              :title="t('toolbar.enableAllTitle')"
+              @click="askBatch(true)"
+            >
+              {{ batchBusy ? t("batch.working") : t("toolbar.enableAll") }}
+            </button>
+            <button
+              type="button"
+              class="batch-btn batch-disable"
+              :disabled="loading || !report || !sorted.length || batchBusy"
+              :title="t('toolbar.disableAllTitle')"
+              @click="askBatch(false)"
+            >
+              {{ batchBusy ? t("batch.working") : t("toolbar.disableAll") }}
+            </button>
+            <button
+              type="button"
+              class="batch-btn sort-toggle"
+              :class="{ active: sortMode }"
+              :disabled="loading || !report || !mods.length"
+              :title="sortMode ? t('sort.exitTitle') : t('sort.enterTitle')"
+              @click="sortMode ? requestExitSortMode() : enterSortMode()"
+            >
+              {{ sortMode ? t("sort.exit") : t("sort.enter") }}
+            </button>
+          </div>
         </div>
 
-        <div ref="localScrollEl" class="grid-scroll">
+        <!-- 本地列表：与在线页共用 ModGrid（滚动容器 + 网格骨架 + 视图模式 + 卡片大小） -->
+        <ModGrid
+          :view-mode="viewMode"
+          :card-size="cardSize"
+          :grid-class="sortMode ? 'sort-grid' : ''"
+          @ready="onLocalGridReady"
+        >
+          <!-- 状态面板 / 排序提示条：不参与网格排版，直接落在滚动区里 -->
           <div v-if="loading" class="state-panel">
             <h2><span class="spinner"></span>{{ t("state.scanningTitle") }}</h2>
             <p>{{ t("state.scanningBody") }}</p>
@@ -1352,36 +947,13 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <div ref="dragEl" class="card-grid sort-grid">
-              <ModCard
-                v-for="(mod, index) in dragList"
-                :key="mod.id"
-                :mod="mod"
-                :active="mod.id === selectedId"
-                :order="index + 1"
-                :has-update="updateIds.has(mod.id)"
-                sortable
-                @select="selectMod"
-                @toggled="handleCardToggled"
-                @toggle-error="handleCardToggleError"
-              />
-            </div>
-
-            <div v-if="unsortable.length" class="sort-locked-group">
-              <div class="side-title">{{ t("sort.lockedTitle", { n: unsortable.length }) }}</div>
-              <div class="card-grid">
-                <ModCard
-                  v-for="mod in unsortable"
-                  :key="mod.id"
-                  :mod="mod"
-                  :active="mod.id === selectedId"
-                  :has-update="updateIds.has(mod.id)"
-                  @select="selectMod"
-                  @toggled="handleCardToggled"
-                  @toggle-error="handleCardToggleError"
-                />
-              </div>
-            </div>
+            <!-- v1.2：排序模式只对已启用模组生效，顶部常驻说明，不给底层原理 -->
+            <p class="sort-hint">
+              <span>{{ t("sort.enabledOnly") }}</span>
+              <span v-if="excludedSortCount" class="sort-hint-count">
+                {{ t("sort.hiddenCount", { n: excludedSortCount }) }}
+              </span>
+            </p>
           </div>
 
           <!-- 收藏视图专用空态：计数 > 0 却看不到，说明是搜索没命中，必须说清楚 -->
@@ -1400,37 +972,32 @@ onBeforeUnmount(() => {
             <h2>{{ t("state.filteredTitle") }}</h2>
             <p>{{ t("state.filteredBody", { total: mods.length }) }}</p>
             <div class="actions">
-              <button
-                type="button"
-                @click="
-                  search = '';
-                  source = 'all';
-                  status = 'all';
-                  activeTag = null;
-                  favoritesOnly = false;
-                "
-              >
+              <button type="button" @click="clearFilters">
                 {{ t("state.clearFilters") }}
               </button>
             </div>
           </div>
 
-          <div v-else class="card-grid">
+          <!-- 卡片本体：排序模式下拖拽列表，否则筛选后的列表；网格/列表视图由 ModGrid 统一控制 -->
+          <template #cards>
             <ModCard
-              v-for="mod in sorted"
+              v-for="(mod, index) in sortMode ? dragList : sorted"
               :key="mod.id"
               :mod="mod"
-              :active="mod.id === selectedId"
+              :active="mod.id === selected?.id"
+              :order="sortMode ? index + 1 : undefined"
               :has-update="updateIds.has(mod.id)"
+              :sortable="sortMode"
               @select="selectMod"
               @toggled="handleCardToggled"
               @toggle-error="handleCardToggleError"
             />
-          </div>
-        </div>
-      </section>
+          </template>
+        </ModGrid>
+      </template>
 
-      <aside v-if="mode === 'local'" class="detail">
+      <!-- 右：详情面板 -->
+      <template #detail>
         <ModDetail
           v-if="selected"
           :mod="selected"
@@ -1447,11 +1014,14 @@ onBeforeUnmount(() => {
           {{ t("state.detailEmpty") }}<br />
           <span class="note">{{ t("state.detailEmptyNote") }}</span>
         </div>
-      </aside>
+      </template>
+    </PageShell>
 
+      <!-- 在线页：内部同样用 <PageShell>，这里不再套一层三栏容器 -->
       <!-- KeepAlive 缓存 OnlineBrowser 实例：切到本地再切回在线不会重新挂载、
            不会重新检查登录状态、也不会重新请求第一页。
-           筛选状态由顶栏通过 v-model 传入，组件内部无需自带工具栏。 -->
+           筛选状态由顶栏通过 v-model 传入；视图模式与卡片大小同样由顶层传入，
+           保证两个页面的网格/列表切换与缩放完全同步。 -->
       <KeepAlive>
         <OnlineBrowser
           v-if="mode === 'online'"
@@ -1459,14 +1029,20 @@ onBeforeUnmount(() => {
           v-model:query="onlineQuery"
           v-model:sort="onlineSort"
           v-model:order="onlineOrder"
+          :view-mode="viewMode"
+          :card-size="cardSize"
         />
       </KeepAlive>
 
+    <!-- ---------------------------------------------------------------
+         全局浮层：全部 position: fixed，不参与四层布局与三栏尺寸计算
+         --------------------------------------------------------------- -->
+    <template #overlay>
       <!-- 首次启动：探测失败/未设置时引导用户手动选择根目录 -->
       <FirstRunWizard
         v-if="showWizard"
-        @done="handleWizardDone"
-        @close="showWizard = false"
+        @done="scan.handleWizardDone"
+        @close="closeWizard"
       />
 
       <!-- v0.3：预设管理器（position: fixed 浮层，不影响三栏布局） -->
@@ -1474,13 +1050,9 @@ onBeforeUnmount(() => {
         v-if="showPresets"
         :mods="mods"
         :applied-id="lastAppliedPresetId"
-        @close="showPresets = false"
+        @close="closePresets"
         @applied="handlePresetApplied"
       />
-    </div>
-
-    <!-- v0.6：全局底部状态栏（账号灯 / 动态提示 / 代理与本地计数），始终显示 -->
-    <StatusBar :local-count="mods.length" :mode="mode" />
 
     <!-- v0.9：批量启用 / 禁用的二次确认（整批只写一次盘） -->
     <ConfirmDialog
@@ -1496,7 +1068,7 @@ onBeforeUnmount(() => {
       :busy="batchBusy"
       :error="batchError"
       @confirm="runBatchToggle"
-      @cancel="batchAsk = null"
+      @cancel="cancelBatch"
     />
 
     <!-- 放弃未保存排序的二次确认 -->
@@ -1506,11 +1078,48 @@ onBeforeUnmount(() => {
       :message="t('sort.discardMessage')"
       :confirm-label="t('sort.discardConfirm')"
       @confirm="discardSortChanges"
-      @cancel="showDiscardConfirm = false"
+      @cancel="cancelDiscardSort"
     />
 
-    <!-- v0.4：独立设置弹窗（通用 / 网络 / 关于） -->
-    <SettingsModal v-if="showSettings" @close="showSettings = false" />
+    <!-- v0.4：独立设置弹窗（通用 / 外观 / 网络 / 本地 / 在线 / 关于） -->
+    <SettingsModal
+      v-if="showSettings"
+      v-model:card-size="cardSize"
+      v-model:theme="theme"
+      v-model:ui-font-family="uiFontFamily"
+      v-model:ui-font-weight="uiFontWeight"
+      v-model:global-font-scale="globalFontScale"
+      v-model:reader-font-size="readerFontSize"
+      v-model:reader-line-height="readerLineHeight"
+      v-model:reader-font-weight="readerFontWeight"
+      v-model:card-font-size="cardFontSize"
+      :root-path="report?.root ?? ''"
+      @close="closeSettings"
+      @change-root="chooseRoot"
+    />
+
+    <!-- v3.1：新版本首启弹窗（lastSeenVersion ≠ 当前版本时只弹一次） -->
+    <div v-if="versionNotes" class="version-notes-backdrop" @click.self="dismissVersionNotes">
+      <div class="version-notes" role="dialog" aria-modal="true">
+        <header class="version-notes-head">
+          <h2>{{ t("versionNotes.title", { version: versionNotes.version }) }}</h2>
+          <span v-if="versionNotes.title !== `v${versionNotes.version}`" class="version-notes-sub">
+            {{ versionNotes.title }}
+          </span>
+        </header>
+        <div class="version-notes-body">
+          <div v-if="versionNotes.html" class="release-notes" v-html="versionNotes.html"></div>
+          <p v-else class="version-notes-fallback">
+            {{ t("versionNotes.fallback", { version: versionNotes.version }) }}
+          </p>
+        </div>
+        <footer class="version-notes-foot">
+          <button type="button" class="primary" @click="dismissVersionNotes">
+            {{ t("versionNotes.confirm") }}
+          </button>
+        </footer>
+      </div>
+    </div>
 
     <!-- 轻量提示（排序已保存等）：固定右下角，不挤压布局 -->
     <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
@@ -1525,10 +1134,89 @@ onBeforeUnmount(() => {
         class="update-toast-x"
         :title="t('update.dismiss')"
         :aria-label="t('update.dismiss')"
-        @click="updateNotice = null"
+        @click="update.dismissUpdateNotice()"
       >
         ✕
       </button>
     </div>
-  </div>
+    </template>
+  </AppShell>
 </template>
+
+<style scoped>
+/* ================= v2.0：列表抬头右侧的批量操作组 =================
+   全局 .content-head 是「定高 + nowrap + overflow: hidden」的一行（防止分类名长短
+   让卡片区上下跳），因此这里把四个按钮统一压一档字号与内边距：
+   无论窗口多窄，它们都只占右侧一小块，绝不会把抬头撑高或把提示文字顶出可视区。 */
+.content-head .batch-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  align-self: center;
+  gap: 6px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.batch-actions .batch-btn {
+  padding: 4px 9px;
+  /* v2.4：批量操作按钮属于界面层，跟随全局缩放 */
+  font-size: calc(11px * var(--global-scale));
+  line-height: 1.45;
+  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* 窗口较窄（三栏被挤）时允许抬头换成两行：标题 + 提示一行，操作组整体落到右下角。
+   .content-head 默认是 nowrap 的一行（定高防跳），这里只在窄屏放开。 */
+@media (max-width: 1180px) {
+  .content-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+}
+
+/* 预设管理器：金色描边（原顶栏 .preset-entry 的视觉，按新容器重写一遍） */
+.batch-actions .batch-btn.preset-entry {
+  color: var(--gold-text);
+  border-color: var(--gold-dim);
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-hover));
+  letter-spacing: 1px;
+}
+
+/* 批量启用 / 禁用：绿色 / 红色描边（沿用 v0.9 的一套配色） */
+.batch-actions .batch-btn.batch-enable,
+.batch-actions .batch-btn.batch-disable {
+  letter-spacing: 1px;
+}
+.batch-actions .batch-btn.batch-enable {
+  color: var(--ok-text-strong);
+  border-color: rgba(var(--ok-rgb), 0.5);
+  background: linear-gradient(180deg, var(--ok-surface-top), var(--ok-surface-bottom));
+}
+.batch-actions .batch-btn.batch-enable:hover:not(:disabled) {
+  color: var(--ok-text-strong);
+  border-color: rgba(var(--ok-rgb), 0.85);
+  background: linear-gradient(180deg, var(--ok-surface-top), var(--ok-surface-bottom));
+}
+.batch-actions .batch-btn.batch-disable {
+  color: var(--danger-text);
+  border-color: rgba(var(--danger-rgb), 0.5);
+  background: linear-gradient(180deg, var(--danger-surface-top), var(--danger-surface-bottom));
+}
+.batch-actions .batch-btn.batch-disable:hover:not(:disabled) {
+  color: var(--danger-text-strong);
+  border-color: rgba(var(--danger-rgb), 0.85);
+  background: linear-gradient(180deg, var(--danger-surface-top), var(--danger-surface-bottom));
+}
+
+/* 排序模式：同色系切换态 */
+.batch-actions .batch-btn.sort-toggle.active {
+  color: var(--text-on-accent);
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  border-color: var(--gold-dim);
+}
+
+
+</style>

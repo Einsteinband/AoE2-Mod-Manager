@@ -1115,9 +1115,14 @@ fn priority_key(raw: &str) -> Result<String, String> {
 
 /// 把前端拖拽后的顺序写进 `mod-status.json` 的 `Priority`：1, 2, 3… 连续且不重复。
 ///
+/// v1.2 起 `ordered` **只包含已启用的模组**（未启用模组不参与加载优先级）：
+/// 提交的这些记录按新顺序拿到 Priority 1..N，并被物理移动到 `Mods` 数组最前面；
+/// 其余记录（= 未启用模组）统一接在后面，Priority 从 N+1 顺延。
+/// 数组顺序与 Priority 保持严格一致，游戏侧读到哪一份都得到同一个加载顺序。
+///
 /// 校验：数组非空 → 每个 ID 合法 → 数组内不重复 → 每条都能在 mod-status.json 找到记录。
 /// 任一项不通过就直接报错，此时 `update_status` 保证**完全没有写盘**。
-/// 列表之外的记录（磁盘上已消失、前端扫描不到）不丢弃，按原有相对顺序排在末尾，
+/// 列表之外的记录不丢弃：按原有 Priority 升序（缺省视为最大）稳定地排在末尾，
 /// 这样 Priority 永远是 1..n 的连续整数，游戏不会遇到空档或并列。
 /// 其余字段（CheckSum / Enabled / LastUpdate / Unsub…）一律原样透传。
 pub fn reorder_priority(
@@ -1179,10 +1184,21 @@ pub fn reorder_priority(
                 in_list.insert(index);
             }
         }
+        // 未参与本次提交的记录（= 未启用模组）：按原有 Priority 升序稳定地接在后面，
+        // 保证「启用在前、未启用在后」两段顺序都是确定的，每次保存结果可复现。
+        let mut rest: Vec<(i64, usize)> = Vec::new();
         for index in 0..mods.len() {
             if in_list.contains(&index) {
                 continue;
             }
+            let priority = mods[index]
+                .get("Priority")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(i64::MAX);
+            rest.push((priority, index));
+        }
+        rest.sort_by_key(|(priority, index)| (*priority, *index));
+        for (_, index) in rest {
             let path = mods[index]
                 .get("Path")
                 .and_then(|p| p.as_str())
@@ -1196,20 +1212,31 @@ pub fn reorder_priority(
 
         total = final_order.len();
         let mut changed = false;
+        // 物理重排 Mods 数组 + 逐条写 Priority：数组顺序与 Priority 永远一致
+        let mut reordered: Vec<Value> = Vec::with_capacity(final_order.len());
         for (slot, index) in final_order.iter().enumerate() {
             let target = (slot + 1) as i64;
-            let record = &mut mods[*index];
-            if record.get("Priority").and_then(|v| v.as_i64()) == Some(target) {
-                continue;
-            }
-            if let Some(obj) = record.as_object_mut() {
-                obj.insert("Priority".to_string(), Value::from(target));
-                changed = true;
-                if slot < wanted.len() {
-                    updated += 1;
+            let mut record = mods[*index].clone();
+            if record.get("Priority").and_then(|v| v.as_i64()) != Some(target) {
+                if let Some(obj) = record.as_object_mut() {
+                    obj.insert("Priority".to_string(), Value::from(target));
+                    changed = true;
+                    if slot < wanted.len() {
+                        updated += 1;
+                    }
                 }
             }
+            reordered.push(record);
         }
+        // 数组顺序本身变了（启用项被提到前面）也算改动，必须落盘
+        if final_order
+            .iter()
+            .enumerate()
+            .any(|(slot, index)| slot != *index)
+        {
+            changed = true;
+        }
+        *mods = reordered;
         Ok(((), changed))
     })?;
 
@@ -1877,14 +1904,25 @@ mod tests {
 
         let value: Value = serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
         let mods = value["Mods"].as_array().unwrap();
-        assert_eq!(mods[2]["Priority"], serde_json::json!(1), "local 被拖到第一位");
-        assert_eq!(mods[0]["Priority"], serde_json::json!(2));
-        assert_eq!(mods[1]["Priority"], serde_json::json!(3), "未提交的记录排在末尾");
+        // v1.2：数组本身也按新顺序重排，启用项物理前置
+        assert_eq!(
+            mods[0]["Path"],
+            Value::String("local//9_Local".to_string()),
+            "local 被拖到第一位"
+        );
+        assert_eq!(mods[0]["Priority"], serde_json::json!(1));
+        assert_eq!(mods[1]["Priority"], serde_json::json!(2));
+        assert_eq!(
+            mods[2]["Path"],
+            Value::String("subscribed//38825_B".to_string()),
+            "未提交的记录排在末尾"
+        );
+        assert_eq!(mods[2]["Priority"], serde_json::json!(3));
         // Priority 之外一切原样透传
-        assert_eq!(mods[0]["Enabled"], Value::Bool(false));
-        assert_eq!(mods[0]["CheckSum"], Value::String("3591523155".to_string()));
-        assert_eq!(mods[0]["Extra"], serde_json::json!({"Keep": 1}));
-        assert_eq!(mods[2]["Enabled"], Value::Bool(true));
+        assert_eq!(mods[1]["Enabled"], Value::Bool(false));
+        assert_eq!(mods[1]["CheckSum"], Value::String("3591523155".to_string()));
+        assert_eq!(mods[1]["Extra"], serde_json::json!({"Keep": 1}));
+        assert_eq!(mods[0]["Enabled"], Value::Bool(true));
         assert_eq!(value["Unsub"], serde_json::json!(["999"]));
 
         let _ = fs::remove_dir_all(&dir);

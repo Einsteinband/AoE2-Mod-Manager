@@ -25,6 +25,19 @@ export function sessionStatus(): Promise<SessionStatus> {
   return invoke<SessionStatus>("online_session_status");
 }
 
+/**
+ * 启动期会话检查：持久登录开关关闭时，Rust 侧探测不到有效会话会自己用隐藏窗口
+ * 跑一次静默 SSO（自带 25s 上限），成功/失败都只返回状态，不抛错。
+ */
+export function startupSession(): Promise<SessionStatus> {
+  return invoke<SessionStatus>("online_startup_session");
+}
+
+/** 记住登录 7 天开关：只写配置，Cookie 门控在 Rust 侧 */
+export function setRememberLogin(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_remember_login", { enabled });
+}
+
 /** 诊断：显式创建隐藏会话窗口并回读 Cookie 数量（返回文本，不含任何令牌） */
 export function probeAccountWindow(): Promise<string> {
   return invoke<string>("online_probe_account_window");
@@ -286,6 +299,18 @@ export function indexStatus(): Promise<IndexStatus> {
  */
 export function indexSync(): Promise<IndexSyncReport> {
   return invoke<IndexSyncReport>("online_index_sync");
+}
+
+/**
+ * 暂停 / 继续本地索引。
+ *
+ * - `paused = true`：只置暂停标记，同步线程在「当前这一页」完成后收手并保留分区游标；
+ * - `paused = false`：清标记 + 后台线程从已落盘的游标续爬（不等它跑完，立即返回）。
+ *
+ * 两者都立即返回最新状态，前端直接拿返回值覆盖 `indexStatus` 即可。
+ */
+export function indexPause(paused: boolean): Promise<IndexStatus> {
+  return invoke<IndexStatus>("online_index_pause", { paused });
 }
 
 export interface IndexSearchParams {

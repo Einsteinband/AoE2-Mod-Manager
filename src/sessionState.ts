@@ -8,7 +8,8 @@
  *   在线页 watch 它做静默刷新，不需要登录成功回调层层往上抛。
  */
 import { ref } from "vue";
-import { sessionStatus } from "./online/service";
+import { listen } from "@tauri-apps/api/event";
+import { clearLoginCache, sessionStatus, startupSession } from "./online/service";
 import { translate } from "./i18n";
 import { translateBackendMessage } from "./format";
 import type { SessionStatus } from "./online/types";
@@ -22,6 +23,12 @@ export const sessionInfo = ref<SessionStatus | null>(null);
 export const sessionError = ref<string | null>(null);
 /** 登录态确认有效的次数；**只在 离线/校验中 → 在线 这一跳 +1**，在线页 watch 它静默刷新 */
 export const sessionEpoch = ref(0);
+/**
+ * 会话代际（v1.5）：退出登录成功就 +1。
+ * 退出前一瞬发出去的探测请求晚一点回来时，代际已变 → 结果一律丢弃，
+ * 避免“刚退出、灯又变绿”的横跳，也让进行中的在线请求自然作废。
+ */
+export const sessionGeneration = ref(0);
 /** 用户明确要求重刷列表时 +1（底栏「立即重新校验」成功后推一次） */
 export const manualRefreshNonce = ref(0);
 /** 底栏中间那行动态提示（“已从缓存加载” / “正在请求网络数据…” 等） */
@@ -30,6 +37,8 @@ export const lastCheckedMs = ref(0);
 
 /** 单次探测上限：超过就当作离线，绝不让界面挂在「检查中」 */
 const CHECK_TIMEOUT_MS = 20_000;
+/** 启动兜底上限：Rust 侧静默重登自带 25s 预算，这里再宽一点做最后兜底 */
+const STARTUP_TIMEOUT_MS = 45_000;
 let inflight: Promise<boolean> | null = null;
 
 function describe(e: unknown): string {
@@ -111,21 +120,23 @@ export function markUnauthenticated(reason: string | null = null): void {
 }
 
 /**
- * 静默校验登录态（复用 Rust 的 `online_session_status`，含 DPAPI 缓存回退）。
- *
- * @param force true = 用户显式要求（点底栏「重新校验」/ 登录轮询），否则在线态直接复用结果
- * @returns 是否已登录
+ * 共用探测器：`ensureSession` 与启动兜底走同一条路径，
+ * 保证并发去重、超时、epoch 递增语义完全一致。
  */
-export function ensureSession(force = false): Promise<boolean> {
-  if (inflight) return inflight;
-  if (!force && sessionPhase.value === "online") return Promise.resolve(true);
-
+function runSessionCheck(
+  task: () => Promise<SessionStatus>,
+  timeoutMs: number,
+  waitingMessage: string,
+): Promise<boolean> {
+  const generation = sessionGeneration.value;
   sessionPhase.value = "checking";
-  statusMessage.value = translate("statusbar.checking");
+  statusMessage.value = waitingMessage;
 
   inflight = (async () => {
     try {
-      const status = await withTimeout(sessionStatus(), CHECK_TIMEOUT_MS);
+      const status = await withTimeout(task(), timeoutMs);
+      // 等结果的这段时间里用户退出了登录：这次结果作废，绝不把灯点回绿色
+      if (generation !== sessionGeneration.value) return false;
       sessionInfo.value = status;
       sessionError.value = status.error ?? null;
       lastCheckedMs.value = Date.now();
@@ -138,13 +149,91 @@ export function ensureSession(force = false): Promise<boolean> {
       statusMessage.value = translate("statusbar.offlineHint");
       return false;
     } catch (e) {
+      if (generation !== sessionGeneration.value) return false;
       markOffline(describe(e));
       statusMessage.value = translate("statusbar.offlineHint");
       return false;
     } finally {
-      inflight = null;
+      if (generation === sessionGeneration.value) inflight = null;
     }
   })();
 
   return inflight;
+}
+
+/**
+ * 退出登录（或后端宣告会话结束）后的**本地状态归零**（v1.5）：
+ * - `sessionInfo` 置 null，底栏立刻变 ⚪；
+ * - `sessionGeneration` +1 → 所有进行中的探测结果全部作废；
+ * - `inflight` 置 null，下一次校验重新计。
+ */
+export function markLoggedOut(reason: string | null = null): void {
+  sessionGeneration.value += 1;
+  inflight = null;
+  sessionInfo.value = null;
+  sessionPhase.value = "offline";
+  sessionError.value = reason;
+  lastCheckedMs.value = Date.now();
+  statusMessage.value = "";
+}
+
+/**
+ * 退出登录：清本机凭证 + 立刻把前端状态归零。
+ *
+ * **失败必须如实抛出**：后端会返回“退出登录失败：文件被占用，请重启软件后清理”，
+ * 调用方拿到 Err 就必须显示失败，绝不能在失败时也说“已退出登录”。
+ */
+export async function logoutAndClearSession(): Promise<string> {
+  try {
+    const text = await clearLoginCache();
+    markLoggedOut(null);
+    return text;
+  } catch (e) {
+    const message = describe(e);
+    // 清空失败：保持离线态并把真实原因交给调用方显示
+    markLoggedOut(message);
+    throw new Error(message);
+  }
+}
+
+/**
+ * 后端退出登录 / 中止索引时会广播 `online://index-cancelled`
+ * （Rust：`online_index::CANCEL_EVENT`）。不管退出是从哪个入口触发的，
+ * 这里都立刻把登录态归零，底栏不会继续挂着绿灯。
+ */
+void listen("online://index-cancelled", () => {
+  markLoggedOut(null);
+}).catch(() => undefined);
+
+/**
+ * 启动期登录态检查（默认关闭持久登录时的兜底）。
+ *
+ * 与 `ensureSession` 唯一区别：走 Rust 的 `online_startup_session`，
+ * 那边在 `remember_login=false` 且无有效会话时会自己用隐藏窗口跑一次静默重登（≤ 25s）。
+ * 同样**不 await 在渲染路径上**，界面先出、底栏文案先显示「正在恢复登录…」。
+ */
+export function ensureStartupSession(): Promise<boolean> {
+  if (inflight) return inflight;
+  if (sessionPhase.value === "online") return Promise.resolve(true);
+  return runSessionCheck(
+    () => startupSession(),
+    STARTUP_TIMEOUT_MS,
+    translate("statusbar.restoring"),
+  );
+}
+
+/**
+ * 静默校验登录态（复用 Rust 的 `online_session_status`，含 DPAPI 缓存回退）。
+ *
+ * @param force true = 用户显式要求（点底栏「重新校验」/ 登录轮询），否则在线态直接复用结果
+ * @returns 是否已登录
+ */
+export function ensureSession(force = false): Promise<boolean> {
+  if (inflight) return inflight;
+  if (!force && sessionPhase.value === "online") return Promise.resolve(true);
+  return runSessionCheck(
+    () => sessionStatus(),
+    CHECK_TIMEOUT_MS,
+    translate("statusbar.checking"),
+  );
 }

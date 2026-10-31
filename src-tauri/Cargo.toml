@@ -1,6 +1,6 @@
 [package]
 name = "aoe2-mod-manager"
-version = "0.3.2"
+version = "0.3.4"
 description = "AoE2 DE Mod Manager (read-only prototype)"
 authors = ["AoE2 Mod Manager"]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -34,6 +34,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Windows 专用：读系统代理（WinINET 注册表）+ DPAPI 加密会话缓存。
 # 0.61.2 已在本项目 Cargo.lock / 本地 registry 里，不需要额外下载。
 [target.'cfg(windows)'.dependencies]
+# 强制把会话 Cookie 改成持久 Cookie（CopyCookie + SetExpires + AddOrUpdateCookie）
+# 版本锁死 =0.39.1：必须与 tauri 2.12.5 依赖的 wry 0.57.1 完全一致，
+# 否则 COM 接口类型不同源，编译期直接报错。
+webview2-com = "=0.39.1"
+# 同上配套：Cast 到 ICoreWebView2_2 才能拿到 CookieManager（windows-core 版本必须跟 webview2-com 一致）
+windows-core = "0.62"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Registry",

@@ -70,7 +70,15 @@ fn client(app: &tauri::AppHandle) -> Result<ApiClient, ApiFailure> {
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> models::Settings {
     match settings_path(&app) {
-        Ok(path) => settings::load(&path),
+        Ok(path) => {
+            let mut current = settings::load(&path);
+            // v2.4：老 settings.json 里的扁平排版字段一次性搬进 reader_*，
+            // 顺手把迁移结果写回（写盘失败不影响本次读取，迁移本身可重复执行）。
+            if current.migrate_legacy_typography() {
+                let _ = settings::save(&path, &current);
+            }
+            current
+        }
         Err(_) => models::Settings::default(),
     }
 }
@@ -129,6 +137,145 @@ async fn check_update_auto(app: tauri::AppHandle) -> Result<Option<update::Updat
         .await
         .map_err(|e| format!("更新检查线程异常：{e}"))?
 }
+// ---------------- v3.1：GitHub Releases 全量列表（更新历史 / 首启「新版本特性」） ----------------
+
+/// 公开仓库的 Releases 列表：匿名可读（60 次/小时）；
+/// **必须带 User-Agent**，否则 GitHub 直接 403。
+const RELEASES_LIST_URL: &str =
+    "https://api.github.com/repos/Einsteinband/AoE2-Mod-Manager/releases?per_page=30";
+
+/// 单条 Release 的精简视图：只给前端需要的字段，body 原样返回（Markdown 交给前端渲染）
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GithubRelease {
+    /// 原始 tag（如 v0.3.3）
+    tag_name: String,
+    /// 去掉 v 前缀的版本号（如 0.3.3）：前端用它和 appVersion 比对
+    version: String,
+    /// Release 标题（缺省回落到 tag）
+    name: String,
+    /// 更新说明（Markdown 原文，可能为空）
+    body: String,
+    /// ISO8601 发布时间
+    published_at: String,
+    /// Release 页面地址（只放行 github.com）
+    html_url: String,
+    /// 是否就是当前运行版本
+    is_current: bool,
+}
+
+/// 去掉 tag 的 v 前缀并 trim，仅用于版本比对
+fn normalize_version_tag(value: &str) -> String {
+    value.trim().trim_start_matches(['v', 'V']).trim().to_string()
+}
+
+/// 拉取 Releases 列表（阻塞；调用方放进 spawn_blocking）
+fn fetch_releases_blocking(proxy: Option<ureq::Proxy>) -> Result<Vec<GithubRelease>, String> {
+    // GitHub 强制要求 User-Agent：Agent 级挂一次，单个请求再挂一次，两条路径都不会漏
+    let user_agent = format!("AoE2ModManager/{} (Windows)", update::current_version());
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(15))
+        .user_agent(&user_agent);
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(proxy);
+    }
+    let agent = builder.build();
+
+    let response = agent
+        .get(RELEASES_LIST_URL)
+        .set("User-Agent", &user_agent)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let text = resp.into_string().unwrap_or_default();
+                let message = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("message")
+                            .and_then(|m| m.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| format!("GitHub 返回 {code}"));
+                format!("获取更新历史失败：{message}")
+            }
+            ureq::Error::Transport(t) => format!("获取更新历史失败：{t}"),
+        })?;
+
+    let raw = response
+        .into_string()
+        .map_err(|e| format!("读取 GitHub 响应失败：{e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("GitHub 响应不是合法 JSON：{e}"))?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "GitHub 响应不是 Release 数组".to_string())?;
+
+    let current = normalize_version_tag(&update::current_version());
+    let mut releases: Vec<GithubRelease> = items
+        .iter()
+        .filter(|item| item.get("draft").and_then(|v| v.as_bool()) != Some(true))
+        .map(|item| {
+            let tag = item
+                .get("tag_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let version = normalize_version_tag(&tag);
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| tag.clone());
+            GithubRelease {
+                is_current: !version.is_empty() && version == current,
+                tag_name: tag,
+                version,
+                name,
+                body: item
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                published_at: item
+                    .get("published_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                html_url: item
+                    .get("html_url")
+                    .and_then(|v| v.as_str())
+                    .filter(|url| url.starts_with("https://github.com/"))
+                    .unwrap_or(update::REPO_URL)
+                    .to_string(),
+            }
+        })
+        .filter(|release| !release.tag_name.is_empty())
+        .collect();
+
+    // 时间倒序：ISO8601 字符串按字典序比较即可（同一天内同样成立）
+    releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    Ok(releases)
+}
+
+/// 更新历史：设置页「关于」与启动首启弹窗共用。
+/// 前端绝不直连 GitHub API（跨域会被 CORS 拦），一律走这里。
+#[tauri::command]
+async fn fetch_github_releases(app: tauri::AppHandle) -> Result<Vec<GithubRelease>, String> {
+    let settings = settings::load_for_app(&app);
+    let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
+        .map_err(|e| format!("网络配置无效：{e}"))?;
+    let proxy = net::ureq_proxy(&resolved).map_err(|e| format!("代理配置无效：{e}"))?;
+
+    tauri::async_runtime::spawn_blocking(move || fetch_releases_blocking(proxy))
+        .await
+        .map_err(|e| format!("更新历史线程异常：{e}"))?
+}
+
 // ---------------- v0.4：本地模组批量更新检测 ----------------
 
 /// 批量检查本地模组是否有新版本。
@@ -378,6 +525,79 @@ async fn online_session_status(app: tauri::AppHandle) -> SessionStatus {
     }
 }
 
+/// 启动期会话检查（持久登录默认关闭时的兜底）。
+///
+/// 顺序：`probe_session`（只读现有 Cookie）→ 未登录且 `remember_login=false`
+/// → 后台跑一次 `ensure_session`（隐藏窗口静默 SSO，自带 25s 上限）。
+/// 整个流程都在阻塞线程里，命令只把结果交给前端底栏，不阻塞首屏。
+#[tauri::command]
+async fn online_startup_session(app: tauri::AppHandle) -> SessionStatus {
+    let handle = app.clone();
+    let checked = tauri::async_runtime::spawn_blocking(move || -> SessionStatus {
+        let remember = settings::load_for_app(&handle).remember_login;
+        log::info!(target: "startup", "启动会话检查：remember_login={remember}");
+        match online::session::probe_session(&handle) {
+            Ok(probe) => {
+                let count = probe.header.split(';').count();
+                log::info!(
+                    target: "startup",
+                    "启动会话检查：已有可用会话（来源={} Cookie 数={}），无需静默重登",
+                    probe.source.as_str(),
+                    count
+                );
+                SessionStatus {
+                    logged_in: true,
+                    cookie_count: count,
+                    window_ready: probe.source == online::session::SessionSource::Webview,
+                    storage: storage_note(probe.source),
+                    cookie_source: Some(probe.source.as_str().to_string()),
+                    error: None,
+                }
+            }
+            Err(e) if remember => {
+                // 开关开着却探测不到：持久 Cookie 已失效，交给用户手动登录
+                log::info!(
+                    target: "startup",
+                    "启动会话检查：无有效会话（remember_login=true，不自动重登）：{e}"
+                );
+                session_status_logged_out(Some(e))
+            }
+            Err(e) => {
+                log::info!(
+                    target: "startup",
+                    "启动会话检查：无有效会话（{e}），开始隐藏窗口静默重登"
+                );
+                match online::session::ensure_session(&handle) {
+                    Ok(header) => {
+                        let count = header.split(';').count();
+                        log::info!(target: "startup", "启动静默重登成功（Cookie 数={count}）");
+                        SessionStatus {
+                            logged_in: true,
+                            cookie_count: count,
+                            window_ready: true,
+                            storage: storage_note(online::session::SessionSource::Webview),
+                            cookie_source: Some(
+                                online::session::SessionSource::Webview.as_str().to_string(),
+                            ),
+                            error: None,
+                        }
+                    }
+                    Err(e2) => {
+                        log::info!(target: "startup", "启动静默重登失败，改为提示手动登录：{e2}");
+                        session_status_logged_out(Some(e2))
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    match checked {
+        Ok(status) => status,
+        Err(e) => session_status_logged_out(Some(format!("会话线程异常：{e}"))),
+    }
+}
+
 /// 打开登录窗口。`platform` = "steam" | "microsoft" | "psn"。
 ///
 /// 默认地址 auth.ageofempires.com 会 302 到微软，这是官方行为；要选 Steam 就必须
@@ -392,7 +612,7 @@ async fn online_open_login(app: tauri::AppHandle, platform: Option<String>) -> R
     };
     log::info!(target: "account-window", "前端请求打开登录窗口 platform={key} url={url}");
     // 主动登录意味着旧会话已失效，先丢掉缓存，避免"假登录态"
-    online::session::invalidate_cached_session(&app);
+    let _ = online::session::invalidate_cached_session(&app);
     let window = online::session::ensure_account_window(&app, url, true)?;
     let _ = window.show();
     let _ = window.unminimize();
@@ -600,6 +820,33 @@ async fn set_network_settings(
     .await;
 
     Ok(network_view(&app, &settings))
+}
+
+/// 「记住登录 7 天」开关：**只做存储**，不触发任何 Cookie/登录逻辑。
+/// 真正的门控在 `session.rs` 的 `persist_auth_cookies` 调用处读同一个字段。
+#[tauri::command]
+fn set_remember_login(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let mut settings = settings::load_for_app(&app);
+    if settings.remember_login != enabled {
+        settings.remember_login = enabled;
+        settings::save_for_app(&app, &settings)?;
+        log::info!(
+            target: "settings",
+            "记住登录开关已写入 settings.json：remember_login={enabled}"
+        );
+    }
+    // 关闭时顺手清掉旧的 DPAPI 会话缓存，避免“开关关了、磁盘上还留着凭证”
+    if !enabled {
+        if let Ok(path) = settings::session_cache_for(&app) {
+            if path.exists() {
+                match secure::clear(&path) {
+                    Ok(()) => log::info!(target: "settings", "记住登录已关闭，旧会话缓存已删除"),
+                    Err(e) => log::warn!(target: "settings", "删除旧会话缓存失败：{e}"),
+                }
+            }
+        }
+    }
+    Ok(enabled)
 }
 
 /// 退出登录：只在用户显式点击时执行，清空 WebView2 数据目录与加密会话缓存
@@ -916,6 +1163,25 @@ async fn online_index_sync(app: tauri::AppHandle) -> Result<online_index::SyncRe
         .map_err(|e| ApiFailure::new("internal", format!("索引任务失败：{e}"), None))?
 }
 
+/// 暂停 / 继续本地索引。
+/// `paused=true`：只置暂停标记，同步线程在「当前这一页」完成后收手并保留分区游标；
+/// `paused=false`：清标记并立刻丢一个后台线程续爬（**不等它跑完**，否则 invoke 会被
+/// 卡住好几分钟），从已落盘的游标接着爬。两者都立即返回最新状态。
+#[tauri::command]
+async fn online_index_pause(app: tauri::AppHandle, paused: bool) -> online_index::IndexStatus {
+    if paused {
+        online_index::request_pause();
+    } else {
+        online_index::clear_pause_request();
+        // 后台线程：reason="resume" → scan 里 force=true，强制跳过 24h / 7d 新鲜度闸门
+        online_index::spawn_resume(app.clone());
+    }
+    let probe = app.clone();
+    tauri::async_runtime::spawn_blocking(move || online_index::status_for_app(&probe))
+        .await
+        .unwrap_or_default()
+}
+
 /// 本地混合搜索：索引 + 本地译文标题，**一个网络请求都不发**。
 /// 中文查询由前端拦截到这里；英文查询仍然走 `online_find`。
 #[tauri::command]
@@ -986,6 +1252,73 @@ async fn set_enable_local_search(app: tauri::AppHandle, enabled: bool) -> Result
     current.enable_local_search = enabled;
     settings::save(&path, &current)?;
     Ok(enabled)
+}
+
+/// v1.6：本地列表的视图偏好（"grid" 大图 / "list" 紧凑 + 卡片宽度）。
+///
+/// 只写界面偏好：非法 view_mode 一律当成 grid，card_size 取整到 20 的倍数并夹进 160..=320，
+/// 不报错、不动扫描结果、不触发重扫（前端拖滑块时可以放心调用）。
+#[tauri::command]
+async fn set_view_prefs(
+    app: tauri::AppHandle,
+    view_mode: String,
+    card_size: u32,
+) -> Result<models::Settings, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    current.view_mode = if view_mode == models::VIEW_MODE_LIST {
+        models::VIEW_MODE_LIST.to_string()
+    } else {
+        models::VIEW_MODE_GRID.to_string()
+    };
+    current.card_size = models::clamp_card_size(card_size);
+    settings::save(&path, &current)?;
+    Ok(current)
+}
+
+/// v2.2：界面主题（"dark" 深色羊皮纸 / "light" 明亮米白）。
+///
+/// 只写界面偏好：非法值一律归一化成 dark，不报错、不动扫描结果、不触发重扫
+/// （前端切换后可以立即调用，写盘失败由前端提示，不回滚界面）。
+#[tauri::command]
+async fn set_theme(app: tauri::AppHandle, theme: String) -> Result<models::Settings, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    current.theme = models::normalize_theme(&theme);
+    settings::save(&path, &current)?;
+    Ok(current)
+}
+
+/// v3.0：批量保存排版偏好 —— 三个层级一次性落盘（界面 / 正文阅读 / 卡片列表）。
+///
+/// 所有值在这里统一归一化：字体种类只认 hei / youyuan / system（v2.4 旧值静默改写）、
+/// 缩放夹进 80..=150、正文 12..=24、卡片 10..=16，行距取最近一档（1.4 / 1.6 / 1.8），
+/// 界面与正文字重都以 600 为界归到 400 / 700。
+/// 不报错、不动扫描结果、不触发重扫；写盘失败由前端提示，不回滚界面。
+#[tauri::command]
+async fn save_typography_prefs(
+    app: tauri::AppHandle,
+    ui_font_family: String,
+    ui_font_weight: u32,
+    global_font_scale: u32,
+    reader_font_size: u32,
+    reader_line_height: f32,
+    reader_font_weight: u32,
+    card_font_size: u32,
+) -> Result<models::Settings, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    // 先排干 v2.3 遗留字段，避免它们在新值之后又被迁移逻辑覆盖
+    current.migrate_legacy_typography();
+    current.ui_font_family = models::normalize_ui_font_family(&ui_font_family);
+    current.ui_font_weight = models::normalize_ui_font_weight(ui_font_weight);
+    current.global_font_scale = models::clamp_global_font_scale(global_font_scale);
+    current.reader_font_size = models::clamp_reader_font_size(reader_font_size);
+    current.reader_line_height = models::normalize_reader_line_height(reader_line_height);
+    current.reader_font_weight = models::normalize_reader_font_weight(reader_font_weight);
+    current.card_font_size = models::clamp_card_font_size(card_font_size);
+    settings::save(&path, &current)?;
+    Ok(current)
 }
 
 /// 清空索引（设置 → 缓存）。下次启动会在后台自动重建，不会丢用户数据。
@@ -1743,6 +2076,14 @@ fn open_mod_webpage(mod_id: i64) -> Result<String, String> {
 /// 因此必须自己把关：强制 https + 主机名白名单，避免前端被注入 file:// / javascript: 之类。
 #[tauri::command]
 fn open_external(url: String) -> Result<String, String> {
+    // 蓝奏云网盘（备用下载）：子域名会变（wwblm / pan / 任意前缀），只能按域名后缀放行（仍是精确后缀，不是任意 https）
+    const ALLOWED_HOST_SUFFIXES: [&str; 5] = [
+        "lanzouv.com",
+        "lanzou.com",
+        "lanzoui.com",
+        "lanzoux.com",
+        "lanzoub.com",
+    ];
     const ALLOWED_HOSTS: [&str; 4] = [
         "github.com",
         "www.github.com",
@@ -1760,7 +2101,14 @@ fn open_external(url: String) -> Result<String, String> {
         .next()
         .unwrap_or("")
         .to_string();
-    if host.is_empty() || !ALLOWED_HOSTS.contains(&host.as_str()) {
+    if host.is_empty() {
+        return Err(format!("不在白名单内的域名（{host}），已拒绝打开"));
+    }
+    let allowed = ALLOWED_HOSTS.contains(&host.as_str())
+        || ALLOWED_HOST_SUFFIXES
+            .iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")));
+    if !allowed {
         return Err(format!("不在白名单内的域名（{host}），已拒绝打开"));
     }
 
@@ -1919,6 +2267,7 @@ async fn batch_toggle_mods(
 
 /// 把拖拽后的顺序写进 mod-status.json 的 Priority（1..n 连续）。
 /// `ordered` 是前端 `ModEntry.id` 数组（`local:目录名`），不是 WorkshopID——本地模组的 WorkshopID 常为 0。
+/// v1.2：`ordered` 只传**已启用**的模组；它们被物理前置并拿到 1..N，未启用模组接在后面 N+1.. 顺延。
 /// 链路与预设完全一致：游戏进程检测 → 备份 → 只改 Priority → 原子替换 → 回读校验（失败自动回滚）。
 #[tauri::command]
 async fn update_mod_priority(
@@ -1992,6 +2341,7 @@ pub fn run() {
             app_version,
             check_update,
             check_update_auto,
+            fetch_github_releases,
             check_mod_updates,
             candidate_roots,
             detect_root_candidates,
@@ -1999,6 +2349,7 @@ pub fn run() {
             set_mod_root,
             mod_stats,
             online_session_status,
+            online_startup_session,
             online_login_targets,
             online_open_login,
             online_open_login_silent,
@@ -2007,6 +2358,7 @@ pub fn run() {
             online_probe_account_window,
             get_network_settings,
             set_network_settings,
+            set_remember_login,
             online_clear_login_cache,
             online_find,
             online_tags,
@@ -2022,10 +2374,14 @@ pub fn run() {
             online_cache_stat,
             online_index_status,
             online_index_sync,
+            online_index_pause,
             online_index_search,
     search_local_mods,
     set_enable_indexing,
     set_enable_local_search,
+    set_view_prefs,
+    set_theme,
+    save_typography_prefs,
             online_index_clear,
             online_titles_translate_start,
             online_titles_translate_stop,

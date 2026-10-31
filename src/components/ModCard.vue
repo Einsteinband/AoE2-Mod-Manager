@@ -23,6 +23,8 @@ const emit = defineEmits<{
   (event: "toggled", payload: { id: string; enabled: boolean }): void;
   /** 写入失败 / 未登记：由父组件统一弹 Toast */
   (event: "toggle-error", message: string): void;
+  /** 数据模组的启用请求：互斥裁决在父组件，卡片自己不动磁盘 */
+  (event: "request-enable", payload: { id: string }): void;
 }>();
 
 const { t } = useI18n();
@@ -81,6 +83,11 @@ async function toggleEnabled(event: MouseEvent) {
     return;
   }
   const target = props.mod.enabled !== true;
+  // 数据模组：游戏同一时间只能加载一个，启用前必须交给父组件做互斥裁决
+  if (target && props.mod.isDataMod) {
+    emit("request-enable", { id: props.mod.id });
+    return;
+  }
   toggling.value = true;
   try {
     const result = await toggleModEnabled(
@@ -125,14 +132,20 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
       <span v-if="hasUpdate" class="update-badge" :title="t('card.updateBadgeHint')">
         {{ t("card.updateBadge") }}
       </span>
-      <span class="source-badge" :class="mod.source" :title="sourceHint(mod.source)">
-        {{ sourceLabel(mod.source) }}
-      </span>
+      <div class="thumb-badges">
+        <span class="source-badge" :class="mod.source" :title="sourceHint(mod.source)">
+          {{ sourceLabel(mod.source) }}
+        </span>
+        <span v-if="mod.isDataMod" class="data-badge" :title="t('card.dataModBadgeHint')">
+          {{ t("card.dataModBadge") }}
+        </span>
+      </div>
     </div>
     <div class="card-body">
       <div class="card-title" :title="title">{{ title }}</div>
       <div v-if="sub" class="card-sub" :title="mod.displayName">📝 {{ mod.displayName }}</div>
       <div class="card-meta status-row">
+        <span v-if="mod.isDataMod" class="data-mark" :title="t('card.dataModBadgeHint')">⚙️</span>
         <span
           class="card-toggle"
           :class="[statusClass, { busy: toggling }]"
@@ -244,11 +257,23 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   pointer-events: none;
 }
 
-/* 卡片左上角来源角标：羊皮纸底 + 金框（本工具）/ 蓝框（官方）/ 朴素灰（未知） */
-.source-badge {
+/* 左上角角标容器：来源角标 + 数据模组角标竖排，互不遮挡（列表模式整组隐藏） */
+.thumb-badges {
   position: absolute;
   top: 5px;
   left: 5px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  pointer-events: none;
+}
+.card-grid.list-mode .card-thumb .thumb-badges {
+  display: none;
+}
+
+/* 卡片左上角来源角标：羊皮纸底 + 金框（本工具）/ 蓝框（官方）/ 朴素灰（未知） */
+.source-badge {
   display: inline-flex;
   align-items: center;
   padding: 1px 6px;
@@ -278,6 +303,33 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   color: var(--parch-dim);
   background: rgba(var(--badge-plain-rgb), 0.88);
 }
+
+/* 数据模组角标：金色描边，和来源角标区分开 */
+.data-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  font-size: calc(var(--card-font-size) * 0.75);
+  letter-spacing: 0.4px;
+  line-height: 1.5;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--accent-rgb), 0.75);
+  background: rgba(var(--badge-tool-rgb), 0.92);
+  color: var(--gold-bright);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 列表模式缩略图太小，改用状态行前的齿轮小图标 */
+.data-mark {
+  display: none;
+  font-size: calc(var(--card-font-size) * 0.8);
+  line-height: 1;
+  pointer-events: none;
+}
+.card-grid.list-mode .data-mark {
+  display: inline;
+}
 .card-meta .author {
   max-width: 96px;
   overflow: hidden;
@@ -298,6 +350,8 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
 .card-meta,
 .update-badge,
 .source-badge,
+.data-badge,
+.data-mark,
 .order-badge,
 .fav-badge,
 .no-cover {

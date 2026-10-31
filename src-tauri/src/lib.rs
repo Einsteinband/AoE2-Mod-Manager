@@ -2308,6 +2308,288 @@ fn save_user_data(
     user_data::save(&path, &backup_dir, &data)
 }
 
+// ---------------- v3.2：三类本地缓存的存放位置（设置 → 缓存与存储） ----------------
+//
+// 缓存默认都在 AppData 里；图片与译文越攒越大时把 C 盘顶满，所以允许用户把它们
+// 指到其它磁盘。三类缓存共用同一个入口 [`get_cache_dir`]：**读配置优先，回退默认**。
+// 换目录**不迁移旧数据**（旧文件留在原处，新缓存写入新目录），也不删除任何文件。
+
+/// 缓存种类下标：0 = 图片 / 1 = 模组信息 / 2 = 翻译
+const CACHE_KIND_IMAGE: usize = 0;
+const CACHE_KIND_MODINFO: usize = 1;
+const CACHE_KIND_TRANSLATION: usize = 2;
+
+/// 进程内的「用户自定义缓存目录」快照。
+///
+/// 为什么需要它：cache.rs / translator.rs 每次读写都要 `path_for()`，如果每次都读一遍
+/// settings.json，就把「内存优先的微秒级命中」退化成磁盘 IO。首次访问从配置载入，
+/// 之后只读内存；`set_cache_dir` / `reset_cache_dir` 成功后立即刷新这一份。
+static CACHE_DIR_OVERRIDES: std::sync::Mutex<Option<[Option<String>; 3]>> =
+    std::sync::Mutex::new(None);
+
+/// 前端传来的 kind 归一化：只认 image / modinfo / translation
+fn cache_kind_index(kind: &str) -> Result<usize, String> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "image" => Ok(CACHE_KIND_IMAGE),
+        "modinfo" => Ok(CACHE_KIND_MODINFO),
+        "translation" => Ok(CACHE_KIND_TRANSLATION),
+        other => Err(format!("未知的缓存类型：{other}")),
+    }
+}
+
+fn cache_kind_code(index: usize) -> &'static str {
+    match index {
+        CACHE_KIND_IMAGE => "image",
+        CACHE_KIND_MODINFO => "modinfo",
+        _ => "translation",
+    }
+}
+
+fn cache_overrides(app: &tauri::AppHandle) -> [Option<String>; 3] {
+    let settings = settings::load_for_app(app);
+    [
+        settings.image_cache_dir,
+        settings.mod_info_cache_dir,
+        settings.translation_cache_dir,
+    ]
+}
+
+fn refresh_cache_overrides(app: &tauri::AppHandle) {
+    let fresh = cache_overrides(app);
+    let mut guard = CACHE_DIR_OVERRIDES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(fresh);
+}
+
+/// 目录「能不能用」：必须真实存在且是文件夹。
+/// 配置里写坏的路径、被手动删掉的目录、没插上的移动硬盘，一律当作「没配」。
+fn usable_dir(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+/// 默认位置：图片缓存是 `%APPDATA%\<app>\image_cache`，
+/// 模组信息与译文缓存直接落在配置目录下（靠文件名区分）。
+fn default_cache_dir(app: &tauri::AppHandle, index: usize) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("无法定位应用配置目录：{e}"))?;
+    Ok(if index == CACHE_KIND_IMAGE {
+        base.join(images::DIR_NAME)
+    } else {
+        base
+    })
+}
+
+/// **缓存目录的唯一入口**：读配置优先，回退默认。
+///
+/// 1. settings.json 里 `*_cache_dir` 有值、且该目录真实存在 → 用它；
+/// 2. 没配 / 空串 / 目录已被删除 → 回退默认 AppData 位置（并打一行 warn）。
+///
+/// 任何情况下都返回一个可用路径，绝不因为配置坏掉让缓存功能整体失效。
+pub fn get_cache_dir(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> {
+    let index = cache_kind_index(kind)?;
+    let configured = {
+        let mut guard = CACHE_DIR_OVERRIDES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.is_none() {
+            *guard = Some(cache_overrides(app));
+        }
+        guard.as_ref().and_then(|all| all[index].clone())
+    };
+    if let Some(raw) = configured {
+        if let Some(path) = usable_dir(&raw) {
+            return Ok(path);
+        }
+        log::warn!(
+            target: "cache-dir",
+            "配置的 {} 缓存目录不可用（{}），本次回退默认位置",
+            cache_kind_code(index),
+            raw
+        );
+    }
+    default_cache_dir(app, index)
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CacheDirEntry {
+    /// image | modinfo | translation
+    kind: String,
+    /// 当前实际生效的目录（配置可用就是配置的，否则是默认的）
+    path: String,
+    /// 默认（AppData）目录，「恢复默认」按钮据此说明会回到哪里
+    default_path: String,
+    /// true = 用户自定义且正在生效
+    is_custom: bool,
+    exists: bool,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct CacheDirsView {
+    dirs: Vec<CacheDirEntry>,
+}
+
+fn build_cache_dirs_view(app: &tauri::AppHandle) -> CacheDirsView {
+    let overrides = cache_overrides(app);
+    let mut dirs = Vec::with_capacity(3);
+    for index in [CACHE_KIND_IMAGE, CACHE_KIND_MODINFO, CACHE_KIND_TRANSLATION] {
+        let default_path = default_cache_dir(app, index)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let custom = overrides[index].as_deref().and_then(usable_dir);
+        let (path, is_custom) = match custom {
+            Some(dir) => (dir.display().to_string(), true),
+            None => (default_path.clone(), false),
+        };
+        let exists = std::path::Path::new(&path).is_dir();
+        dirs.push(CacheDirEntry {
+            kind: cache_kind_code(index).to_string(),
+            path,
+            default_path,
+            is_custom,
+            exists,
+        });
+    }
+    CacheDirsView { dirs }
+}
+
+/// 三类缓存目录的当前状态（设置 → 缓存与存储）
+#[tauri::command]
+async fn cache_dirs(app: tauri::AppHandle) -> CacheDirsView {
+    tauri::async_runtime::spawn_blocking(move || build_cache_dirs_view(&app))
+        .await
+        .unwrap_or_else(|_| CacheDirsView { dirs: Vec::new() })
+}
+
+/// 目标目录体检：能建就建，再用临时文件实测一次可写。
+/// 只读盘、exFAT、无权限目录（Program Files 根、系统盘根）都能当场测出来，
+/// 不会等用户写了几百条缓存之后才失败。
+fn prepare_cache_dir(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return Err("目录路径不能为空".to_string());
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err(format!("请选择完整路径（如 D:\\AoE2Cache）：{}", path.display()));
+    }
+    if path.is_file() {
+        return Err(format!("这个路径是一个文件，不是文件夹：{}", path.display()));
+    }
+    fs::create_dir_all(&path).map_err(|e| format!("无法创建目录 {}：{e}", path.display()))?;
+    let probe = path.join(format!(".aoe2-write-test-{}.tmp", std::process::id()));
+    let written = fs::write(&probe, b"ok");
+    let _ = fs::remove_file(&probe);
+    written.map_err(|e| format!("目标目录不可写（{}）：{e}", path.display()))?;
+    Ok(path)
+}
+
+/// 设置某一类缓存的存放目录。校验通过才写 settings.json。
+/// 已经在旧目录里的缓存**不迁移、不删除**（新缓存写新目录，要搬请用户自己复制）。
+#[tauri::command]
+async fn set_cache_dir(
+    app: tauri::AppHandle,
+    kind: String,
+    new_path: String,
+) -> Result<CacheDirsView, String> {
+    let index = cache_kind_index(&kind)?;
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = prepare_cache_dir(&new_path)?;
+        let text = dir.display().to_string();
+        let mut settings = settings::load_for_app(&handle);
+        match index {
+            CACHE_KIND_IMAGE => settings.image_cache_dir = Some(text.clone()),
+            CACHE_KIND_MODINFO => settings.mod_info_cache_dir = Some(text.clone()),
+            _ => settings.translation_cache_dir = Some(text.clone()),
+        }
+        settings::save_for_app(&handle, &settings)?;
+        refresh_cache_overrides(&handle);
+        // 图片靠 asset 协议读取：换了目录必须重新放行，否则封面全是空白
+        if index == CACHE_KIND_IMAGE {
+            images::allow_scope(&handle);
+        }
+        log::info!(
+            target: "cache-dir",
+            "{} 缓存目录已切换到：{text}",
+            cache_kind_code(index)
+        );
+        Ok(build_cache_dirs_view(&handle))
+    })
+    .await
+    .map_err(|e| format!("保存缓存目录失败：{e}"))?
+}
+
+/// 恢复默认位置：把配置写回 null。同样不迁移、不删除任何文件。
+#[tauri::command]
+async fn reset_cache_dir(app: tauri::AppHandle, kind: String) -> Result<CacheDirsView, String> {
+    let index = cache_kind_index(&kind)?;
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = settings::load_for_app(&handle);
+        match index {
+            CACHE_KIND_IMAGE => settings.image_cache_dir = None,
+            CACHE_KIND_MODINFO => settings.mod_info_cache_dir = None,
+            _ => settings.translation_cache_dir = None,
+        }
+        settings::save_for_app(&handle, &settings)?;
+        refresh_cache_overrides(&handle);
+        if index == CACHE_KIND_IMAGE {
+            images::allow_scope(&handle);
+        }
+        log::info!(
+            target: "cache-dir",
+            "{} 缓存目录已恢复默认",
+            cache_kind_code(index)
+        );
+        Ok(build_cache_dirs_view(&handle))
+    })
+    .await
+    .map_err(|e| format!("恢复默认目录失败：{e}"))?
+}
+
+/// 在资源管理器中打开当前生效的缓存目录（目录不存在就先建出来）。
+#[tauri::command]
+async fn open_cache_dir(app: tauri::AppHandle, kind: String) -> Result<String, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = get_cache_dir(&handle, &kind)?;
+        if !dir.is_dir() {
+            fs::create_dir_all(&dir)
+                .map_err(|e| format!("无法创建缓存目录 {}：{e}", dir.display()))?;
+        }
+        let shown = dir.display().to_string();
+        #[cfg(windows)]
+        {
+            std::process::Command::new("explorer.exe")
+                .arg(&dir)
+                .spawn()
+                .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+            Ok(shown)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = shown;
+            Err("仅支持 Windows".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("打开缓存目录失败：{e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 
 pub fn run() {
@@ -2372,6 +2654,10 @@ pub fn run() {
             online_cache_items,
             online_cache_clear,
             online_cache_stat,
+            cache_dirs,
+            set_cache_dir,
+            reset_cache_dir,
+            open_cache_dir,
             online_index_status,
             online_index_sync,
             online_index_pause,

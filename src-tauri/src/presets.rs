@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Manager;
 
-use crate::scan::{now_ms, normalize_key};
+use crate::scan::{detect_data_mod, now_ms, normalize_key};
 
 pub const FILE_NAME: &str = "presets.json";
 const BACKUP_DIR: &str = "backups";
@@ -88,6 +88,10 @@ pub struct ApplyReport {
     pub total_enabled_after: usize,
     /// 预设里有、但 mod-status.json 里找不到对应记录的条目
     pub not_in_status: Vec<PresetItem>,
+    /// 预设里有多个数据模组时，被强制跳过的数量（游戏同一时间只能加载一个 .dat）
+    pub skipped_data_mods: usize,
+    /// 被跳过的数据模组标题（给用户看清楚跳过了谁）
+    pub skipped_data_mod_titles: Vec<String>,
     /// 是否真的写了文件（全部已启用时不会写）
     pub wrote: bool,
     pub message: String,
@@ -974,9 +978,67 @@ pub fn register_mod(
 
 // ---------------- 预设批量应用（覆盖式，薄封装） ----------------
 
+/// 预设条目 → 磁盘上的模组目录。
+///
+/// `mod-status.json` 的父目录就是模组根目录，`Path` 形如 `subscribed//20505_xxx`，
+/// 因此可以直接拼出 `<root>/<kind>/<文件夹名>`，不需要再读取游戏配置。
+fn item_mod_dir(status_path: &Path, item: &PresetItem) -> Option<PathBuf> {
+    let root = status_path.parent()?;
+    let raw = item.path.replace('\\', "/");
+    let mut parts = raw.split('/').filter(|s| !s.is_empty());
+    let kind = parts.next()?;
+    let folder = parts.next()?;
+    if kind != "local" && kind != "subscribed" {
+        return None;
+    }
+    if folder.is_empty() || folder == "." || folder == ".." {
+        return None;
+    }
+    Some(root.join(kind).join(folder))
+}
+
+/// 数据模组互斥：预设里如果有多个数据模组，只允许**加载顺序最前**（Priority 最小）
+/// 的那一个被启用，其余一律剔除。
+///
+/// 返回 `(每个条目是否允许启用, 被跳过的条目)`；`items` 内没有重复条目，
+/// 所以用下标做标记最直接。Priority 缺失视为最靠后（与拖拽排序的“缺省排末尾”一致）。
+fn resolve_data_mod_allowance(
+    status_path: &Path,
+    items: &[PresetItem],
+) -> (Vec<bool>, Vec<PresetItem>) {
+    let mut allowed = vec![true; items.len()];
+    let mut skipped: Vec<PresetItem> = Vec::new();
+
+    // 先找出所有数据模组条目：(下标, 排序键)
+    let mut data_mods: Vec<(usize, i64)> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(dir) = item_mod_dir(status_path, item) else { continue };
+        if !detect_data_mod(&dir) {
+            continue;
+        }
+        data_mods.push((index, item.priority.unwrap_or(i64::MAX)));
+    }
+    if data_mods.len() <= 1 {
+        return (allowed, skipped);
+    }
+
+    // 胜出者 = Priority 最小的那一个；并列时保留预设里靠前的条目（sort_by 稳定）
+    data_mods.sort_by(|a, b| a.1.cmp(&b.1));
+    let winner = data_mods[0].0;
+    for (index, _) in data_mods.iter().skip(1) {
+        allowed[*index] = false;
+        skipped.push(items[*index].clone());
+    }
+    debug_assert!(!skipped.is_empty() && allowed[winner]);
+    (allowed, skipped)
+}
+
 /// 应用预设：**覆盖式**。所有记录先视为禁用，只有预设内的记录置为启用。
 /// `CheckSum` / `LastUpdate` / `Priority` / `Unsub` 与未知字段一律原样透传。
 /// `skip_process_check` 只给单元测试用。
+///
+/// 数据模组互斥：游戏同一时间只加载一份 `.dat`，预设里多个数据模组时
+/// 只保留加载顺序最前的那一个，其余强制跳过（在 ApplyReport 里上报数量）。
 pub fn apply_items(
     status_path: &Path,
     backup_dir: &Path,
@@ -986,6 +1048,9 @@ pub fn apply_items(
     if items.is_empty() {
         return Err("该预设是空的，没有可应用的模组".to_string());
     }
+
+    // 数据模组裁决必须在写盘前完成：同一时间只允许一个 .dat
+    let (allowed, skipped_data_mod_items) = resolve_data_mod_allowance(status_path, items);
 
     let mut hits = vec![false; items.len()];
     // 预设内且原本就是启用状态
@@ -999,14 +1064,15 @@ pub fn apply_items(
             if record.as_object().is_none() {
                 continue;
             }
-            let hit = items
+            let matched = items
                 .iter()
                 .position(|item| matches_parts(record, item.workshop_id, &item.path));
-            if let Some(index) = hit {
+            if let Some(index) = matched {
                 hits[index] = true;
             }
-            // 覆盖式：命中预设 = true，其余 = false
-            let target = hit.is_some();
+            // 覆盖式：命中预设 = true，其余 = false。
+            // 数据模组互斥：被判为“跳过”的条目即使命中也不得启用（保持禁用）。
+            let target = matched.map(|index| allowed[index]).unwrap_or(false);
             let current = record.get("Enabled").and_then(|v| v.as_bool());
 
             if current == Some(target) {
@@ -1038,6 +1104,27 @@ pub fn apply_items(
         .map(|(_, item)| item.clone())
         .collect();
 
+    // 被跳过的数据模组标题（标题为空时回退到 Path，绝不输出空串）
+    let skipped_data_mod_titles: Vec<String> = skipped_data_mod_items
+        .iter()
+        .map(|item| {
+            if item.title.trim().is_empty() {
+                item.path.clone()
+            } else {
+                item.title.clone()
+            }
+        })
+        .collect();
+    let data_mod_note = if skipped_data_mod_titles.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "；游戏同一时间只能加载一个数据模组，已跳过 {} 个（{}）",
+            skipped_data_mod_titles.len(),
+            skipped_data_mod_titles.join("、")
+        )
+    };
+
     // 现状已与该预设完全一致：不写文件，也就不产生备份
     if !outcome.wrote {
         return Ok(ApplyReport {
@@ -1049,20 +1136,23 @@ pub fn apply_items(
             already_enabled: enabled_now,
             total_enabled_after: outcome.total_enabled_after,
             not_in_status,
+            skipped_data_mods: skipped_data_mod_titles.len(),
+            skipped_data_mod_titles,
             wrote: false,
             message: format!(
-                "当前配置已与该预设一致（预设内 {} 个模组已启用，其余均已禁用），未修改文件。",
-                enabled_now
+                "当前配置已与该预设一致（预设内 {} 个模组已启用，其余均已禁用），未修改文件。{}",
+                enabled_now, data_mod_note
             ),
         });
     }
 
     let message = format!(
-        "已按预设覆盖配置：启用 {} 个（其中原本已启用 {} 个），禁用 {} 个不在预设中的模组，未找到记录 {} 个。现在共 {} 个模组处于启用状态，请启动游戏确认。",
+        "已按预设覆盖配置：启用 {} 个（其中原本已启用 {} 个），禁用 {} 个不在预设中的模组，未找到记录 {} 个{}。现在共 {} 个模组处于启用状态，请启动游戏确认。",
         to_enable,
         enabled_now,
         to_disable,
         not_in_status.len(),
+        data_mod_note,
         outcome.total_enabled_after
     );
     Ok(ApplyReport {
@@ -1074,6 +1164,8 @@ pub fn apply_items(
         already_enabled: enabled_now,
         total_enabled_after: outcome.total_enabled_after,
         not_in_status,
+        skipped_data_mods: skipped_data_mod_titles.len(),
+        skipped_data_mod_titles,
         wrote: true,
         message,
     })
@@ -1967,6 +2059,78 @@ mod tests {
         assert!(err.contains("无法识别"), "{err}");
 
         assert_eq!(fs::read_to_string(&status).unwrap(), SAMPLE, "报错时不得写盘");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 预设里有两个数据模组 + 一个普通模组：
+    /// 只允许加载顺序最前（Priority 最小）的那个数据模组被启用，其余强制跳过。
+    #[test]
+    fn preset_keeps_only_first_data_mod() {
+        let dir = std::env::temp_dir().join(format!("aoe2mm-presets-datamod-{}", now_ms()));
+        let _ = fs::remove_dir_all(&dir);
+        // 真实模组目录形状：<root>/<kind>/<folder>/_common/dat/empires2_x2_p1.dat
+        let data_a = dir.join("subscribed").join("100_DataA");
+        let data_b = dir.join("subscribed").join("200_DataB");
+        let normal = dir.join("local").join("LocalUI");
+        fs::create_dir_all(data_a.join("_common/dat")).unwrap();
+        fs::create_dir_all(data_b.join("_common/dat")).unwrap();
+        fs::create_dir_all(normal.join("widgetui")).unwrap();
+        fs::write(data_a.join("_common/dat/empires2_x2_p1.dat"), b"x").unwrap();
+        fs::write(data_b.join("_common/dat/empires2_x2_p1.dat"), b"x").unwrap();
+        fs::write(normal.join("widgetui/a.json"), "{}").unwrap();
+
+        let status = dir.join(STATUS_FILE);
+        let sample = r#"{"Mods":[{"Enabled":false,"Path":"subscribed//100_DataA","Priority":2,"Title":"DataA","WorkshopID":100},{"Enabled":false,"Path":"subscribed//200_DataB","Priority":1,"Title":"DataB","WorkshopID":200},{"Enabled":false,"Path":"local//LocalUI","Priority":3,"Title":"LocalUI","WorkshopID":0}]}"#;
+        fs::write(&status, sample).unwrap();
+
+        // items 故意把 DataA 放前面：裁决必须看 Priority，而不是预设列表顺序
+        let items = vec![
+            PresetItem {
+                workshop_id: Some(100),
+                path: "subscribed//100_DataA".to_string(),
+                title: "DataA".to_string(),
+                priority: Some(2),
+                kind: "subscribed".to_string(),
+            },
+            PresetItem {
+                workshop_id: Some(200),
+                path: "subscribed//200_DataB".to_string(),
+                title: "DataB".to_string(),
+                priority: Some(1),
+                kind: "subscribed".to_string(),
+            },
+            PresetItem {
+                workshop_id: Some(0),
+                path: "local//LocalUI".to_string(),
+                title: "LocalUI".to_string(),
+                priority: Some(3),
+                kind: "local".to_string(),
+            },
+        ];
+
+        let report = apply_items(&status, &dir.join("backups"), &items, true).unwrap();
+        assert_eq!(report.skipped_data_mods, 1, "两个数据模组只允许一个");
+        assert_eq!(report.skipped_data_mod_titles, vec!["DataA".to_string()]);
+        assert_eq!(report.restored, 2, "只启用 DataB + LocalUI");
+        assert!(report.not_in_status.is_empty(), "被跳过的条目仍是“找到了记录”");
+
+        let value: Value = serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
+        let mods = value["Mods"].as_array().unwrap();
+        let enabled_of = |path: &str| {
+            mods.iter()
+                .find(|record| record["Path"] == serde_json::json!(path))
+                .and_then(|record| record["Enabled"].as_bool())
+                .unwrap_or(false)
+        };
+        assert!(enabled_of("subscribed//200_DataB"), "Priority 最小的数据模组必须保留");
+        assert!(!enabled_of("subscribed//100_DataA"), "第二个数据模组必须被跳过");
+        assert!(enabled_of("local//LocalUI"), "非数据模组不受影响，照常启用");
+        assert_eq!(report.total_enabled_after, 2);
+
+        // 再应用一次（已一致）：不写盘，但跳过数量必须如实上报
+        let again = apply_items(&status, &dir.join("backups"), &items, true).unwrap();
+        assert!(!again.wrote, "已一致时不应写盘");
+        assert_eq!(again.skipped_data_mods, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 }

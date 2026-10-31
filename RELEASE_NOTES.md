@@ -1,51 +1,37 @@
-# v0.3.4
+# v0.3.5
 
-## v0.3.4 — UI & UX Revolution
+## v0.3.5 — Performance Boost, Custom Storage & Data Mod Protection
 
-### New Visual System
-- **Light Mode Added**: a global theme switcher for seamless toggling between dark and light modes. Easy on the eyes, day or night.
-- **Advanced Typography Engine**: switch between SimHei / YouYuan / Microsoft YaHei, with font size, line spacing and weight adjustable independently to eliminate visual fatigue.
-- **Responsive Modular Layout**: the global UI skeleton was refactored to fully solve window scaling, squeezing and jumping issues. The search box and toolbar are now more compact and professional.
+### Game Protection
+- **Data Mod Conflict Detection**: mods containing core `.dat` files are detected automatically and marked with a dedicated ⚙️ gear badge.
+- **Mutual Exclusion Guard**: the game allows only one Data Mod at a time. Enabling a second one through single toggle, batch enable, or preset apply is now intercepted and skipped automatically, preventing in-game failures and crashes.
 
-### Login & Security Optimization
-- **User-Controlled Persistent Login**: new "Remember me for 7 days" toggle.
-  - Benefit: when enabled, credentials are stored locally with DPAPI encryption, so restarting the app is instant.
-  - Risk: credentials stay on disk for 7 days. Do NOT enable this on public or shared computers.
-  - Default strategy: disabled by default for maximum security out of the box. When disabled, restarting triggers a silent Microsoft SSO verification that takes a few seconds.
+### Performance
+- **Faster Translation Engine**: batch translation concurrency raised from 1 to 3, with intelligent rate limiting and 429 backoff for anti-ban safety. Translation is now over 4x faster.
 
-### Experience & Extensions
-- **Redesigned Details Panel**: mod descriptions moved to the top, action buttons reorganized by priority, and "Technical Info" collapsed for a more intuitive experience.
-- **Startup Update Popup**: after a major update the app shows the release notes on launch, so no new feature is missed.
-- **Built-in Update History**: browse the changelog of all historical versions anytime in Settings - About.
-- **Lanzou Cloud Backup Download**: a Lanzou Cloud entry in the About section for faster downloads in China.
+### Storage & Configuration
+- **Custom Cache Paths**: a new "Cache & Storage" settings tab lets you choose where images, mod info, and translation data are stored, so your C drive no longer fills up.
+- **Smart Fallback**: if a custom directory becomes unavailable (for example an unplugged external drive), the app falls back to the default path automatically so cover images keep loading.
 
-### Fixes & Improvements
-- **Indexing Mechanism Optimization**: when local indexing is disabled in settings, the "Go to Settings" banner is hidden automatically instead of nagging repeatedly.
-- Optimized card rendering on both local and online pages, completely resolving physical jitter when switching categories.
-- Refactored the underlying business logic for faster performance and lower memory usage.
+### Update Notifications
+- **Lanzou Cloud Download**: the update dialog now offers a "Lanzou Cloud fast download" entry (password: h7dt) for smoother downloads in China.
+- **Popup Logic Hardened**: fixed a bug where clicking the backdrop dismissed the release notes popup. Only "Got it" now marks the notes as read.
 
 ---
 
-## v0.3.4 — 视觉与体验大革命
+## v0.3.5 — 性能飞跃、存储自定义与数据模组防呆
 
-### 全新视觉系统
-- **明亮模式上线**：新增全局明暗主题切换，支持一键无缝切换，白天黑夜都护眼。
-- **超强排版引擎**：支持「黑体 / 幼圆 / 微软雅黑」字体切换，字号、行距、粗细皆可独立调节，彻底告别视觉疲劳。
-- **响应式模块化布局**：重构了全局 UI 骨架，完美解决窗口缩放时的挤压与跳动问题，搜索框与工具栏布局更加紧凑专业。
+### 游戏防呆
+- **数据模组冲突检测**：自动识别包含 `.dat` 核心数据的模组，并在卡片上显示专属 ⚙️ 齿轮角标。
+- **互斥保护拦截**：游戏机制限制同一时间只能启用一个数据模组，因此无论是单条启用、批量启用还是应用预设，软件都会自动拦截并跳过多余的数据模组，避免游戏内失效或闪退。
 
-### 登录与安全机制优化
-- **持久登录自主可控**：新增「记住登录 7 天」开关。
-  - 好处：开启后，登录凭证以 DPAPI 加密形式保存在本机，重启软件无需再次验证，秒开即用。
-  - 风险：凭证会落盘 7 天，请勿在公共电脑上开启。
-  - 默认策略：该功能默认关闭，保障默认状态下的最高安全性；关闭时，重启软件会自动通过微软 SSO 进行静默验证（耗时数秒）。
+### 性能优化
+- **翻译引擎提速**：批量翻译并发从 1 路提升至 3 路，并加入智能限流与 429 退避防封，翻译速度提升 4 倍以上。
 
-### 体验与扩展
-- **全新详情面板**：模组描述全面前置，操作按钮按主次重排，「技术信息」折叠收纳，阅读与操作更直观。
-- **首启更新弹窗**：每次大版本更新后，软件启动会自动展示新特性说明，不再错过任何更新。
-- **内置更新历史**：在「设置 - 关于」中可随时查看所有历史版本的更新日志。
-- **蓝奏云备用下载**：在「关于」页提供蓝奏云网盘入口，方便国内用户高速获取资源。
+### 存储与配置
+- **自定义缓存路径**：新增「缓存与存储」设置，可自定义图片、模组信息、翻译数据的存放目录，告别 C 盘爆满。
+- **智能防呆回退**：若自定义目录不可用（例如移动硬盘被拔出），自动回退到默认路径，确保封面正常加载。
 
-### 修复与优化
-- **索引机制优化**：当在设置中关闭本地索引时，页面顶部的「前往开启」残留横幅会自动隐藏，不再反复打扰。
-- 优化了本地与在线页面的卡片渲染逻辑，彻底解决切换分类时的物理抖动。
-- 重构了底层业务逻辑代码，软件运行速度更快，内存占用更低。
+### 更新提示
+- **蓝奏云下载**：更新弹窗内新增「蓝奏云高速下载」入口（密码：h7dt），国内下载更顺畅。
+- **弹窗逻辑加固**：修复了点击遮罩会误将更新说明标记为已读的 Bug，现在必须点击「我知道了」才会记录已读。

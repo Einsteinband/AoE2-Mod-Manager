@@ -51,6 +51,8 @@ const emit = defineEmits<{
   (e: "toggled", payload: { enabled: boolean }): void;
   (e: "removed", payload: { id: string }): void;
   (e: "update"): void;
+  /** 数据模组的启用请求：互斥裁决在父组件，详情页自己不动磁盘 */
+  (e: "request-enable", payload: { id: string }): void;
 }>();
 
 const { t, locale } = useI18n();
@@ -343,6 +345,11 @@ function nextEnabled(): boolean {
 async function toggleEnabled() {
   if (toggling.value) return;
   const target = nextEnabled();
+  // 数据模组：游戏同一时间只能加载一个，启用前必须交给父组件做互斥裁决
+  if (target && props.mod.isDataMod) {
+    emit("request-enable", { id: props.mod.id });
+    return;
+  }
   toggling.value = true;
   toggleError.value = null;
   try {
@@ -511,6 +518,12 @@ watch(
         >
           {{ updating ? t("detail.updating") : t("detail.updateNow") }}
         </button>
+      </div>
+
+      <!-- 数据模组：游戏同一时间只能加载一个，先给用户解释清楚 -->
+      <div v-if="mod.isDataMod" class="dv-datamod-warn">
+        <span class="dv-warn-icon">⚙️</span>
+        <span>{{ t("detail.dataModWarning") }}</span>
       </div>
 
       <!-- 主操作：启用 / 停用（金色高亮的开关控件） -->
@@ -701,3 +714,26 @@ watch(
   <!-- 收藏 / 备注成功后的轻提示（固定右下角，不参与三栏布局） -->
   <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
 </template>
+
+<style scoped>
+/* 数据模组提示条：红金边框 + 羊皮纸底，与「可更新」面板同族但语气更克制（不是错误） */
+.dv-datamod-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 9px 11px;
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 4px;
+  background: rgba(var(--badge-tool-rgb), 0.55);
+  color: var(--parch);
+  font-size: calc(12px * var(--global-scale));
+  line-height: 1.55;
+  letter-spacing: 0.3px;
+}
+.dv-datamod-warn .dv-warn-icon {
+  flex: 0 0 auto;
+  font-size: calc(13px * var(--global-scale));
+  line-height: 1.4;
+}
+</style>

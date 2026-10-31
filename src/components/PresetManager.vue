@@ -198,6 +198,10 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 
         <section v-if="result" class="preset-alert ok">
           <strong>{{ resultName }}: {{ translateBackendMessage(result.message) }}</strong>
+          <!-- 数据模组互斥：后端只保留了加载顺序最前的那一个，其余强制跳过 -->
+          <div v-if="result.skippedDataMods > 0" class="preset-datamod-warn">
+            {{ t("preset.dataModSkipped", { n: result.skippedDataMods, list: result.skippedDataModTitles.join(", ") }) }}
+          </div>
           <ul class="preset-detail">
             <li>
               {{
@@ -306,3 +310,18 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
     />
   </div>
 </template>
+
+<style scoped>
+/* 数据模组被跳过：琥珀色警告条（不是错误，但必须一眼看到） */
+.preset-datamod-warn {
+  margin: 8px 0 2px;
+  padding: 7px 10px;
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 4px;
+  background: rgba(var(--badge-tool-rgb), 0.55);
+  color: var(--gold-bright);
+  font-size: calc(12px * var(--global-scale));
+  line-height: 1.55;
+  letter-spacing: 0.3px;
+}
+</style>

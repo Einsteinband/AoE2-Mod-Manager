@@ -5,8 +5,9 @@
 //!    代理复用 [`crate::net`]（手动 > 系统注册表 > 环境变量 > 直连）。
 //! 2. **免 key 两级链路**：Google 免费端点 → MyMemory，都不需要注册或申请额度。
 //!    有代理时 Google 优先（译文质量最好）；直连时 MyMemory 优先（国内多数可直连）。
-//! 3. **单飞 + 全局 FIFO 队列 + 1 req/s**：同一 modId 同时只跑一个任务；
-//!    全局严格串行排队，且任意两次外部请求至少隔 1 秒 —— 10 次连点也不会触发限流。
+//! 3. **单飞 + 全局 FIFO 队列 + 自适应发送节奏**：同一 modId 同时只跑一个任务；
+//!    全局按票号 FIFO 起步、最多 3 个请求同时在飞、任意两次外部请求至少隔 250ms；
+//!    一旦检测到 429 / quota 立刻退避抬高间隔，连续成功后再逐步收回基础间隔。
 //! 4. **本地缓存（v2，按语言隔离）**：`%APPDATA%\com.aoe2.modmanager\translation_cache.json`
 //!    结构 `{version:2, entries: {modId: {语言代码: {...}}}}`，各语言互不覆盖；
 //!    v1 的扁平结构（只有中文）读盘时自动迁移到 `zh-cn` 并写回文件。
@@ -21,7 +22,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -55,9 +56,18 @@ const MAX_CHUNKS: usize = 12;
 const GOOGLE_CHUNK: usize = 1_500;
 /// MyMemory 匿名调用单次上限约 500 字节，取 450 字符保守值
 const MYMEMORY_CHUNK: usize = 450;
-/// 两次外部翻译请求之间的**硬性**最小间隔。
-/// 10 次连点、或一个长描述被拆成多块，实测出口都只会是「每秒最多 1 个请求」。
-const MIN_REQUEST_GAP_MS: u64 = 1_000;
+/// 两次外部翻译请求之间的**硬性**最小间隔（基础值）。
+/// 10 次连点、或一个长描述被拆成多块，出口实际节奏都受这里控制。
+/// 1 秒 → 250ms：批量标题翻译从 1 条/秒提到约 4 条/秒（配合 3 并发）。
+const MIN_REQUEST_GAP_MS: u64 = 250;
+/// 自适应退避的上限：持续被限流时最多放慢到这个间隔
+const MAX_REQUEST_GAP_MS: u64 = 4_000;
+/// 连续成功多少次就把发送间隔收窄一档（逐步回到 [`MIN_REQUEST_GAP_MS`]）
+const GAP_RELAX_AFTER: u64 = 20;
+/// 同时在飞的翻译请求上限（与批量 worker 数一致；起跑顺序仍严格 FIFO）
+const MAX_INFLIGHT_REQUESTS: usize = 3;
+/// 发送间隔的随机抖动上限：完全固定节奏反而更容易被判定为脚本
+const GAP_JITTER_MS: u64 = 60;
 
 // ---------------- 数据结构 ----------------
 
@@ -216,23 +226,37 @@ impl Provider {
 /// 全局翻译队列状态。
 ///
 /// 语义（用户 10 秒内点 10 个模组也不会碰限流）：
-/// 1. **严格 FIFO**：一次只跑一个翻译任务，后来者拿票排队（ticket 队列，不饿死）；
-/// 2. **发送间隔**：任意两次外部 HTTP 请求之间至少 [`MIN_REQUEST_GAP_MS`]（1 秒），
+/// 1. **严格 FIFO 起步**：按票号顺序开跑，最多 [`MAX_INFLIGHT_REQUESTS`] 个请求同时在飞；
+/// 2. **发送间隔**：任意两次外部 HTTP 请求之间至少 [`MIN_REQUEST_GAP_MS`]（250ms + 抖动），
 ///    包括同一个模组描述分段时产生的多块请求。
 ///
-/// 为什么不再用「2 并发 + 250ms 间隔」：10 次连点会在 1 秒内凑出 4 个请求，
-/// 免费接口（MyMemory 匿名额度、Google 出口 IP）对突发非常敏感，
-/// 一旦 429 就得等很久，反而更慢。
+/// 突发怎么控制：250ms 间隔保证 `throttle()` 不会把请求挤成一团，在飞数 ≤ 3 保证并发有上限；
+/// 一旦某个请求返回 429 / quota，`note_rate_limited()` 立刻把间隔翻倍并追加冷却，
+/// 连续成功 [`GAP_RELAX_AFTER`] 次后再收窄一档，全程不需要用户手动调速。
 struct Queue {
     /// 下一个要发的票号
     next_ticket: u64,
-    /// 当前轮到的票号
+    /// 下一个允许起跑的票号（起跑顺序 = 票号顺序，保证 FIFO）
     serving: u64,
+    /// 已拿到执行权、还没释放的请求数
+    active: usize,
     /// 下一次允许对外发请求的时间点（毫秒）
     next_allowed_ms: u64,
 }
 
-static QUEUE: Mutex<Queue> = Mutex::new(Queue { next_ticket: 0, serving: 0, next_allowed_ms: 0 });
+static QUEUE: Mutex<Queue> = Mutex::new(Queue {
+    next_ticket: 0,
+    serving: 0,
+    active: 0,
+    next_allowed_ms: 0,
+});
+
+/// 当前发送间隔（毫秒）：被 429 抬高，被连续成功收窄
+static GAP_MS: AtomicU64 = AtomicU64::new(MIN_REQUEST_GAP_MS);
+/// 连续成功计数
+static SUCCESS_STREAK: AtomicU64 = AtomicU64::new(0);
+/// 抖动用的 xorshift 种子（不引入 rand 依赖）
+static JITTER_SEED: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
 static QUEUE_CV: Condvar = Condvar::new();
 
 /// 队列里的一个位置：拿到即独占执行权，`drop` 时自动把执行权交给下一位
@@ -245,9 +269,12 @@ impl Slot {
         let mut queue = QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let ticket = queue.next_ticket;
         queue.next_ticket = queue.next_ticket.saturating_add(1);
-        while queue.serving != ticket {
+        // 两道门：① 必须轮到自己（严格 FIFO，后来者不会被饿死）② 在飞数不超过上限
+        while queue.serving != ticket || queue.active >= MAX_INFLIGHT_REQUESTS {
             queue = QUEUE_CV.wait(queue).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+        queue.serving = queue.serving.saturating_add(1);
+        queue.active += 1;
         log::debug!(target: "translate", "获得翻译队列执行权：ticket={ticket}");
         Slot { ticket }
     }
@@ -256,27 +283,88 @@ impl Slot {
 impl Drop for Slot {
     fn drop(&mut self) {
         let mut queue = QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        queue.serving = queue.serving.saturating_add(1);
+        queue.active = queue.active.saturating_sub(1);
         log::debug!(target: "translate", "交还翻译队列执行权：ticket={}", self.ticket);
         QUEUE_CV.notify_all();
     }
 }
 
-/// 每个外部请求前调用：把「下一次允许发送的时间」推到 1 秒后。
+/// 每个外部请求前调用：在全局发送时间轴上给自己占一个位置，然后等到能发为止。
 ///
-/// 只有持有 [`Slot`] 的任务会走到这里（全局串行），所以这里的 sleep
-/// 不会拖慢别人 —— 他们本来就在排队。
+/// 位置是**原子预定**的（先推进 next_allowed_ms，再放锁去睡），所以即使有
+/// [`MAX_INFLIGHT_REQUESTS`] 个任务同时在跑，两次真实请求的间隔也不会被压扁。
 fn throttle() {
+    let gap = GAP_MS.load(Ordering::Relaxed) + jitter_ms(GAP_JITTER_MS);
     let mut queue = QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let now = now_ms();
-    if queue.next_allowed_ms > now {
-        let wait = queue.next_allowed_ms - now;
-        // 睡之前放开队列锁：排队者不会因为这一秒被卡在互斥量上
-        drop(queue);
-        std::thread::sleep(Duration::from_millis(wait));
-        queue = QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let start_at = queue.next_allowed_ms.max(now);
+    queue.next_allowed_ms = start_at.saturating_add(gap);
+    // 睡之前放开队列锁：排队者不会因为这一次等待被卡在互斥量上
+    drop(queue);
+    if start_at > now {
+        std::thread::sleep(Duration::from_millis(start_at - now));
     }
-    queue.next_allowed_ms = now_ms().saturating_add(MIN_REQUEST_GAP_MS);
+}
+
+/// xorshift 抖动：不引入 rand 依赖（红线：不加依赖）
+fn jitter_ms(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let mut x = JITTER_SEED.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    JITTER_SEED.store(x, Ordering::Relaxed);
+    x % (max + 1)
+}
+
+/// 429 / quota / rate limit：这些错误需要退避，而不是换接口或重试
+fn rate_limited(err: &ApiFailure) -> bool {
+    if err.kind == "quota" || err.status == Some(429) {
+        return true;
+    }
+    let text = err.message.to_lowercase();
+    text.contains("429")
+        || text.contains("too many")
+        || text.contains("quota")
+        || text.contains("rate limit")
+}
+
+/// 一次请求成功：连续成功 [`GAP_RELAX_AFTER`] 次就把间隔收窄一档，逐步回到基础值
+fn note_request_success() {
+    let streak = SUCCESS_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+    if streak % GAP_RELAX_AFTER != 0 {
+        return;
+    }
+    let previous = GAP_MS.load(Ordering::Relaxed);
+    if previous <= MIN_REQUEST_GAP_MS {
+        return;
+    }
+    let next = (previous * 3 / 4).max(MIN_REQUEST_GAP_MS);
+    GAP_MS.store(next, Ordering::Relaxed);
+    log::info!(target: "translate", "翻译接口恢复正常，发送间隔收窄到 {next}ms");
+}
+
+/// 检测到 429 / quota：立刻抬高发送间隔，并把整个队列的下一次发送时间往后推（冷却）
+fn note_rate_limited() {
+    let previous = GAP_MS.load(Ordering::Relaxed);
+    let next = (previous * 2).clamp(MIN_REQUEST_GAP_MS, MAX_REQUEST_GAP_MS);
+    GAP_MS.store(next, Ordering::Relaxed);
+    SUCCESS_STREAK.store(0, Ordering::Relaxed);
+    let cooldown = next * 2;
+    {
+        let mut queue = QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        queue.next_allowed_ms = queue.next_allowed_ms.max(now_ms().saturating_add(cooldown));
+    }
+    if next != previous {
+        log::warn!(
+            target: "translate",
+            "检测到限流，发送间隔 {previous}ms → {next}ms（冷却 {cooldown}ms）"
+        );
+    } else {
+        log::warn!(target: "translate", "持续限流，发送间隔已在上限 {next}ms（冷却 {cooldown}ms）");
+    }
 }
 
 /// 单飞：同一个 modId 同时只允许一个翻译任务（多入口 / 连点 / 多窗口都挡得住）
@@ -498,10 +586,9 @@ static IO_LOCK: Mutex<()> = Mutex::new(());
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v3.2：目录可由用户在「设置 → 缓存与存储」里改到其它磁盘；
+    // 默认仍然是应用配置目录（get_cache_dir 里做「读配置优先、回退默认」的判定）
+    Ok(crate::get_cache_dir(app, "translation")?.join(FILE_NAME))
 }
 
 /// 读盘结果：除内存快照外，还告诉调用方要不要把文件重写一遍
@@ -998,10 +1085,17 @@ fn translate_chunk(
         return Ok(String::new());
     }
     throttle();
-    match provider {
+    let result = match provider {
         Provider::Google => google(agent, text, target),
         Provider::MyMemory => mymemory(agent, text, target),
+    };
+    // 自适应节奏：成功就看要不要收窄间隔，被限流就退避（下一块请求会自动变慢）
+    match &result {
+        Ok(_) => note_request_success(),
+        Err(err) if rate_limited(err) => note_rate_limited(),
+        Err(_) => {}
     }
+    result
 }
 
 /// 按 provider 顺序逐个尝试；任一块失败就整体换下一个 provider（不重试同一家）
@@ -1531,8 +1625,9 @@ pub async fn translation_cache_clear(app: tauri::AppHandle) -> Result<Translatio
 // [`Entry::is_dirty`] 要求 `desc` 非空（描述为空 = 详情还没加载完就点了翻译，历史 bug）。
 // 「只翻标题」的条目一旦写进译文缓存，下次加载会被当成脏数据剔除，白翻。
 //
-// 限速与队列**完全复用**上面的 [`Slot`] + [`throttle()`]（全局严格 FIFO、任意两次
-// 外部请求间隔 ≥ 1 秒），所以批量任务与详情页手动翻译永远串行，绝不会叠加成 2 req/s。
+// 限速与队列**完全复用**上面的 [`Slot`] + [`throttle()`]（严格 FIFO 起步、在飞 ≤ 3、
+// 任意两次外部请求间隔 ≥ 250ms 且随 429 自适应变慢），所以批量任务与详情页手动翻译
+// 共享同一套限速，绝不会因为并发而把频率翻倍。
 // 每次请求前单独取 Slot（**不是整个任务占着**）：用户中途点开详情手动翻译，不会被
 // 几小时的批量任务堵死。
 //
@@ -1542,12 +1637,18 @@ pub async fn translation_cache_clear(app: tauri::AppHandle) -> Result<Translatio
 pub const TITLE_FILE_NAME: &str = "online_titles_zh.json";
 /// 1 = `{version, targetLang, entries: {modId: {titleHash, title, provider, savedAtMs}}}`
 const TITLE_VERSION: u32 = 1;
-/// 单次运行上限（2000 条 × 1 秒 ≈ 33 分钟），到顶就停，下次启动接着来
+/// 单次运行上限（2000 条，3 并发 + 250ms 间隔 ≈ 4 条/秒 ≈ 8 分钟），到顶就停，下次启动接着来
 const TITLE_MAX_PER_RUN: usize = 2_000;
 /// 每翻多少条落一次盘（整文件重写很贵，30 万条也不可能每页都写）
 const TITLE_FLUSH_EVERY: usize = 20;
 /// 连续失败几次就结束本轮（网络断了别原地空转）
 const TITLE_MAX_FAILURES: u32 = 3;
+/// 连续「限流类」失败几次才收手：429 已由自适应退避处理，不该第一次就终止整批
+const TITLE_MAX_QUOTA_FAILURES: u32 = 12;
+/// 并发 worker 数（与 [`MAX_INFLIGHT_REQUESTS`] 一致）
+const TITLE_WORKERS: usize = 3;
+/// worker 把结果送回主线程（写盘、进度、flush 全在主线程做，存储结构不变）
+type TitleJobResult = (i64, String, Result<(String, Provider), ApiFailure>);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -1644,10 +1745,8 @@ fn lock_title_job() -> std::sync::MutexGuard<'static, TitleJob> {
 }
 
 fn title_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(TITLE_FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // 与译文缓存同一类（translation）：用户换目录时两份一起走，不会一个在新盘一个在旧盘
+    Ok(crate::get_cache_dir(app, "translation")?.join(TITLE_FILE_NAME))
 }
 
 fn read_title_store(path: &Path) -> TitleStore {
@@ -1805,15 +1904,7 @@ fn title_stop_requested() -> bool {
     lock_title_job().stop
 }
 
-fn title_quota_like(err: &ApiFailure) -> bool {
-    if err.kind == "quota" || err.status == Some(429) {
-        return true;
-    }
-    let text = err.message.to_lowercase();
-    text.contains("429") || text.contains("too many") || text.contains("quota") || text.contains("rate limit")
-}
-
-/// 启动批量标题翻译（后台线程，**1 req/s**，可随时停止，断点续跑）
+/// 启动批量标题翻译（后台线程，3 并发 + 250ms 间隔 ≈ 4 条/秒，可随时停止，断点续跑）
 pub fn start_title_job(
     app: tauri::AppHandle,
     requested_lang: Option<String>,
@@ -1957,58 +2048,100 @@ fn run_title_job_inner(app: &tauri::AppHandle, lang: &str) -> Result<String, Api
     let mut consecutive = 0u32;
     title_update_progress(0, 0, total, "正在翻译标题");
 
-    for (mod_id, title) in pending {
-        if title_stop_requested() {
-            flush_titles(app);
-            return Ok(format!("已停止：本次翻译 {translated} 条"));
+    // 3 个 worker 并发取任务：起跑顺序仍严格 FIFO、在飞数 ≤ 3、发送间隔 250ms（429 退避），
+    // 吞吐从 1 条/秒提到约 4 条/秒。
+    // worker 只负责「发请求 + 取译文」，写盘 / 落盘节流 / 进度全部留在主线程，
+    // 所以缓存文件的结构和写入时机跟以前完全一样。
+    let workers = TITLE_WORKERS.min(total).max(1);
+    let cursor = AtomicUsize::new(0);
+    let abort = AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::channel::<TitleJobResult>();
+    let mut outcome: Option<Result<String, ApiFailure>> = None;
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let cursor = &cursor;
+            let abort = &abort;
+            let pending = &pending;
+            let agent = &agent;
+            let providers: &[Provider] = &providers;
+            let target = target.as_str();
+            scope.spawn(move || loop {
+                if abort.load(Ordering::Relaxed) || title_stop_requested() {
+                    break;
+                }
+                let index = cursor.fetch_add(1, Ordering::Relaxed);
+                let Some((mod_id, title)) = pending.get(index) else { break };
+                // 每条请求单独取 Slot（不是整个任务占着）：中途点开详情手动翻译不会被整批堵死
+                let result = {
+                    let _slot = Slot::acquire();
+                    if abort.load(Ordering::Relaxed) || title_stop_requested() {
+                        break;
+                    }
+                    translate_text(agent, title, providers, target)
+                };
+                if tx.send((*mod_id, title.clone(), result)).is_err() {
+                    break;
+                }
+            });
         }
-        if translated >= TITLE_MAX_PER_RUN {
-            flush_titles(app);
-            return Ok(format!("已达单次上限 {TITLE_MAX_PER_RUN} 条，下次继续"));
-        }
-        // 单条独占队列：`throttle()` 会把「下一次允许发请求」推到 1 秒后
-        let result = {
-            let _slot = Slot::acquire();
-            translate_text(&agent, &title, &providers, &target)
-        };
-        match result {
-            Ok((text, provider)) => {
-                let text = text.trim().to_string();
-                if text.is_empty() {
+        drop(tx);
+
+        // 主线程逐条消费结果：先把已经拿到的译文落盘，再判断要不要停
+        for (mod_id, title, result) in rx {
+            match result {
+                Ok((text, provider)) => {
+                    let text = text.trim().to_string();
+                    if text.is_empty() {
+                        failed += 1;
+                        consecutive += 1;
+                    } else {
+                        let entry = TitleEntry {
+                            title_hash: title_hash(&title),
+                            title: text,
+                            provider: provider.name().to_string(),
+                            saved_at_ms: now_ms(),
+                        };
+                        if let Err(e) = put_title(app, mod_id, entry) {
+                            log::warn!(target: "translate", "标题译文写入失败（modId={mod_id}）：{e}");
+                        }
+                        translated += 1;
+                        consecutive = 0;
+                    }
+                }
+                Err(err) => {
                     failed += 1;
                     consecutive += 1;
-                } else {
-                    let entry = TitleEntry {
-                        title_hash: title_hash(&title),
-                        title: text,
-                        provider: provider.name().to_string(),
-                        saved_at_ms: now_ms(),
-                    };
-                    if let Err(e) = put_title(app, mod_id, entry) {
-                        log::warn!(target: "translate", "标题译文写入失败（modId={mod_id}）：{e}");
+                    // 限流不再第一枪就收手：间隔已被 note_rate_limited 抬高，
+                    // 连续失败到上限（限流 12 次 / 其它 3 次）才终止本轮
+                    let quota = rate_limited(&err);
+                    let limit =
+                        if quota { TITLE_MAX_QUOTA_FAILURES } else { TITLE_MAX_FAILURES };
+                    if outcome.is_none() && consecutive >= limit {
+                        abort.store(true, Ordering::Relaxed);
+                        outcome = Some(Err(err));
                     }
-                    translated += 1;
-                    consecutive = 0;
-                    if translated % TITLE_FLUSH_EVERY == 0 {
-                        flush_titles(app);
-                    }
-                    title_update_progress(translated, failed, total, "正在翻译标题");
                 }
             }
-            Err(err) => {
-                failed += 1;
-                consecutive += 1;
-                title_update_progress(translated, failed, total, "正在翻译标题");
-                if title_quota_like(&err) || consecutive >= TITLE_MAX_FAILURES {
-                    flush_titles(app);
-                    return Err(err);
+            if translated > 0 && translated % TITLE_FLUSH_EVERY == 0 {
+                flush_titles(app);
+            }
+            title_update_progress(translated, failed, total, "正在翻译标题");
+            if outcome.is_none() {
+                if title_stop_requested() {
+                    abort.store(true, Ordering::Relaxed);
+                    outcome = Some(Ok(format!("已停止：本次翻译 {translated} 条")));
+                } else if translated >= TITLE_MAX_PER_RUN {
+                    abort.store(true, Ordering::Relaxed);
+                    outcome = Some(Ok(format!("已达单次上限 {TITLE_MAX_PER_RUN} 条，下次继续")));
                 }
             }
         }
-    }
+    });
 
     flush_titles(app);
-    Ok(format!("本次翻译 {translated} 条，失败 {failed} 条"))
+    outcome.unwrap_or_else(|| Ok(format!("本次翻译 {translated} 条，失败 {failed} 条")))
 }
 
 #[cfg(test)]
@@ -2310,17 +2443,52 @@ mod tests {
         assert_eq!(served, expected, "队列必须严格 FIFO（不能饿死后来者）：{served:?}");
     }
 
-    /// 10 次连点的安全底线：两次外部请求之间硬性隔 1 秒。
+    /// 并发下的安全底线：两次外部请求之间仍按 [`MIN_REQUEST_GAP_MS`] 隔开。
     #[test]
-    fn throttle_spaces_requests_by_one_second() {
+    fn throttle_spaces_requests_by_min_gap() {
         throttle(); // 第一个请求立即放行
         let start = now_ms();
-        throttle(); // 第二个必须等满
+        throttle(); // 第二个必须等满基础间隔（当前 GAP 只会 ≥ 基础值）
         let elapsed = now_ms().saturating_sub(start);
         assert!(
             elapsed >= MIN_REQUEST_GAP_MS - 50,
-            "两次请求间隔不足 1 秒：{elapsed}ms"
+            "两次请求间隔不足 {MIN_REQUEST_GAP_MS}ms：{elapsed}ms"
         );
+    }
+
+    /// 429 退避：抬高间隔 + 重置冷却，连续成功后再逐步收回基础间隔。
+    #[test]
+    fn rate_limit_backoff_raises_gap_then_recovers() {
+        let saved = GAP_MS.load(Ordering::Relaxed);
+        GAP_MS.store(MIN_REQUEST_GAP_MS, Ordering::Relaxed);
+        SUCCESS_STREAK.store(0, Ordering::Relaxed);
+        let before = QUEUE.lock().unwrap().next_allowed_ms;
+
+        note_rate_limited();
+        let raised = GAP_MS.load(Ordering::Relaxed);
+        assert!(raised > MIN_REQUEST_GAP_MS, "限流后必须抬高发送间隔：{raised}ms");
+        assert!(raised <= MAX_REQUEST_GAP_MS, "发送间隔不得超过上限：{raised}ms");
+        let after = QUEUE.lock().unwrap().next_allowed_ms;
+        assert!(after > before, "限流后必须把下一次发送时间往后推（冷却）");
+
+        // 连续成功 GAP_RELAX_AFTER * 6 次：足够从退避值收窄回基础值
+        for _ in 0..(GAP_RELAX_AFTER * 6) {
+            note_request_success();
+        }
+        assert_eq!(
+            GAP_MS.load(Ordering::Relaxed),
+            MIN_REQUEST_GAP_MS,
+            "连续成功后应回到基础间隔"
+        );
+
+        GAP_MS.store(saved, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn rate_limited_recognizes_429_and_quota() {
+        assert!(rate_limited(&ApiFailure::new("quota", "too many requests", None)));
+        assert!(rate_limited(&ApiFailure::new("http", "429", Some(429))));
+        assert!(!rate_limited(&ApiFailure::new("network", "连接超时", None)));
     }
 
     #[test]

@@ -6,7 +6,7 @@ export const label = "中文";
 export default {
   app: {
     name: "帝国时代 II · 模组管理器",
-    taglinePrefix: "v0.3.4 · by ",
+    taglinePrefix: "v0.3.5 · by ",
     author: "Einsteinband",
     authorTitle: "打开作者 GitHub 主页（系统浏览器）",
     windowTitle: "AoE2 Mod Manager",
@@ -23,6 +23,7 @@ export default {
     tabNetwork: "网络",
     tabTranslate: "翻译",
     tabAbout: "关于",
+    tabStorage: "缓存与存储",
     indexing: "本地中文搜索与自动索引",
     indexingNote:
       "开启后，软件会在后台静默爬取官方模组列表，以支持本地中文极速搜索。这会消耗一定流量，且频繁请求可能触发官方限制。建议有需要时开启。",
@@ -89,8 +90,24 @@ export default {
     changelogEmptyBody: "这个版本没有写更新说明。",
     changelogRetry: "重试",
     modUpdateHint: "回到模组列表：带 [可更新] 红标的模组可在右侧详情页一键更新。",
+    cacheDirsNote:
+      "缓存默认保存在系统盘的应用数据目录，换到其它磁盘可以释放 C 盘空间。已生成的文件不会自动搬迁，需要请手动复制到新目录。",
+    cacheDirImage: "图片缓存",
+    cacheDirModInfo: "模组信息缓存",
+    cacheDirTranslation: "翻译缓存",
+    cacheDirChange: "更改路径",
+    cacheDirOpen: "打开目录",
+    cacheDirReset: "恢复默认",
+    cacheDirCustom: "自定义",
+    cacheDirMissing: "目录不存在，已回退默认位置",
+    cacheDirChanged: "{name}已切换到新目录，新缓存将写入该位置",
+    cacheDirResetDone: "{name}已恢复默认位置",
+    cacheDirOpened: "已在资源管理器中打开{name}",
+    cacheDirFailed: "操作失败：{msg}",
   },
   update: {
+    lanzou: "蓝奏云高速下载",
+    lanzouHint: "（密码：h7dt）",
     available: "发现新版本 v{version}，点击前往 GitHub 下载！",
     dismiss: "关闭提示",
     modDoneToast: "已更新到最新版，已重新扫描模组列表。",
@@ -139,6 +156,11 @@ export default {
     skipped: "；跳过 {n} 个未登记模组（需先启动一次游戏）",
     noChange: "当前列表已是目标状态，未改动文件",
     allUnregistered: "这些模组还没有登记，请先启动一次游戏让它们登记",
+    dataModSkipped: "；已跳过 {n} 个数据模组，因为游戏限制只能启用一个",
+    dataModSkipNote:
+      "\n\n⚠️ 列表中有多个数据模组，本次只启用排在最前面的那一个，其余 {n} 个会跳过。",
+    dataModDisableNote:
+      "\n\n⚠️ 游戏同一时间只能加载一个数据模组，会先禁用当前已启用的：{names}。",
   },
   sort: {
     enter: "排序模式",
@@ -295,6 +317,16 @@ export default {
     toggleDisable: "点击禁用该模组",
     toggleWorking: "正在写入 mod-status.json…",
     notRegisteredHint: "请先启动一次游戏让它登记该模组",
+    dataModBadge: "⚙️ 数据模组",
+    dataModBadgeHint: "该模组替换游戏核心数据文件（.dat），同一时间只能启用一个",
+  },
+  dataMod: {
+    conflictTitle: "数据模组冲突",
+    conflictMessage:
+      "⚠️ 检测到冲突：您已启用了数据模组「{old}」。游戏同一时间只能加载一个数据模组。是否禁用「{old}」，并启用「{new}」？",
+    conflictConfirm: "禁用旧的并启用新的",
+    enabledToast: "已启用数据模组「{name}」，进游戏后在开始界面的下拉菜单中选中它才会生效",
+    switchedToast: "已切换到数据模组「{new}」（已禁用「{old}」）",
   },
   confirm: {
     diskWarning: "此操作会直接改动磁盘文件",
@@ -315,6 +347,8 @@ export default {
     enabledState: "启用状态",
     toggleTitleWriting: "正在写入 mod-status.json…",
     toggleTitleIdle: "点击切换启用 / 停用",
+    dataModWarning:
+      "⚙️ 这是一个数据模组。由于游戏机制，同一时间只能启用一个数据模组。启用后，你还需要在游戏内的开始界面下拉菜单中手动选中它才能生效。",
     writing: "写入中…",
     deleteMod: "卸载模组",
     deleteTitle: "删除本机文件（不改服务器订阅状态）",
@@ -393,6 +427,8 @@ export default {
     backupPath: "备份：{path}",
     noBackup: "本次未修改文件，因此没有生成备份。",
     notInStatus: "{n} 个模组在 mod-status.json 里没有记录（可能已被取消订阅或文件夹被改名）：{list}",
+    dataModSkipped:
+      "⚠️ 预设已应用，但为了遵守游戏机制，自动跳过了 {n} 个冲突的数据模组：{list}。同一时间只能启用一个数据模组。",
     verifyHint: "请启动游戏确认；游戏运行期间不要应用预设。",
     safetyTitle: "安全说明",
     safetyOverwrite:
@@ -705,7 +741,7 @@ export default {
   /** 批量翻译在线索引里的英文标题（设置 → 翻译） */
   titleTranslate: {
     sectionTitle: "批量翻译标题",
-    note: "单线程，每秒 1 条，可随时停止；译文保存在本地，标题被作者改过会自动重翻。",
+    note: "3 路并发，约每秒 4 条，可随时停止；译文保存在本地，标题被作者改过会自动重翻。",
     start: "开始翻译",
     stop: "停止",
     reading: "读取中…",

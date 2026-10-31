@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tauri::Manager;
 
 pub const FILE_NAME: &str = "online_cache.json";
 /// 2 = 无 TTL + 内存优先 + raw 剥离；旧文件（1）自动丢弃，不会误读
@@ -192,10 +191,9 @@ pub fn detail_key(mod_id: i64) -> String {
 }
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v3.2：目录可由用户在「设置 → 缓存与存储」里改到其它磁盘；
+    // 默认仍然是应用配置目录（get_cache_dir 里做「读配置优先、回退默认」的判定）
+    Ok(crate::get_cache_dir(app, "modinfo")?.join(FILE_NAME))
 }
 
 /// 列表项里的 `raw` 是接口原始 JSON（含 metaData 全套重复字段），占 90%+ 体积；

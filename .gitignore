@@ -4,3 +4,4 @@ dist-portable/
 src-tauri/target/
 .DS_Store
 *.log
+docs/ddd/

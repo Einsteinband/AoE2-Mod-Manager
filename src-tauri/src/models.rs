@@ -72,6 +72,9 @@ pub struct ModEntry {
     /// 解析/读取过程中发现的问题，直接展示给用户
     pub issues: Vec<String>,
     pub info_json_present: bool,
+    /// 是否数据模组：模组内含游戏核心数据库文件（如 empires2_x2_p1.dat）。
+    /// 游戏同一时间只能加载一个数据模组，前端启用前必须做互斥拦截。
+    pub is_data_mod: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -205,6 +208,17 @@ pub struct Settings {
     /// v2.4：卡片列表字号（px，10..=16，默认 12）—— 对应 CSS 变量 --card-font-size。
     #[serde(default = "default_card_font_size")]
     pub card_font_size: u32,
+    /// v3.2：三类本地缓存的自定义存放目录（**None = 用默认 AppData 位置**）。
+    /// 只存用户明确选过的路径；目录不存在 / 空串一律回退默认，判定统一在
+    /// [`crate::get_cache_dir`] 里做，本结构不碰文件系统。
+    #[serde(default)]
+    pub image_cache_dir: Option<String>,
+    /// 在线模组信息缓存（online_cache.json）的存放目录；None = 应用配置目录
+    #[serde(default)]
+    pub mod_info_cache_dir: Option<String>,
+    /// 译文缓存（translation_cache.json / online_titles_zh.json）的存放目录；None = 应用配置目录
+    #[serde(default)]
+    pub translation_cache_dir: Option<String>,
     /// v2.3 遗留：扁平的界面字号。v2.4 起只作为一次性迁移来源，
     /// 由 `migrate_legacy_typography` 搬进 reader_* 后置空；之后写入一律为 null。
     #[serde(default)]
@@ -475,6 +489,10 @@ impl Default for Settings {
             reader_line_height: default_reader_line_height(),
             reader_font_weight: default_reader_font_weight(),
             card_font_size: default_card_font_size(),
+            // v3.2：三类缓存默认都放在 AppData 里（用户改过才写入具体路径）
+            image_cache_dir: None,
+            mod_info_cache_dir: None,
+            translation_cache_dir: None,
             // v2.3 遗留字段：新装 / 默认值里一律为空
             ui_font_size: None,
             ui_line_height: None,

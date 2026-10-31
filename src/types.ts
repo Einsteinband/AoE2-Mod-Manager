@@ -41,6 +41,8 @@ export interface ModEntry {
   metadataRecorded: boolean;
   issues: string[];
   infoJsonPresent: boolean;
+  /** 数据模组：模组内含游戏核心数据库文件（如 empires2_x2_p1.dat），同一时间只能启用一个 */
+  isDataMod: boolean;
 }
 
 export interface ScanReport {
@@ -137,10 +139,35 @@ export interface AppSettings {
   readerFontWeight: number;
   /** v2.4 卡片列表层：字号（px，10..=16，默认 12）—— 对应 --card-font-size */
   cardFontSize: number;
+  /** v3.2：图片缓存目录（null / 缺省 = 默认 AppData 位置） */
+  imageCacheDir?: string | null;
+  /** v3.2：在线模组信息缓存（online_cache.json）目录；null = 应用配置目录 */
+  modInfoCacheDir?: string | null;
+  /** v3.2：译文缓存（translation_cache.json / online_titles_zh.json）目录；null = 应用配置目录 */
+  translationCacheDir?: string | null;
   /** v2.3 遗留：扁平界面字号。v2.4 起只用于一次性迁移，新数据一律为 null，前端不再读取 */
   uiFontSize?: number | null;
   /** v2.3 遗留：扁平行距（已废弃，仅迁移用） */
   uiLineHeight?: number | null;
+}
+
+/** v3.2：三类本地缓存（设置 → 缓存与存储） */
+export type CacheDirKind = "image" | "modinfo" | "translation";
+
+/** 某一类缓存目录的当前状态（Rust 的 cache_dirs / set_cache_dir / reset_cache_dir 返回） */
+export interface CacheDirEntry {
+  kind: CacheDirKind;
+  /** 当前实际生效的目录（配置可用就是配置的，否则是默认的） */
+  path: string;
+  /** 默认（AppData）目录：「恢复默认」据此说明会回到哪里 */
+  defaultPath: string;
+  /** true = 用户自定义且正在生效 */
+  isCustom: boolean;
+  exists: boolean;
+}
+
+export interface CacheDirsView {
+  dirs: CacheDirEntry[];
 }
 
 /** v0.3 预设：一条记录对应 mod-status.json 里的一条 Mods 项 */
@@ -173,6 +200,10 @@ export interface ApplyReport {
   alreadyEnabled: number;
   totalEnabledAfter: number;
   notInStatus: PresetItem[];
+  /** 预设里有多个数据模组时被强制跳过的数量（游戏同一时间只能加载一个 .dat） */
+  skippedDataMods: number;
+  /** 被跳过的数据模组标题（可直接展示） */
+  skippedDataModTitles: string[];
   wrote: boolean;
   message: string;
 }

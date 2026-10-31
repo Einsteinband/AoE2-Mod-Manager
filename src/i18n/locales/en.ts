@@ -7,7 +7,7 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    taglinePrefix: "v0.3.4 · by ",
+    taglinePrefix: "v0.3.5 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -24,6 +24,7 @@ export default {
     tabNetwork: "Network",
     tabTranslate: "Translation",
     tabAbout: "About",
+    tabStorage: "Storage",
     indexing: "Local Chinese search & auto indexing",
     indexingNote:
       "When enabled, the app quietly crawls the official mod list in the background to power fast local Chinese search. This uses some bandwidth, and frequent requests may trigger official rate limits. Enable it only when you need it.",
@@ -89,8 +90,24 @@ export default {
     changelogEmptyBody: "This release has no notes.",
     changelogRetry: "Retry",
     modUpdateHint: "Mods flagged with a red [UPDATE] badge can be updated from the detail panel.",
+    cacheDirsNote:
+      "Caches live in the system drive by default. Moving them to another disk frees up space on C:. Existing files are not migrated — copy them manually if you need them.",
+    cacheDirImage: "Image cache",
+    cacheDirModInfo: "Mod info cache",
+    cacheDirTranslation: "Translation cache",
+    cacheDirChange: "Change folder",
+    cacheDirOpen: "Open folder",
+    cacheDirReset: "Use default",
+    cacheDirCustom: "Custom",
+    cacheDirMissing: "Folder missing, using default",
+    cacheDirChanged: "{name} now writes to the new folder",
+    cacheDirResetDone: "{name} is back to the default folder",
+    cacheDirOpened: "Opened {name} in Explorer",
+    cacheDirFailed: "Failed: {msg}",
   },
   update: {
+    lanzou: "Lanzou cloud download",
+    lanzouHint: "(password: h7dt)",
     available: "New version v{version} found — click to download it on GitHub!",
     dismiss: "Dismiss",
     modDoneToast: "Updated to the latest version and rescanned your mods.",
@@ -139,6 +156,11 @@ export default {
     skipped: "; skipped {n} unregistered mods (launch the game once first)",
     noChange: "The list already matches the target state; no file was changed",
     allUnregistered: "These mods are not registered yet — launch the game once to let it register them",
+    dataModSkipped: "; skipped {n} data mod(s) — the game allows only one enabled data mod",
+    dataModSkipNote:
+      "\n\n⚠️ The list contains several data mods; only the first one will be enabled and the other {n} will be skipped.",
+    dataModDisableNote:
+      "\n\n⚠️ The game can only load one data mod at a time, so the currently enabled {names} will be disabled first.",
   },
   sort: {
     enter: "Sort order",
@@ -298,6 +320,18 @@ export default {
     toggleDisable: "Click to disable this mod",
     toggleWorking: "Writing mod-status.json…",
     notRegisteredHint: "Launch the game once so it registers this mod",
+    dataModBadge: "⚙️ Data Mod",
+    dataModBadgeHint:
+      "This mod replaces the game's core data file (.dat); only one can be enabled at a time",
+  },
+  dataMod: {
+    conflictTitle: "Data mod conflict",
+    conflictMessage:
+      "⚠️ Conflict detected: the data mod \"{old}\" is already enabled. The game can only load one data mod at a time. Disable \"{old}\" and enable \"{new}\"?",
+    conflictConfirm: "Disable old, enable new",
+    enabledToast:
+      "Data mod \"{name}\" enabled — select it in the in-game start screen dropdown to take effect",
+    switchedToast: "Switched to data mod \"{new}\" (\"{old}\" disabled)",
   },
   confirm: {
     diskWarning: "This action modifies files on disk",
@@ -318,6 +352,8 @@ export default {
     enabledState: "Enabled state",
     toggleTitleWriting: "Writing mod-status.json…",
     toggleTitleIdle: "Click to enable / disable",
+    dataModWarning:
+      "⚙️ This is a data mod. The game can only load one data mod at a time. After enabling it, you still need to select it in the dropdown menu on the in-game start screen for it to take effect.",
     writing: "Writing…",
     deleteMod: "Uninstall mod",
     deleteTitle: "Delete local files (does not change the official subscription)",
@@ -398,6 +434,8 @@ export default {
     backupPath: "Backup: {path}",
     noBackup: "No file was modified, so no backup was created.",
     notInStatus: "{n} mods have no record in mod-status.json (unsubscribed, or the folder was renamed): {list}",
+    dataModSkipped:
+      "⚠️ Preset applied, but to respect the game mechanism {n} conflicting data mod(s) were skipped: {list}. Only one data mod can be enabled at a time.",
     verifyHint: "Launch the game to verify; do not apply a preset while the game is running.",
     safetyTitle: "Safety",
     safetyOverwrite:
@@ -713,7 +751,7 @@ export default {
   /** Bulk-translate English titles from the online index (Settings → Translate) */
   titleTranslate: {
     sectionTitle: "Translate titles in bulk",
-    note: "Single thread, one request per second, stoppable at any time. Results are stored locally and re-translated automatically if a title changes.",
+    note: "3 workers, about 4 titles per second, stoppable at any time. Results are stored locally and re-translated automatically if a title changes.",
     start: "Start",
     stop: "Stop",
     reading: "Reading…",

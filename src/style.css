@@ -2328,7 +2328,7 @@ button.delete-btn:disabled {
 /* 启动更新提示：可点击 + 可关闭，叠在普通 toast 上方，避免两条互相遮挡 */
 .app-toast.update-toast {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 9px 10px 9px 12px;
   border-color: var(--gold);
@@ -2355,6 +2355,45 @@ button.delete-btn:disabled {
   color: var(--text-bright);
   background: transparent;
   text-decoration: underline;
+}
+
+/* v3.2：正文与「蓝奏云备用下载」分两行，颜色全部取自主题变量（明暗主题自适应） */
+.update-toast-main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.update-toast-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.update-toast-lanzou {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--gold-dim);
+  border-radius: 4px;
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-hover));
+  color: var(--gold-text);
+  font-size: calc(11px * var(--global-scale));
+  line-height: 1.5;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+.update-toast-lanzou:hover {
+  border-color: var(--gold);
+  color: var(--text-bright);
+  background: linear-gradient(180deg, var(--bg-hover), var(--bg-hover));
+}
+.update-toast-hint {
+  color: var(--muted);
+  font-size: calc(10px * var(--global-scale));
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
 }
 .update-toast-x {
   flex: 0 0 auto;

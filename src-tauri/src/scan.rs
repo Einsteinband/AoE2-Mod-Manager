@@ -177,6 +177,81 @@ fn probe_walk(dir: &Path, depth: usize, probe: &mut Probe) {
     }
 }
 
+// ---------------- 数据模组（Data Mod）识别 ----------------
+//
+// 游戏机制：同一时间只加载一个数据模组（替换 resources/_common/dat/empires2*.dat）。
+// 判定只看磁盘事实：模组内是否存在游戏核心数据库文件。
+// 与 Probe 分开实现，是因为 Probe 在有官方标签时会被跳过（省时间），
+// 而数据模组判定必须对**每个**模组都成立，不能依赖分类来源。
+
+const DATA_MOD_MAX_DEPTH: usize = 4;
+const DATA_MOD_MAX_FILES: usize = 30_000;
+
+/// 核心数据库文件名判定：empires2.dat / empires2_x1.dat / empires2_x1_p1.dat / empires2_x2_p1.dat …
+fn is_core_data_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let Some(stem) = lower.strip_suffix(".dat") else {
+        return false;
+    };
+    stem.starts_with("empires2")
+}
+
+/// 这些目录只放音频 / 贴图 / 界面 / 文本，不可能有 .dat，直接剪枝避免深挖拖慢扫描
+fn is_media_dir(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "sound"
+            | "sounds"
+            | "audio"
+            | "voice"
+            | "voices"
+            | "art"
+            | "textures"
+            | "widgetui"
+            | "wpfg"
+            | "localisation"
+            | "localization"
+            | "history"
+    )
+}
+
+fn data_mod_walk(dir: &Path, depth: usize, seen: &mut usize) -> bool {
+    if depth > DATA_MOD_MAX_DEPTH || *seen > DATA_MOD_MAX_FILES {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(dir) else { return false };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else { continue };
+        if file_type.is_dir() {
+            if is_media_dir(&name) {
+                continue;
+            }
+            if data_mod_walk(&entry.path(), depth + 1, seen) {
+                return true;
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        *seen += 1;
+        if is_core_data_file(&name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 是否为数据模组：命中任意核心 .dat 即判定为真（不做猜测，没有就是没有）
+pub(crate) fn detect_data_mod(dir: &Path) -> bool {
+    let mut seen = 0usize;
+    data_mod_walk(dir, 0, &mut seen)
+}
+
 #[derive(Debug, Default)]
 struct InfoJson {
     title: Option<String>,
@@ -513,6 +588,9 @@ fn collect_entry(
         parent_warnings.push(format!("{kind}/{folder_name}：读取受限，详情可能不完整"));
     }
 
+    // 数据模组判定：与分类来源无关，必须每次都做（官方标签里也可能有 Data Mod）
+    let is_data_mod = detect_data_mod(dir);
+
     ModEntry {
         id: format!("{kind}:{folder_name}"),
         folder_name: folder_name.to_string(),
@@ -537,6 +615,7 @@ fn collect_entry(
         metadata_recorded,
         issues,
         info_json_present: info_read.info.is_some(),
+        is_data_mod,
     }
 }
 
@@ -746,15 +825,20 @@ mod tests {
         let disabled = report.mods.iter().filter(|m| m.enabled == Some(false)).count();
         let with_info = report.mods.iter().filter(|m| m.info_json_present).count();
         let with_thumb = report.mods.iter().filter(|m| m.thumbnail.is_some()).count();
+        let data_mods = report.mods.iter().filter(|m| m.is_data_mod).count();
         println!(
-            "mods={} enabled={} disabled={} info.json={} thumbnail={} warnings={}",
+            "mods={} enabled={} disabled={} info.json={} thumbnail={} data_mod={} warnings={}",
             report.mods.len(),
             enabled,
             disabled,
             with_info,
             with_thumb,
+            data_mods,
             report.warnings.len()
         );
+        for m in report.mods.iter().filter(|m| m.is_data_mod) {
+            println!("数据模组：{} | 路径={}", m.display_name, m.path);
+        }
         for m in report.mods.iter().take(3) {
             println!(
                 "- [{}] {} | 文件夹={} | id={:?} | 作者={:?} | 标签={:?} | 问题={:?}",
@@ -1073,5 +1157,67 @@ mod tests {
         );
         assert!(entry2.content_tags.iter().any(|t| t == "音频"));
         let _ = fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn detects_data_mod_by_core_dat_file() {
+        let dir = temp_mod_dir("data-mod");
+        let mod_dir = dir.join("subscribed/9999_Data Mod");
+        fs::create_dir_all(mod_dir.join("resources/_common/dat")).unwrap();
+        fs::write(
+            mod_dir.join("resources/_common/dat/empires2_x2_p1.dat"),
+            b"x",
+        )
+        .unwrap();
+        // 有官方标签也必须照样识别：判定与分类来源无关
+        let mut store = Store::default();
+        store.mods.insert(
+            "9999".to_string(),
+            metadata::ModMeta {
+                mod_id: 9999,
+                title: "Data Mod".to_string(),
+                tag_ids: vec![11],
+                tag_names: vec!["Data Mod".to_string()],
+                folder_name: Some("9999_Data Mod".to_string()),
+                installed_at_ms: 0,
+                source: "api.ageofempires.com".to_string(),
+            },
+        );
+        let entry = collect_entry(
+            "subscribed",
+            &mod_dir,
+            "9999_Data Mod",
+            &HashMap::new(),
+            &store,
+            &mut Vec::new(),
+        );
+        assert!(entry.is_data_mod, "含 empires2_x2_p1.dat 的模组必须判定为数据模组");
+        assert_eq!(entry.category_source, "official");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ordinary_mod_is_not_data_mod() {
+        let dir = temp_mod_dir("no-data-mod");
+        let mod_dir = dir.join("subscribed/NotData");
+        fs::create_dir_all(mod_dir.join("widgetui")).unwrap();
+        fs::write(mod_dir.join("widgetui/a.json"), "{}").unwrap();
+        // 非核心 .dat（例如自定义表）不算数据模组，避免误判
+        fs::write(mod_dir.join("custom_text.dat"), b"x").unwrap();
+        let entry = collect_entry(
+            "subscribed",
+            &mod_dir,
+            "NotData",
+            &HashMap::new(),
+            &Store::default(),
+            &mut Vec::new(),
+        );
+        assert!(!entry.is_data_mod);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(is_core_data_file("EMPIRES2_X1_P1.dat"));
+        assert!(is_core_data_file("empires2.dat"));
+        assert!(!is_core_data_file("custom_text.dat"));
+        assert!(!is_core_data_file("empires2_x2_p1.dat.bak"));
     }
 }

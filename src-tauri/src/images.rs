@@ -39,10 +39,9 @@ pub struct FetchTask {
 }
 
 pub fn dir_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(DIR_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v3.2：目录可由用户在「设置 → 缓存与存储」里改到其它磁盘，
+    // 统一走 crate::get_cache_dir（读配置优先、目录不可用则回退默认 AppData 位置）
+    crate::get_cache_dir(app, "image")
 }
 
 pub fn file_for(app: &tauri::AppHandle, mod_id: i64) -> Result<PathBuf, String> {

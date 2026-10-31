@@ -27,6 +27,7 @@ import {
   saveTypographyPrefs,
   setLocale as persistLocale,
   setTheme,
+  toggleModEnabled,
   type TypographyPrefs,
   type UiFontFamily,
 } from "./api";
@@ -353,14 +354,189 @@ const actions = useLocalModActions({
 const { stats, statsLoading, statsError, selectMod, handleToggle, handleCardToggled, handleCardToggleError, handleRemoved } =
   actions;
 
+// ---------------- 数据模组互斥（游戏同一时间只能加载一个 .dat） ----------------
+
+/** 待用户确认的冲突：旧数据模组（已启用）→ 新数据模组（将要启用） */
+const dataModConflict = ref<{ oldMod: ModEntry; newMod: ModEntry } | null>(null);
+const dataModBusy = ref(false);
+const dataModError = ref<string | null>(null);
+
+/** 当前已启用的其他数据模组（排除 excludeId 自己） */
+function enabledDataMods(excludeId?: string): ModEntry[] {
+  return (scan.report.value?.mods ?? []).filter(
+    (m) => m.isDataMod && m.enabled === true && m.id !== excludeId,
+  );
+}
+
+/** 写一条启用状态（只 patch 这一条，不重扫） */
+async function writeModEnabled(mod: ModEntry, enabled: boolean): Promise<void> {
+  const result = await toggleModEnabled(mod.workshopId, mod.kind, mod.folderName, enabled);
+  scan.patchModEnabled(mod.id, result.enabled);
+}
+
+/** 没有冲突时直接启用数据模组 */
+async function enableDataMod(mod: ModEntry): Promise<void> {
+  dataModBusy.value = true;
+  dataModError.value = null;
+  try {
+    await writeModEnabled(mod, true);
+    showToast(t("dataMod.enabledToast", { name: mod.displayName }));
+  } catch (e) {
+    showToast(scan.normalizeError(e), "error");
+  } finally {
+    dataModBusy.value = false;
+  }
+}
+
+/**
+ * 卡片 / 详情页的「启用数据模组」请求：先查已有的数据模组，
+ * 已启用另一个则弹冲突确认，否则直接启用。
+ */
+function requestEnableDataMod(payload: { id: string }): void {
+  if (dataModBusy.value || dataModConflict.value) return;
+  const mod = scan.report.value?.mods.find((m) => m.id === payload.id);
+  if (!mod) return;
+  const conflict = enabledDataMods(mod.id)[0] ?? null;
+  if (!conflict) {
+    void enableDataMod(mod);
+    return;
+  }
+  dataModError.value = null;
+  dataModConflict.value = { oldMod: conflict, newMod: mod };
+}
+
+/** 用户确认：先禁用旧的数据模组，再启用新的 */
+async function confirmDataModSwitch(): Promise<void> {
+  const conflict = dataModConflict.value;
+  if (!conflict || dataModBusy.value) return;
+  dataModBusy.value = true;
+  dataModError.value = null;
+  try {
+    await writeModEnabled(conflict.oldMod, false);
+    await writeModEnabled(conflict.newMod, true);
+    dataModConflict.value = null;
+    showToast(
+      t("dataMod.switchedToast", {
+        old: conflict.oldMod.displayName,
+        new: conflict.newMod.displayName,
+      }),
+    );
+  } catch (e) {
+    dataModError.value = scan.normalizeError(e);
+  } finally {
+    dataModBusy.value = false;
+  }
+}
+
+/** 用户取消：中止启用，不动磁盘 */
+function cancelDataModSwitch(): void {
+  if (dataModBusy.value) return;
+  dataModConflict.value = null;
+  dataModError.value = null;
+}
+
+// ---------------- 批量启用时的数据模组互斥 ----------------
+
+/** 本次批量启用被跳过的数据模组数量（0 = 无跳过） */
+const dataModSkipCount = ref(0);
+/** 本次批量启用需要顺带禁用的旧数据模组 */
+const dataModBatchDisable = ref<ModEntry[]>([]);
+/** 批量目标覆盖：null = 直接用当前筛选结果（不改变 collation / 筛选） */
+const batchOverride = ref<ModEntry[] | null>(null);
+const batchSource = computed(() => batchOverride.value ?? sorted.value);
+
+/** batch 自己的 Toast：把「跳过 X 个数据模组」并入结果提示，避免两条提示互相覆盖 */
+function showBatchToast(text: string, kind: "ok" | "error" = "ok"): void {
+  if (dataModSkipCount.value > 0) {
+    showToast(`${text}${t("batch.dataModSkipped", { n: dataModSkipCount.value })}`, kind);
+    return;
+  }
+  showToast(text, kind);
+}
+
 const batch = useBatchToggle({
-  sorted: filters.sorted,
+  sorted: batchSource,
   report: scan.report,
   patchModEnabled: scan.patchModEnabled,
   normalizeError: scan.normalizeError,
-  showToast,
+  showToast: showBatchToast,
 });
 const { batchAsk, batchBusy, batchError, batchTargets, askBatch, runBatchToggle, cancelBatch } = batch;
+
+function resetBatchDataMod(): void {
+  batchOverride.value = null;
+  dataModBatchDisable.value = [];
+  dataModSkipCount.value = 0;
+}
+
+/**
+ * 全部启用：数据模组只能留一个。
+ * 取当前列表里排在最前面（优先级最高）的那个，其余从本次目标里摘掉（静默跳过）；
+ * 已启用但不是它的数据模组会在确认后被禁用，否则游戏里会互相覆盖。
+ */
+function askBatchEnable(): void {
+  if (batchBusy.value) return;
+  const list = sorted.value;
+  const dataMods = list.filter((m) => m.isDataMod);
+  const winner = dataMods[0] ?? null;
+  const skipped = winner ? dataMods.length - 1 : 0;
+  dataModSkipCount.value = skipped;
+  // 列表里没有数据模组时，不做任何额外禁用（别误伤用户已有的数据模组）
+  dataModBatchDisable.value = winner ? enabledDataMods(winner.id) : [];
+  batchOverride.value =
+    skipped > 0 ? list.filter((m) => !m.isDataMod || m.id === winner?.id) : null;
+  askBatch(true);
+}
+
+/** 全部禁用：与数据模组无关，清掉残留状态后照常走 */
+function askBatchDisable(): void {
+  resetBatchDataMod();
+  askBatch(false);
+}
+
+/** 确认执行：批量启用时先禁用冲突的旧数据模组，再整批启用（批次仍只写一次盘） */
+async function runBatchToggleGuarded(): Promise<void> {
+  if (batchAsk.value === null || batchBusy.value) return;
+  if (batchAsk.value === false) {
+    await runBatchToggle();
+    resetBatchDataMod();
+    return;
+  }
+  for (const stale of dataModBatchDisable.value) {
+    try {
+      await writeModEnabled(stale, false);
+    } catch (e) {
+      // 弹窗不关：用户可以重试或取消，绝不带着两个数据模组继续下去
+      showToast(scan.normalizeError(e), "error");
+      return;
+    }
+  }
+  await runBatchToggle();
+  resetBatchDataMod();
+}
+
+function cancelBatchGuarded(): void {
+  cancelBatch();
+  resetBatchDataMod();
+}
+
+/** 批量确认文案：把「跳过几个数据模组 / 会先禁用哪个」如实写进弹窗 */
+const batchConfirmMessage = computed(() => {
+  if (batchAsk.value !== true) {
+    return t("batch.confirmDisableMessage", { n: batchTargets.value.length });
+  }
+  let text = t("batch.confirmEnableMessage", { n: batchTargets.value.length });
+  if (dataModSkipCount.value > 0) {
+    text += t("batch.dataModSkipNote", { n: dataModSkipCount.value });
+  }
+  const stale = dataModBatchDisable.value;
+  if (stale.length) {
+    text += t("batch.dataModDisableNote", {
+      names: stale.map((m) => m.displayName).join(" / "),
+    });
+  }
+  return text;
+});
 
 /**
  * 重扫的唯一入口：先看排序模式有没有未保存改动（不许静默丢弃），
@@ -444,6 +620,21 @@ async function openAuthorPage() {
   }
 }
 
+/**
+ * v3.2：右下角「发现新版本」里的蓝奏云高速下载。
+ * 与设置页「关于」用的是同一个网盘分享链接，同样交给 Rust 用系统浏览器打开。
+ * 打开后不关掉提示：用户可能还想走 GitHub 版本，让提示自己保留即可。
+ */
+const LANZOU_URL = "https://wwblm.lanzouv.com/b01i5yfj5e";
+
+async function openLanzouPage() {
+  try {
+    await openExternalUrl(LANZOU_URL);
+  } catch (e) {
+    showToast(scan.normalizeError(e), "error");
+  }
+}
+
 // ---------------- 顶栏模型（本地 / 在线共用一套控件） ----------------
 
 /**
@@ -521,6 +712,10 @@ interface VersionNotes {
 const versionNotes = ref<VersionNotes | null>(null);
 /** 首次启动向导优先：向导没关就先攒着，关掉再弹，避免两个浮层叠在一起 */
 let versionNotesPending = false;
+/** 本次启动是否已经判定过（多重入口重复调用也只弹一次，杜绝同版本弹两遍） */
+let versionNotesChecked = false;
+/** 拉取更新说明的最长等待：卡住也要走兜底文案，绝不出现「更新了却没弹」 */
+const VERSION_NOTES_FETCH_TIMEOUT_MS = 10000;
 
 function readLastSeenVersion(): string {
   try {
@@ -544,31 +739,56 @@ function sameVersion(a: string, b: string): boolean {
   return normalizeVersion(a) === normalizeVersion(b);
 }
 
+/** 给网络调用加超时上限：Promise 一直挂着也不能让弹窗无限缺席 */
+function withTimeout<T>(task: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("version-notes timeout")), ms);
+    task.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (e) => {
+        window.clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 async function showVersionNotesIfNeeded() {
+  // 本次启动只判定一次：向导监听等入口重复触发也不会弹第二次
+  if (versionNotesChecked) return;
+  versionNotesChecked = true;
+
   let current = "";
   try {
     current = await appVersion();
   } catch (e) {
+    // 读不到版本就不写 lastSeenVersion，下次启动重试，不会漏掉更新说明
     console.warn("[version-notes] 读取当前版本失败", e);
     return;
   }
-  if (!current) return;
-  // 这个版本已经弹过（或用户已点「我知道了」）就安静启动
+  if (!current) {
+    versionNotesChecked = false;
+    return;
+  }
+  // 这个版本已经确认过（lastSeenVersion 相同）就安静启动
   if (sameVersion(readLastSeenVersion(), current)) return;
 
+  let title = `v${current}`;
+  let html = "";
   try {
-    const releases = await fetchGithubReleases();
+    const releases = await withTimeout(fetchGithubReleases(), VERSION_NOTES_FETCH_TIMEOUT_MS);
+    // 只取与「当前运行版本」对应的那一条：跨版本升级不会把中间版本的说明再弹一遍
     const hit = releases.find((release) => sameVersion(release.version || release.tagName, current));
-    versionNotes.value = {
-      version: current,
-      title: hit?.name?.trim() || `v${current}`,
-      html: hit ? renderReleaseMarkdown(hit.body ?? "") : "",
-    };
+    if (hit?.name?.trim()) title = hit.name.trim();
+    html = hit ? renderReleaseMarkdown(hit.body ?? "") : "";
   } catch (e) {
-    // 网络不通 / 未发版：不拦启动，只显示一句兜底文案，并引导去设置页看详情
-    console.warn("[version-notes] 拉取更新说明失败", e);
-    versionNotes.value = { version: current, title: `v${current}`, html: "" };
+    // 网络不通 / 未发版 / 超时：不拦启动，只显示一句兜底文案，确认后照样记版本号
+    console.warn("[version-notes] 拉取更新说明失败，使用兜底文案", e);
   }
+  versionNotes.value = { version: current, title, html };
 }
 
 function scheduleVersionNotes() {
@@ -579,11 +799,15 @@ function scheduleVersionNotes() {
   void showVersionNotesIfNeeded();
 }
 
-/** 「我知道了」：写入 lastSeenVersion 并关弹窗（关闭后才写，防刷新时被误记为已看过） */
+/**
+ * 「我知道了」：唯一写入 lastSeenVersion 的入口。
+ * 只在按钮点击时调用；点遮罩、Esc、直接关进程都不算已读，下次启动继续弹。
+ * 先写再关：即使写入抛异常也已捕获，弹窗不会卡在界面上。
+ */
 function dismissVersionNotes() {
   const version = versionNotes.value?.version;
-  versionNotes.value = null;
   if (version) writeLastSeenVersion(version);
+  versionNotes.value = null;
 }
 
 watch(
@@ -842,7 +1066,7 @@ onBeforeUnmount(() => {
               class="batch-btn batch-enable"
               :disabled="loading || !report || !sorted.length || batchBusy"
               :title="t('toolbar.enableAllTitle')"
-              @click="askBatch(true)"
+              @click="askBatchEnable"
             >
               {{ batchBusy ? t("batch.working") : t("toolbar.enableAll") }}
             </button>
@@ -851,7 +1075,7 @@ onBeforeUnmount(() => {
               class="batch-btn batch-disable"
               :disabled="loading || !report || !sorted.length || batchBusy"
               :title="t('toolbar.disableAllTitle')"
-              @click="askBatch(false)"
+              @click="askBatchDisable"
             >
               {{ batchBusy ? t("batch.working") : t("toolbar.disableAll") }}
             </button>
@@ -991,6 +1215,7 @@ onBeforeUnmount(() => {
               @select="selectMod"
               @toggled="handleCardToggled"
               @toggle-error="handleCardToggleError"
+              @request-enable="requestEnableDataMod"
             />
           </template>
         </ModGrid>
@@ -1009,6 +1234,7 @@ onBeforeUnmount(() => {
           @toggled="handleToggle"
           @removed="handleRemoved"
           @update="handleUpdateMod(selected)"
+          @request-enable="requestEnableDataMod"
         />
         <div v-else class="detail-empty">
           {{ t("state.detailEmpty") }}<br />
@@ -1058,17 +1284,31 @@ onBeforeUnmount(() => {
     <ConfirmDialog
       v-if="batchAsk !== null"
       :title="batchAsk ? t('batch.confirmTitleEnable') : t('batch.confirmTitleDisable')"
-      :message="
-        t(batchAsk ? 'batch.confirmEnableMessage' : 'batch.confirmDisableMessage', {
-          n: batchTargets.length,
-        })
-      "
+      :message="batchConfirmMessage"
       :confirm-label="batchAsk ? t('batch.confirmEnable') : t('batch.confirmDisable')"
       :danger="!batchAsk"
       :busy="batchBusy"
       :error="batchError"
-      @confirm="runBatchToggle"
-      @cancel="cancelBatch"
+      @confirm="runBatchToggleGuarded"
+      @cancel="cancelBatchGuarded"
+    />
+
+    <!-- 数据模组互斥：同一时间只能启用一个（游戏只加载一份 .dat） -->
+    <ConfirmDialog
+      v-if="dataModConflict"
+      :title="t('dataMod.conflictTitle')"
+      :message="
+        t('dataMod.conflictMessage', {
+          old: dataModConflict.oldMod.displayName,
+          new: dataModConflict.newMod.displayName,
+        })
+      "
+      :confirm-label="t('dataMod.conflictConfirm')"
+      :danger="false"
+      :busy="dataModBusy"
+      :error="dataModError"
+      @confirm="confirmDataModSwitch"
+      @cancel="cancelDataModSwitch"
     />
 
     <!-- 放弃未保存排序的二次确认 -->
@@ -1099,7 +1339,8 @@ onBeforeUnmount(() => {
     />
 
     <!-- v3.1：新版本首启弹窗（lastSeenVersion ≠ 当前版本时只弹一次） -->
-    <div v-if="versionNotes" class="version-notes-backdrop" @click.self="dismissVersionNotes">
+    <!-- 点遮罩不关闭：未点「我知道了」就不算已读，避免误触后下次又弹 -->
+    <div v-if="versionNotes" class="version-notes-backdrop">
       <div class="version-notes" role="dialog" aria-modal="true">
         <header class="version-notes-head">
           <h2>{{ t("versionNotes.title", { version: versionNotes.version }) }}</h2>
@@ -1124,11 +1365,19 @@ onBeforeUnmount(() => {
     <!-- 轻量提示（排序已保存等）：固定右下角，不挤压布局 -->
     <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
 
-    <!-- 启动时发现新版本：右下角常驻提示，点击跳 GitHub Release -->
+    <!-- 启动时发现新版本：右下角常驻提示，点击正文跳 GitHub Release，旁边给蓝奏云备用下载 -->
     <div v-if="updateNotice" class="app-toast update-toast" :class="{ stacked: !!toast }">
-      <button type="button" class="update-toast-body" @click="openUpdatePage">
-        🎉 {{ t("update.available", { version: updateNotice.version }) }}
-      </button>
+      <div class="update-toast-main">
+        <button type="button" class="update-toast-body" @click="openUpdatePage">
+          🎉 {{ t("update.available", { version: updateNotice.version }) }}
+        </button>
+        <div class="update-toast-actions">
+          <button type="button" class="update-toast-lanzou" @click="openLanzouPage">
+            {{ t("update.lanzou") }}
+          </button>
+          <span class="update-toast-hint">{{ t("update.lanzouHint") }}</span>
+        </div>
+      </div>
       <button
         type="button"
         class="update-toast-x"

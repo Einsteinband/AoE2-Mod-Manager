@@ -9,6 +9,8 @@
  * 15 秒冷却：lastCheckMs 放在模块作用域，关掉弹窗再打开也绕不过去。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { appVersion, checkUpdate, fetchGithubReleases, getSettings, openExternalUrl, renderReleaseMarkdown, setEnableIndexing, setEnableLocalSearch, setLocale } from "../api";
@@ -42,7 +44,7 @@ import {
   runModUpdateCheck,
 } from "../modUpdates";
 import type { CacheOverview, NetworkSettingsView, TitleJobStatus, TranslateSettingsView, TranslationCacheStat } from "../online/types";
-import type { UpdateInfo } from "../types";
+import type { CacheDirEntry, CacheDirKind, CacheDirsView, UpdateInfo } from "../types";
 import { CARD_SIZE_MAX, CARD_SIZE_MIN, CARD_SIZE_STEP, clampCardSize } from "../composables/useViewPrefs";
 import {
   CARD_FONT_SIZE_MAX,
@@ -74,7 +76,7 @@ const props = withDefaults(defineProps<{ /** 当前根目录（只用于展示�
 const emit = defineEmits<{ close: []; "change-root": [] }>();
 const { t, locale } = useI18n();
 
-type Tab = "general" | "appearance" | "network" | "local" | "online" | "about";
+type Tab = "general" | "appearance" | "network" | "local" | "online" | "storage" | "about";
 const tab = ref<Tab>("general");
 
 /**
@@ -664,6 +666,114 @@ async function doClearCache() {
   }
 }
 
+// ---------------- v3.2：缓存与存储（三类本地缓存目录） ----------------
+//
+// 三行固定顺序：图片 / 模组信息 / 翻译。目录由 Rust 的 get_cache_dir 统一裁决
+// （读配置优先、目录不可用则回退默认），前端只负责展示与触发，不在本地拼路径。
+
+const CACHE_DIR_KINDS: CacheDirKind[] = ["image", "modinfo", "translation"];
+
+const cacheDirs = ref<CacheDirEntry[]>([]);
+/** 正在处理的那一行（kind）：按钮置灰 + 转圈，避免连点连开窗口 */
+const cacheDirBusy = ref<CacheDirKind | null>(null);
+const cacheDirMessage = ref<string | null>(null);
+const cacheDirError = ref<string | null>(null);
+
+function cacheDirTitle(kind: CacheDirKind): string {
+  if (kind === "image") return t("settings.cacheDirImage");
+  if (kind === "modinfo") return t("settings.cacheDirModInfo");
+  return t("settings.cacheDirTranslation");
+}
+
+/** 固定三行：后端异常返回空时也保留行位，界面不塌陷 */
+const cacheDirRows = computed<CacheDirEntry[]>(() =>
+  CACHE_DIR_KINDS.map(
+    (kind) =>
+      cacheDirs.value.find((entry) => entry.kind === kind) ?? {
+        kind,
+        path: "",
+        defaultPath: "",
+        isCustom: false,
+        exists: false,
+      },
+  ),
+);
+
+async function loadCacheDirs() {
+  try {
+    const view = await invoke<CacheDirsView>("cache_dirs");
+    cacheDirs.value = view.dirs;
+  } catch {
+    cacheDirs.value = [];
+  }
+}
+
+/** 换目录后「在线模组」Tab 里的缓存概览（路径 / 体积）也要跟着刷新 */
+function applyCacheDirsView(view: CacheDirsView) {
+  cacheDirs.value = view.dirs;
+  void loadCacheStat();
+}
+
+/** 更改路径：先选文件夹，再由 Rust 校验可写并落盘；取消 / 校验失败都不改配置 */
+async function pickCacheDir(entry: CacheDirEntry) {
+  if (cacheDirBusy.value) return;
+  cacheDirError.value = null;
+  cacheDirMessage.value = null;
+  try {
+    const picked = await openFolderDialog({
+      directory: true,
+      multiple: false,
+      title: `${t("settings.cacheDirChange")} · ${cacheDirTitle(entry.kind)}`,
+      defaultPath: entry.path || undefined,
+    });
+    if (typeof picked !== "string" || !picked) return; // 用户取消
+    cacheDirBusy.value = entry.kind;
+    const view = await invoke<CacheDirsView>("set_cache_dir", {
+      kind: entry.kind,
+      newPath: picked,
+    });
+    applyCacheDirsView(view);
+    cacheDirMessage.value = t("settings.cacheDirChanged", { name: cacheDirTitle(entry.kind) });
+  } catch (e) {
+    cacheDirError.value = t("settings.cacheDirFailed", { msg: describe(e) });
+  } finally {
+    cacheDirBusy.value = null;
+  }
+}
+
+/** 恢复默认：写回 null，不迁移、不删除任何文件 */
+async function resetCacheDir(entry: CacheDirEntry) {
+  if (cacheDirBusy.value) return;
+  cacheDirBusy.value = entry.kind;
+  cacheDirError.value = null;
+  cacheDirMessage.value = null;
+  try {
+    const view = await invoke<CacheDirsView>("reset_cache_dir", { kind: entry.kind });
+    applyCacheDirsView(view);
+    cacheDirMessage.value = t("settings.cacheDirResetDone", { name: cacheDirTitle(entry.kind) });
+  } catch (e) {
+    cacheDirError.value = t("settings.cacheDirFailed", { msg: describe(e) });
+  } finally {
+    cacheDirBusy.value = null;
+  }
+}
+
+/** 打开目录：由 Rust 用 explorer.exe 拉起，目录不存在会先建出来 */
+async function openCacheDir(entry: CacheDirEntry) {
+  if (cacheDirBusy.value) return;
+  cacheDirBusy.value = entry.kind;
+  cacheDirError.value = null;
+  cacheDirMessage.value = null;
+  try {
+    await invoke<string>("open_cache_dir", { kind: entry.kind });
+    cacheDirMessage.value = t("settings.cacheDirOpened", { name: cacheDirTitle(entry.kind) });
+  } catch (e) {
+    cacheDirError.value = t("settings.cacheDirFailed", { msg: describe(e) });
+  } finally {
+    cacheDirBusy.value = null;
+  }
+}
+
 /** 折叠面板里那句“当前走哪条链路” */
 const netSummary = computed(() => {
   const view = netView.value;
@@ -1013,6 +1123,7 @@ onMounted(async () => {
   void loadLocalSearch();
   void loadNetwork();
   void loadCacheStat();
+  void loadCacheDirs();
   void loadTranslate();
   void loadTranslationCache();
   void loadTitleJob();
@@ -1089,6 +1200,14 @@ onBeforeUnmount(() => {
             @click="tab = 'online'"
           >
             ☁ {{ t("nav.online") }}
+          </button>
+          <button
+            type="button"
+            class="settings-tab"
+            :class="{ active: tab === 'storage' }"
+            @click="tab = 'storage'"
+          >
+            🗂 {{ t("settings.tabStorage") }}
           </button>
           <button
             type="button"
@@ -1610,6 +1729,62 @@ onBeforeUnmount(() => {
 
             <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
             <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
+          </section>
+
+          <!-- 缓存与存储（v3.2）：图片 / 模组信息 / 翻译 三类缓存的存放位置 -->
+          <section v-else-if="tab === 'storage'" class="settings-card">
+            <p class="settings-hint">{{ t("settings.cacheDirsNote") }}</p>
+
+            <div v-for="entry in cacheDirRows" :key="entry.kind" class="cache-dir-row">
+              <div class="row-label">
+                <span class="row-title">
+                  {{ cacheDirTitle(entry.kind) }}
+                  <span v-if="entry.isCustom" class="cache-dir-badge">
+                    {{ t("settings.cacheDirCustom") }}
+                  </span>
+                </span>
+                <span
+                  class="row-note mono cache-dir-path"
+                  :title="entry.path || ''"
+                >
+                  {{ entry.path || "—" }}
+                </span>
+                <span v-if="entry.isCustom && !entry.exists" class="cache-dir-warn">
+                  {{ t("settings.cacheDirMissing") }}
+                </span>
+              </div>
+              <div class="cache-dir-actions">
+                <button
+                  type="button"
+                  class="settings-check"
+                  :disabled="cacheDirBusy !== null"
+                  @click="pickCacheDir(entry)"
+                >
+                  <span v-if="cacheDirBusy === entry.kind" class="spinner"></span>
+                  {{ t("settings.cacheDirChange") }}
+                </button>
+                <button
+                  type="button"
+                  class="settings-check"
+                  :disabled="cacheDirBusy !== null"
+                  @click="openCacheDir(entry)"
+                >
+                  {{ t("settings.cacheDirOpen") }}
+                </button>
+                <button
+                  v-if="entry.isCustom"
+                  type="button"
+                  class="cache-dir-reset"
+                  :disabled="cacheDirBusy !== null"
+                  @click="resetCacheDir(entry)"
+                >
+                  {{ t("settings.cacheDirReset") }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="cacheDirError" class="settings-msg error">{{ cacheDirError }}</div>
+            <div v-else-if="cacheDirMessage" class="settings-msg">{{ cacheDirMessage }}</div>
           </section>
 
           <!-- 关于（v2.0）：「软件更新」从通用 Tab 整体搬到这里（版本号 / 检查更新 / 发布页） -->
@@ -2177,5 +2352,63 @@ onBeforeUnmount(() => {
 .about-history-retry:hover {
   color: var(--gold-text);
   border-color: var(--gold-dim);
+}
+
+/* v3.2：缓存与存储 —— 一行一类缓存，路径单行省略、悬浮看全路径 */
+.cache-dir-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+}
+.cache-dir-row + .cache-dir-row {
+  border-top: 1px solid var(--line);
+}
+/* 优先级要压过 .row-note.mono 的 break-all，否则长路径会把按钮顶出卡片 */
+.row-note.mono.cache-dir-path {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+  color: var(--parch-dim);
+}
+.cache-dir-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cache-dir-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  border-radius: 3px;
+  font-size: calc(10px * var(--global-scale));
+  letter-spacing: 0.5px;
+  color: var(--gold-text);
+}
+.cache-dir-warn {
+  font-size: calc(10.5px * var(--global-scale));
+  color: var(--danger-text);
+}
+.cache-dir-reset {
+  padding: 4px 2px;
+  border: none;
+  background: none;
+  font-size: calc(11px * var(--global-scale));
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.cache-dir-reset:hover:not(:disabled) {
+  color: var(--gold-text);
+}
+.cache-dir-reset:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 </style>

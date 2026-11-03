@@ -23,7 +23,8 @@
 
 ---
 
-## 下载 # ⬇️ [**👉 点击此处前往下载最新版本**](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) ⬇️
+## 下载 # ⬇
+️ [**👉 点击此处前往下载最新版本**](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) ⬇️
 
 ---
 

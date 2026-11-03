@@ -23,7 +23,9 @@
 
 ---
 
-## 功能
+## 下载 # ⬇️ [**👉 点击此处前往下载最新版本**](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) ⬇️
+
+---
 
 ### 本地模组
 - 同时扫描 `local/` 与 `subscribed/`，合并成一个列表（名称、作者、Workshop ID、封面、体积、文件数）。

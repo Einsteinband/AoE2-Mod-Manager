@@ -23,7 +23,9 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 
 ---
 
-## Features
+## Download # ⬇️ [**👉 点击此处前往下载最新版本 (Click here to Download)**](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) ⬇️
+
+---
 
 ### Local mods
 - Scans `local/` and `subscribed/` and merges them into one list (name, author, Workshop ID, cover, size, file count).

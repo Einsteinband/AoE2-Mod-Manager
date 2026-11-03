@@ -23,7 +23,8 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 
 ---
 
-## Download # ⬇️ [**👉 点击此处前往下载最新版本 (Click here to Download)**](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) ⬇️
+## Download # ⬇️
+ [**👉 点击此处前往下载最新版本 (Click here to Download)**](https://github.com/Einsteinband/AoE2-Mod-Manager/releases) ⬇️
 
 ---
 

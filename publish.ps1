@@ -1,8 +1,17 @@
 ﻿# publish.ps1
-# 自动读取 package.json 的版本号，打 Tag、推送，并上传本地安装包到 GitHub Release。
+# 自动读取 package.json 的版本号，创建 GitHub Release 并上传本地安装包。
+#
+# 默认策略（2026-11 起）：不推送仓库源代码。
+# 本地仍会 commit + 打 tag 留档，但不会 git push main / git push tag；
+# 远端 tag 由 gh release create 基于默认分支当前最新提交自动创建，只发布安装包资产。
+# 如确需连源码一起推送，显式加 -PushSource。
 
 # 注意：用 Continue + 显式 $LASTEXITCODE 校验，避免 git 的 "LF will be replaced by CRLF"
 # 之类 stderr 警告在 PS 5.1 下被当成终止性异常，导致脚本实际成功却返回 exit 1。
+param(
+  [switch]$PushSource
+)
+
 $ErrorActionPreference = "Continue"
 
 $version = (Get-Content "package.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
@@ -21,8 +30,8 @@ if ($cmd) {
 if (-not $gh) { throw "找不到 gh cli，请安装 GitHub CLI 或把 gh.exe 加入 PATH。" }
 Write-Host "使用 gh: $gh" -ForegroundColor DarkGray
 
-# ---- 1. Git 提交与打标签 ----
-Write-Host "正在提交代码并打标签..." -ForegroundColor Yellow
+# ---- 1. Git 本地留档（默认不推送源码）----
+Write-Host "正在本地提交代码并打标签（不推送）..." -ForegroundColor Yellow
 git add .
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
@@ -40,12 +49,17 @@ if ([string]::IsNullOrWhiteSpace($existingTag)) {
   Write-Host "标签 $tag 已存在，跳过 tag。" -ForegroundColor DarkGray
 }
 
-git push origin main
-if ($LASTEXITCODE -ne 0) { throw "git push main 失败 (exit $LASTEXITCODE)" }
-git push origin $tag
-if ($LASTEXITCODE -ne 0) { throw "git push tag 失败 (exit $LASTEXITCODE)" }
+if ($PushSource) {
+  Write-Host "正在推送源码（-PushSource 已显式指定）..." -ForegroundColor Yellow
+  git push origin main
+  if ($LASTEXITCODE -ne 0) { throw "git push main 失败 (exit $LASTEXITCODE)" }
+  git push origin $tag
+  if ($LASTEXITCODE -ne 0) { throw "git push tag 失败 (exit $LASTEXITCODE)" }
+} else {
+  Write-Host "已跳过源码推送：仓库源代码保持不变，仅发布安装包。" -ForegroundColor DarkGray
+}
 
-# ---- 2. 用 gh cli 上传安装包 ----
+# ---- 2. 用 gh cli 上传安装包（远端 tag 不存在时由 gh 自动创建）----
 $nsisPath = "src-tauri\target\release\bundle\nsis\AoE2 Mod Manager_${version}_x64-setup.exe"
 $portablePath = "dist-portable\AoE2ModManager-${version}-win-x64-portable.zip"
 

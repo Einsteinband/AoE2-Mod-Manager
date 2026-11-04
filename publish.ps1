@@ -3,7 +3,7 @@
 #
 # 默认策略（2026-11 起）：不推送仓库源代码。
 # 本地仍会 commit + 打 tag 留档，但不会 git push main / git push tag；
-# 远端 tag 由 gh release create 基于默认分支当前最新提交自动创建，只发布安装包资产。
+# 远端 tag 由 gh release create 用 --target main 在默认分支上创建，只发布安装包资产。
 # 如确需连源码一起推送，显式加 -PushSource。
 
 # 注意：用 Continue + 显式 $LASTEXITCODE 校验，避免 git 的 "LF will be replaced by CRLF"
@@ -16,6 +16,7 @@ $ErrorActionPreference = "Continue"
 
 $version = (Get-Content "package.json" -Raw -Encoding UTF8 | ConvertFrom-Json).version
 $tag = "v$version"
+$targetBranch = "main"
 
 Write-Host "准备发布版本: $tag" -ForegroundColor Cyan
 
@@ -59,7 +60,8 @@ if ($PushSource) {
   Write-Host "已跳过源码推送：仓库源代码保持不变，仅发布安装包。" -ForegroundColor DarkGray
 }
 
-# ---- 2. 用 gh cli 上传安装包（远端 tag 不存在时由 gh 自动创建）----
+# ---- 2. 用 gh cli 上传安装包 ----
+# 源码不推送时远端没有该 tag，必须用 --target 让 gh 在默认分支当前提交上创建 tag。
 $nsisPath = "src-tauri\target\release\bundle\nsis\AoE2 Mod Manager_${version}_x64-setup.exe"
 $portablePath = "dist-portable\AoE2ModManager-${version}-win-x64-portable.zip"
 
@@ -78,6 +80,7 @@ Write-Host "正在创建 GitHub Release 并上传安装文件..." -ForegroundCol
 & $gh release create $tag `
   $nsisPath `
   $portablePath `
+  --target $targetBranch `
   --title "$tag" `
   @notesArgs
 if ($LASTEXITCODE -ne 0) { throw "gh release create 失败 (exit $LASTEXITCODE)" }

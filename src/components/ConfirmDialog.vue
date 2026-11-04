@@ -8,6 +8,8 @@ const props = defineProps<{
   message: string;
   detail?: string | null;
   confirmLabel?: string;
+  /** 标题旁的小字；不传则用默认的「此操作会直接改动磁盘文件」 */
+  subtitle?: string | null;
   busy?: boolean;
   error?: string | null;
   /** false = 用金色主按钮（“全部启用”这类非破坏性操作）；默认 true = 红色危险按钮 */
@@ -32,7 +34,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
     <div class="modal confirm-modal" role="dialog" aria-modal="true">
       <div class="modal-head">
         <h2>{{ title }}</h2>
-        <span class="modal-sub">{{ t("confirm.diskWarning") }}</span>
+        <span class="modal-sub">{{ subtitle ?? t("confirm.diskWarning") }}</span>
         <button type="button" class="modal-x" :disabled="busy" @click="emit('cancel')">✕</button>
       </div>
       <div class="modal-body">

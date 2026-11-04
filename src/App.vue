@@ -11,6 +11,7 @@ import ModGrid from "./components/common/ModGrid.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import FirstRunWizard from "./components/FirstRunWizard.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
+import DownloadManager from "./components/DownloadManager.vue";
 import PresetManager from "./components/PresetManager.vue";
 import SettingsModal from "./components/SettingsModal.vue";
 import LocalSidebar from "./components/local/LocalSidebar.vue";
@@ -34,6 +35,7 @@ import {
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
 import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
+import { downloadTasks, initDownloadQueue } from "./online/downloadQueue";
 import { itemsById, updateIds } from "./modUpdates";
 import {
   applyTranslateSettings,
@@ -122,6 +124,8 @@ const collationLocale = computed(() =>
 // ---------------- 组合各业务层（顺序即依赖方向） ----------------
 
 const { toast, showToast } = useToast();
+/** 有下载任务时右下角会有悬浮按钮，toast 需要上移避让 */
+const hasDownloadTasks = computed(() => downloadTasks.value.length > 0);
 const { viewMode, cardSize, applyFromSettings: applyViewPrefs } = useViewPrefs();
 
 // ---------------- v2.2：主题（dark 深色羊皮纸 / light 明亮米白） ----------------
@@ -825,6 +829,8 @@ onMounted(async () => {
   // v1.3：启动即静默校验登录态——持久登录关闭时 Rust 侧会自己跑一次隐藏窗口静默重登，
   // 同样不 await、不阻塞首屏，底栏先显示「正在恢复登录…」再变 🟢/⚪
   void ensureStartupSession();
+  // 下载队列：全应用只注册一次进度事件（与在线页是否挂载无关）
+  void initDownloadQueue();
   // v0.5：收藏/备注只读一次磁盘，失败不阻塞本地页
   void ensureUserData().catch(() => undefined);
   // 启动即检查一次新版本（只此一次，失败静默）
@@ -1363,7 +1369,10 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 轻量提示（排序已保存等）：固定右下角，不挤压布局 -->
-    <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
+    <div v-if="toast" class="app-toast" :class="[toast.kind, { 'shift-for-downloads': hasDownloadTasks }]">{{ toast.text }}</div>
+
+    <!-- 右下角全局下载管理（模块级队列，切页面 / 卸载在线页都不丢） -->
+    <DownloadManager />
 
     <!-- 启动时发现新版本：右下角常驻提示，点击正文跳 GitHub Release，旁边给蓝奏云备用下载 -->
     <div v-if="updateNotice" class="app-toast update-toast" :class="{ stacked: !!toast }">
@@ -1393,6 +1402,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 右下角下载悬浮按钮可见时，toast 上移避让（不遮挡进度百分比） */
+.app-toast.shift-for-downloads {
+  bottom: 96px;
+}
+
 /* ================= v2.0：列表抬头右侧的批量操作组 =================
    全局 .content-head 是「定高 + nowrap + overflow: hidden」的一行（防止分类名长短
    让卡片区上下跳），因此这里把四个按钮统一压一档字号与内边距：

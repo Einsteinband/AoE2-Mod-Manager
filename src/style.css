@@ -2880,3 +2880,228 @@ body.sort-dragging * {
   border: none;
   border-top: 1px dashed var(--line-soft);
 }
+
+/* ================= v0.4.2：右下角全局下载管理器（DownloadManager.vue） =================
+   固定定位浮层：不参与任何布局计算；无任务时整个组件不渲染。
+   配色全部走主题 token（深色羊皮纸底 + 金色描边高亮），不引入新的 UI 框架。 */
+.dlmgr {
+  position: fixed;
+  right: 18px;
+  bottom: 30px;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+.dlmgr-fab {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  gap: 0;
+  padding: 0;
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-grad-bottom));
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.dlmgr-fab:hover {
+  border-color: var(--gold);
+  transform: translateY(-1px);
+}
+.dlmgr-fab.running {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.25), var(--shadow);
+}
+.dlmgr-fab-icon {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--gold);
+}
+.dlmgr-fab-text {
+  position: absolute;
+  bottom: 6px;
+  font-size: 9.5px;
+  letter-spacing: 0.2px;
+  color: var(--gold-bright);
+  font-variant-numeric: tabular-nums;
+}
+.dlmgr-fab-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: var(--gold);
+  color: #1a1409;
+  font-size: 10px;
+  font-weight: 600;
+}
+.dlmgr-fab-spin {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid rgba(var(--accent-rgb), 0.25);
+  border-top-color: var(--gold);
+  animation: dlmgr-spin 0.9s linear infinite;
+}
+@keyframes dlmgr-spin {
+  to { transform: rotate(360deg); }
+}
+.dlmgr-panel {
+  width: 320px;
+  max-height: min(360px, 60vh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  border-radius: 5px;
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-grad-bottom));
+  box-shadow: var(--shadow);
+  animation: app-toast-in 0.18s ease-out;
+}
+.dlmgr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+.dlmgr-head h4 {
+  margin: 0;
+  font-size: calc(12px * var(--global-scale));
+  letter-spacing: 0.6px;
+  color: var(--gold);
+}
+.dlmgr-sub {
+  margin-left: auto;
+  font-size: calc(10.5px * var(--global-scale));
+  color: var(--muted);
+}
+.dlmgr-x {
+  padding: 2px 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dlmgr-x:hover { color: var(--gold); }
+.dlmgr-list {
+  overflow-y: auto;
+  padding: 2px 0;
+}
+.dlmgr-row {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.dlmgr-row:last-child { border-bottom: none; }
+.dlmgr-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dlmgr-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11.5px * var(--global-scale));
+  color: var(--parch);
+}
+.dlmgr-badge {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: calc(10px * var(--global-scale));
+  color: var(--parch-dim);
+  white-space: nowrap;
+}
+.dlmgr-badge.downloading,
+.dlmgr-badge.installing {
+  color: var(--gold);
+  border-color: rgba(var(--accent-rgb), 0.55);
+}
+.dlmgr-badge.done {
+  color: var(--gold-bright);
+  border-color: rgba(var(--accent-rgb), 0.7);
+}
+.dlmgr-badge.failed {
+  color: var(--danger-text);
+  border-color: rgba(var(--danger-rgb), 0.6);
+}
+.dlmgr-badge.cancelled { color: var(--muted); }
+.dlmgr-bar {
+  margin-top: 5px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--surface-track);
+  overflow: hidden;
+}
+.dlmgr-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold));
+  transition: width 0.2s ease;
+}
+.dlmgr-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+.dlmgr-note {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(10px * var(--global-scale));
+  color: var(--muted);
+}
+.dlmgr-act {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.5);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--gold);
+  font-size: calc(10px * var(--global-scale));
+  cursor: pointer;
+}
+.dlmgr-act:hover:not(:disabled) {
+  border-color: var(--gold);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+.dlmgr-act.danger {
+  color: var(--danger-text);
+  border-color: rgba(var(--danger-rgb), 0.55);
+}
+.dlmgr-act:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.dlmgr-foot {
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  text-align: right;
+}
+.dlmgr-foot button {
+  padding: 3px 10px;
+  font-size: calc(10.5px * var(--global-scale));
+}
+
+/* 详情页主按钮的「排队中」态：可点击 = 移出队列，视觉上比实心金弱一档 */
+button.primary.queued {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--gold);
+}

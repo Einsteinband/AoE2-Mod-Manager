@@ -8,7 +8,8 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import RenameDialog from "./RenameDialog.vue";
 import OnlineSidebar from "./online/OnlineSidebar.vue";
 import OnlineDetailPanel from "./online/OnlineDetailPanel.vue";
-import { onDownloadProgress, onIndexProgress } from "../online/service";
+import { onIndexProgress } from "../online/service";
+import { onTaskSettled, type DownloadTask } from "../online/downloadQueue";
 import { onImagesReady } from "../online/images";
 import { hydrateTranslations, translationLangEpoch } from "../online/translation";
 import { tagLabel, type OnlineMod } from "../online/types";
@@ -100,7 +101,7 @@ const sessionCtl = useOnlineSession({
   reloadAfterLogout: () => list.reload(false),
   resetFavoritePool: list.resetFavoritePool,
   onLoginStart: () => {
-    install.actionMessage.value = null;
+    install.clearMessages();
   },
 });
 
@@ -190,6 +191,10 @@ const {
   confirmDeleteLocal,
   cancelDeleteLocal,
   openWebpage,
+  // 队列状态（进度 / 排队 / 安装中只认当前选中模组）
+  queued,
+  queuePos,
+  cancelRequested,
 } = install;
 
 const {
@@ -479,10 +484,26 @@ watch(translationLangEpoch, () => {
   if (localMode.value && localTerm.value) void localSearch.runLocalSearch(localTerm.value);
 });
 
+/**
+ * 队列任务落地（成功 / 失败 / 取消）：同步在线列表的本机状态 + 刷新本地索引 + 轻提示。
+ * 下载本身在 `online/downloadQueue.ts` 里执行，本组件只负责展示层的后续刷新。
+ */
+function handleTaskSettled(task: DownloadTask): void {
+  if (task.status === "done") {
+    // 本地模组：服务器订阅状态不参与判断
+    list.patchMod(task.modId, { userInstalled: false, updateAvailable: false });
+  }
+  void installed.refreshLocalIndex();
+  if (task.message) {
+    showToast(t(task.message.key, task.message.params ?? {}), task.status === "failed" ? "error" : "ok");
+  }
+}
+
 async function boot(): Promise<void> {
   if (booted) return;
   booted = true;
-  unlisten = await onDownloadProgress(install.handleProgress);
+  // 下载任务由 App 层的队列单例执行；这里只订阅「任务落地」事件刷列表 / 本地索引 + 轻提示
+  unlisten = onTaskSettled(handleTaskSettled);
   // v0.5：收藏 / 备注只读一次磁盘（失败不阻塞在线页）
   void ensureUserData().catch(() => undefined);
 
@@ -880,6 +901,9 @@ onUnmounted(() => {
         :updated-text="updatedText"
         :local-entry="localEntry"
         :local-index-error="localIndexError"
+        :queued="queued"
+        :queue-pos="queuePos"
+        :cancel-requested="cancelRequested"
         :primary-action="primaryAction"
         :subscribe-label="subscribeLabel"
         :subscribe-busy="subscribeBusy"
@@ -900,6 +924,7 @@ onUnmounted(() => {
         @toggle-favorite="toggleFavorite"
         @rename="openRename"
         @install="downloadAndInstall"
+        @leave-queue="stopInstall"
         @uninstall="askDeleteLocal"
         @reinstall="doInstall"
         @stop-install="stopInstall"
@@ -935,6 +960,7 @@ onUnmounted(() => {
       @confirm="confirmDeleteLocal"
       @cancel="cancelDeleteLocal"
     />
+
     </template>
   </PageShell>
 </template>
@@ -1054,7 +1080,8 @@ onUnmounted(() => {
 .online-toast {
   position: fixed;
   right: 24px;
-  bottom: 22px;
+  /* v0.4.2：抬到右下角下载悬浮按钮之上，避免互相遮挡 */
+  bottom: 88px;
   z-index: 60;
   max-width: 420px;
   padding: 9px 14px;

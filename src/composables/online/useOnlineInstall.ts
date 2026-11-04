@@ -1,34 +1,36 @@
 /**
- * 在线页的「下载 / 安装 / 卸载本地文件」。
+ * 在线页的「下载 / 安装 / 卸载本地文件」——**队列适配层**。
  *
- * 主按钮状态机**以磁盘事实为准**（不看服务器的 userInstalled）：
- *   本地没有目录 → “下载并安装为本地模组”；已有目录（无论官方订阅还是本工具安装）→ “卸载本地模组”。
+ * 真正的下载状态机在 `src/online/downloadQueue.ts`（模块级单例，右下角悬浮窗共用）。
+ * 本文件只做三件事：
+ *   ① 把「当前选中模组」在队列里的任务投影成详情面板需要的字段；
+ *   ② 提供入队入口（点击按钮 = 立即入队，不阻塞 UI）；
+ *   ③ 保留与队列无关的本地文件删除 / 打开官网 / 本地安装记录。
+ *
+ * 主按钮状态机仍以磁盘事实为准（不看服务器 userInstalled）：
+ *   本地没有目录 → “下载并安装为本地模组”；已有目录（官方订阅或本工具安装）→ “卸载本地模组”。
  * 下架 / 退订不在本工具做：取消订阅请点「在网站浏览」到官网操作。
- *
- * Rust 侧在同一条管线里完成 下载 → 解压 → 装入 subscribed → 补 info.json/缩略图 → 移到 local
- * → 一次写 mod-status.json；前端只负责进度显示与结果呈现。
  */
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { deleteModFiles } from "../../api";
 import { messageOf } from "../../online/errors";
-import { cancelInstall, installMod, openModWebpage } from "../../online/service";
+import { openModWebpage } from "../../online/service";
+import type { DownloadProgress, InstallOutcome, OnlineMod } from "../../online/types";
 import {
-  isApiFailure,
-  type DownloadProgress,
-  type InstallOutcome,
-  type OnlineMod,
-} from "../../online/types";
+  activeTaskOfMod,
+  enqueueDownload,
+  latestTaskOfMod,
+  queuePositionOf,
+  requestCancelTask,
+  taskOfMod,
+} from "../../online/downloadQueue";
 import { translateBackendMessage } from "../../format";
 import { sessionPhase } from "../../sessionState";
 import type { InstalledIndexEntry } from "../../types";
 import type { OnlineDetail } from "./useOnlineDetail";
 import type { InstalledIndex } from "./useInstalledIndex";
 import type { OnlineSelection } from "./useOnlineSelection";
-
-function kindOf(e: unknown): string | null {
-  return isApiFailure(e) ? e.kind : null;
-}
 
 export function useOnlineInstall(deps: {
   selection: OnlineSelection;
@@ -41,14 +43,6 @@ export function useOnlineInstall(deps: {
   const { t } = useI18n();
   const { selection, detail, installed } = deps;
 
-  const progress = ref<DownloadProgress | null>(null);
-  const installing = ref(false);
-  const installError = ref<string | null>(null);
-  const installNote = ref<string | null>(null);
-  const needForce = ref(false);
-  const forceOverwrite = ref(false);
-  const actionBusy = ref(false);
-  const actionMessage = ref<string | null>(null);
   const openingWeb = ref(false);
 
   /** 删除本地文件前的二次确认 */
@@ -57,6 +51,65 @@ export function useOnlineInstall(deps: {
   const deleteError = ref<string | null>(null);
 
   const selected = selection.selected;
+
+  // ---------------- 队列投影（只看当前选中的模组） ----------------
+
+  /** 该模组最近一条任务：优先未结束的，否则最近一次结果（用于显示失败 / 完成信息） */
+  const modTask = computed(() => {
+    const mod = selected.value;
+    if (!mod) return null;
+    return taskOfMod(mod.modId);
+  });
+
+  /** 正在跑（下载中 / 安装中）：只代表当前模组自己 */
+  const installing = computed(() => {
+    const status = modTask.value?.status;
+    return status === "downloading" || status === "installing";
+  });
+
+  /** 排队中：按钮显示「已加入队列（第 N 位）」，点击可移出队列 */
+  const queued = computed(() => modTask.value?.status === "queued");
+
+  /** 队列位次（1 起） */
+  const queuePos = computed<number | null>(() => {
+    const task = modTask.value;
+    if (!task || task.status !== "queued") return null;
+    return queuePositionOf(task.id);
+  });
+
+  /** 用户已请求取消，但后端还在收尾（安装阶段没有取消点） */
+  const cancelRequested = computed(
+    () => modTask.value?.cancelRequested === true && installing.value,
+  );
+
+  const progress = computed<DownloadProgress | null>(() => modTask.value?.progress ?? null);
+  const installError = computed<string | null>(() => modTask.value?.error ?? null);
+  const actionMessage = computed<string | null>(() => {
+    const message = modTask.value?.message;
+    // 队列里已结束的任务才显示结果提示，避免排队中就冒出「安装失败」
+    if (!message || (modTask.value && installing.value)) return null;
+    return t(message.key, message.params ?? {});
+  });
+  const installNote = computed<string | null>(() => {
+    const outcome = modTask.value?.outcome ?? null;
+    return outcome ? installNoteText(outcome) : null;
+  });
+
+  /** 覆盖勾选：落到该模组的任务上（新任务入队时沿用） */
+  const needForce = computed<boolean>({
+    get: () => modTask.value?.needForce === true,
+    set: (value) => {
+      const task = modTask.value;
+      if (task) task.needForce = value;
+    },
+  });
+  const forceOverwrite = computed<boolean>({
+    get: () => modTask.value?.payload.force === true,
+    set: (value) => {
+      const task = modTask.value;
+      if (task) task.payload.force = value;
+    },
+  });
 
   /** 本机安装记录（磁盘事实）：有目录 = 已安装为本地模组 */
   const localEntry = computed<InstalledIndexEntry | null>(() => {
@@ -69,21 +122,23 @@ export function useOnlineInstall(deps: {
     localEntry.value ? "uninstall-local" : "install",
   );
 
-  /** 主按钮文案：与 primaryAction 严格一一对应 */
+  /** 主按钮文案：与 primaryAction 严格一一对应（排队 / 下载中只影响当前模组） */
   const subscribeLabel = computed(() => {
-    if (installing.value) return t("online.downloading");
+    if (cancelRequested.value) return t("downloader.stopping");
+    if (queued.value) {
+      return queuePos.value
+        ? t("downloader.enqueuedPos", { n: queuePos.value })
+        : t("downloader.enqueued");
+    }
+    if (modTask.value?.status === "installing") return t("online.installing");
+    if (modTask.value?.status === "downloading") return t("online.downloading");
     return primaryAction.value === "uninstall-local"
       ? t("online.uninstallLocal")
       : t("online.installLocal");
   });
 
-  const subscribeBusy = computed(() => actionBusy.value || installing.value);
-
-  /** 下载进度事件：顺手记下真实总字节数（详情缺 modFileSize 时兜底显示） */
-  function handleProgress(payload: DownloadProgress): void {
-    progress.value = payload;
-    if (payload.total > 0) detail.measuredBytes.value = payload.total;
-  }
+  /** 只有「正在跑」才禁用主按钮；排队中是可点的（点它 = 移出队列） */
+  const subscribeBusy = computed(() => installing.value);
 
   function installNoteText(outcome: InstallOutcome): string {
     return [
@@ -107,111 +162,56 @@ export function useOnlineInstall(deps: {
       .join("\n");
   }
 
-  /**
-   * 主按钮：直接下载并安装为本地模组。
-   * forceOverwrite 决定目标目录已存在时是否覆盖（旧目录先备份，不直接删）。
-   */
-  async function downloadAndInstall(): Promise<void> {
+  // ---------------- 入队 / 取消 ----------------
+
+  /** 推入下载队列（同步返回，立刻可以去做别的事） */
+  function pushToQueue(kind: "install" | "reinstall"): void {
     const mod = selected.value;
-    if (!mod || subscribeBusy.value) return;
+    if (!mod) return;
     // v0.6：离线拦截（本地收藏 / 备注不受影响，只有下载被挡）
     if (sessionPhase.value !== "online") {
       deps.showToast(t("online.offlineBlocked"), "error");
       return;
     }
-    actionBusy.value = true;
-    actionMessage.value = null;
-    installError.value = null;
-    installNote.value = null;
-
-    installing.value = true;
-    progress.value = null;
-    try {
-      const outcome = await installMod(
-        mod.modId,
-        mod.title,
-        forceOverwrite.value,
-        mod.tagIds,
-        mod.tagNames,
-        mod.creator,
-        detail.rawDescription.value,
-        mod.thumbnail,
-      );
-      installNote.value = installNoteText(outcome);
-      needForce.value = false;
-      // 本地模组：服务器订阅状态不参与判断
-      deps.patchMod(mod.modId, { userInstalled: false, updateAvailable: false });
-      if (outcome.localized) {
-        actionMessage.value = t("online.installDone");
-        deps.showToast(t("online.installDoneToast"));
-      } else {
-        actionMessage.value = t("online.installKeepSubscribed");
-        deps.showToast(t("online.installKeepSubscribedToast"), "error");
-      }
-    } catch (e) {
-      installError.value = messageOf(e);
-      if (kindOf(e) === "install" && installError.value.includes("允许覆盖")) {
-        needForce.value = true;
-      }
-      actionMessage.value = t("online.installFailed");
-      deps.showToast(t("online.installFailedToast", { msg: messageOf(e) }), "error");
-    } finally {
-      installing.value = false;
-      progress.value = null;
-      actionBusy.value = false;
-      void installed.refreshLocalIndex();
+    const result = enqueueDownload({
+      modId: mod.modId,
+      title: mod.title,
+      kind,
+      tagIds: mod.tagIds,
+      tagNames: mod.tagNames,
+      creator: mod.creator,
+      // 描述只有「它正是当前详情」时才拿得到，其余情况传 null（后端会兜底）
+      description: detail.rawDescription.value,
+      thumbnail: mod.thumbnail,
+      force: modTask.value?.payload.force === true,
+    });
+    if (!result.accepted) {
+      deps.showToast(t("downloader.alreadyQueued"), "error");
+      return;
     }
+    deps.showToast(t("downloader.addedToast", { title: mod.title }));
+  }
+
+  /** 主按钮：加入队列（下载并安装为本地模组） */
+  function downloadAndInstall(): void {
+    pushToQueue("install");
   }
 
   /** 重新安装 / 覆盖安装（已有本地目录时的次要按钮） */
-  async function doInstall(): Promise<void> {
-    const mod = selected.value;
-    if (!mod || installing.value) return;
-    // v0.6：离线拦截（重新安装 / 覆盖安装同样需要登录态去取签名下载地址）
-    if (sessionPhase.value !== "online") {
-      deps.showToast(t("online.offlineBlocked"), "error");
-      return;
-    }
-    installing.value = true;
-    installError.value = null;
-    installNote.value = null;
-    progress.value = null;
-    try {
-      const outcome = await installMod(
-        mod.modId,
-        mod.title,
-        forceOverwrite.value,
-        mod.tagIds,
-        mod.tagNames,
-        mod.creator,
-        detail.rawDescription.value,
-        mod.thumbnail,
-      );
-      installNote.value = installNoteText(outcome);
-      needForce.value = false;
-      deps.showToast(t("online.installDoneShort"));
-    } catch (e) {
-      installError.value = messageOf(e);
-      if (kindOf(e) === "install" && installError.value.includes("允许覆盖")) {
-        needForce.value = true;
-      }
-    } finally {
-      installing.value = false;
-      progress.value = null;
-      void installed.refreshLocalIndex();
-    }
+  function doInstall(): void {
+    pushToQueue("reinstall");
   }
 
-  async function stopInstall(): Promise<void> {
-    try {
-      await cancelInstall();
-    } catch {
-      /* 忽略 */
-    }
+  /** 取消当前模组的任务：排队中 = 移出队列；下载中 = 中断；安装中 = 标记并等真实结果 */
+  function stopInstall(): void {
+    const mod = selected.value;
+    if (!mod) return;
+    const task = activeTaskOfMod(mod.modId);
+    if (task) requestCancelTask(task.id);
   }
 
   function askDeleteLocal(): void {
-    if (!localEntry.value || subscribeBusy.value) return;
+    if (!localEntry.value || installing.value) return;
     deleteError.value = null;
     confirmDeleteOpen.value = true;
   }
@@ -224,10 +224,10 @@ export function useOnlineInstall(deps: {
     deleteBusy.value = true;
     deleteError.value = null;
     try {
-      const report = await deleteModFiles(entry.kind, entry.folderName, mod.modId);
+      await deleteModFiles(entry.kind, entry.folderName, mod.modId);
       confirmDeleteOpen.value = false;
-      installNote.value = translateBackendMessage(report.message);
-      actionMessage.value = t("online.deletedLocal");
+      const task = latestTaskOfMod(mod.modId);
+      if (task) task.message = { key: "online.deletedLocal" };
       deps.showToast(t("online.deletedLocalToast"));
       await installed.refreshLocalIndex();
     } catch (e) {
@@ -256,17 +256,25 @@ export function useOnlineInstall(deps: {
     }
   }
 
-  /** 选中另一个模组：清掉上一条的安装状态（避免"上一条的报错"挂在新模组上） */
+  /** 切换模组：队列状态按 modId 存放，无需清理（保留接口以兼容调用点） */
   function resetForSwitch(): void {
-    installError.value = null;
-    installNote.value = null;
-    needForce.value = false;
-    actionMessage.value = null;
+    /* no-op */
+  }
+
+  /** 登录开始时清掉当前模组的结果提示（不动队列 / 进度） */
+  function clearMessages(): void {
+    const mod = selected.value;
+    if (!mod) return;
+    const task = latestTaskOfMod(mod.modId);
+    if (task && !installing.value) task.message = null;
   }
 
   return {
     progress,
     installing,
+    queued,
+    queuePos,
+    cancelRequested,
     installError,
     installNote,
     needForce,
@@ -280,7 +288,6 @@ export function useOnlineInstall(deps: {
     primaryAction,
     subscribeLabel,
     subscribeBusy,
-    handleProgress,
     downloadAndInstall,
     doInstall,
     stopInstall,
@@ -289,6 +296,7 @@ export function useOnlineInstall(deps: {
     cancelDeleteLocal,
     openWebpage,
     resetForSwitch,
+    clearMessages,
   };
 }
 

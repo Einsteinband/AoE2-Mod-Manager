@@ -42,11 +42,17 @@ const props = defineProps<{
   updatedText: string | null;
   localEntry: InstalledIndexEntry | null;
   localIndexError: string | null;
-  // 安装
+  // 安装 / 下载队列
   primaryAction: "install" | "uninstall-local";
   subscribeLabel: string;
   subscribeBusy: boolean;
   installing: boolean;
+  /** 排队中（尚未开始） */
+  queued: boolean;
+  /** 队列位次（1 起） */
+  queuePos: number | null;
+  /** 已请求取消、等待后端收尾 */
+  cancelRequested: boolean;
   progress: DownloadProgress | null;
   actionMessage: string | null;
   installError: string | null;
@@ -69,6 +75,7 @@ const emit = defineEmits<{
   (event: "toggle-favorite"): void;
   (event: "rename"): void;
   (event: "install"): void;
+  (event: "leave-queue"): void;
   (event: "uninstall"): void;
   (event: "reinstall"): void;
   (event: "stop-install"): void;
@@ -197,8 +204,18 @@ watch(
 
       <!-- 主操作：安装（实心金色）/ 卸载（危险红，父组件的二次确认弹窗照常触发） -->
       <div class="detail-actions">
+        <!-- 排队中：按钮依然可点（点它 = 移出队列），用户可立即去操作别的模组 -->
         <button
-          v-if="primaryAction === 'install'"
+          v-if="queued"
+          type="button"
+          class="primary queued"
+          :title="t('downloader.leaveQueue')"
+          @click="emit('leave-queue')"
+        >
+          {{ subscribeLabel }}
+        </button>
+        <button
+          v-else-if="primaryAction === 'install'"
           type="button"
           class="primary"
           :disabled="subscribeBusy"
@@ -260,8 +277,14 @@ watch(
         >
           {{ installing ? t("online.installing") : mod.updateAvailable ? t("online.updateLocal") : t("online.reinstallLocal") }}
         </button>
-        <button v-if="installing" type="button" class="dv-btn-ghost" @click="emit('stop-install')">
-          {{ t("online.cancelDownload") }}
+        <button
+          v-if="installing"
+          type="button"
+          class="dv-btn-ghost"
+          :disabled="cancelRequested"
+          @click="emit('stop-install')"
+        >
+          {{ cancelRequested ? t("downloader.stopping") : t("online.cancelDownload") }}
         </button>
         <button type="button" class="dv-btn-ghost" :disabled="openingWeb" @click="emit('open-webpage')">
           {{ t("online.browseSite") }}

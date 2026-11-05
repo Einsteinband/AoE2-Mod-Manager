@@ -171,6 +171,25 @@ export function cancelInstall(): Promise<void> {
   return invoke<void>("online_cancel_install");
 }
 
+// ---------------- v0.4.3：下载队列持久化（download_queue.json） ----------------
+
+/** 队列快照：tasks 由前端定义结构，Rust 只负责原样存取 */
+export interface DownloadQueueSnapshot {
+  version: number;
+  tasks: Record<string, unknown>[];
+  savedAt: number;
+}
+
+/** 读上次退出时的队列快照（文件缺失 / 损坏都返回空表，不报错） */
+export function loadDownloadQueue(): Promise<DownloadQueueSnapshot> {
+  return invoke<DownloadQueueSnapshot>("load_download_queue");
+}
+
+/** 覆盖式保存整份队列快照，返回最终文件路径 */
+export function saveDownloadQueue(snapshot: DownloadQueueSnapshot): Promise<string> {
+  return invoke<string>("save_download_queue", { data: snapshot });
+}
+
 /**
  * 卸载本地模组（不向官方发任何请求）。
  * 后端先确认游戏未运行，再校验目标只能是 `<root>/<kind>/<modId>_*` 的真实目录，

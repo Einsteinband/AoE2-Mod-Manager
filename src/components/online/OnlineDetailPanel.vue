@@ -58,6 +58,8 @@ const props = defineProps<{
   installError: string | null;
   installNote: string | null;
   openingWeb: boolean;
+  /** 「打开所在文件夹」请求进行中 */
+  revealingFolder: boolean;
   // 详情
   descText: string | null;
   detailLoading: boolean;
@@ -80,6 +82,7 @@ const emit = defineEmits<{
   (event: "reinstall"): void;
   (event: "stop-install"): void;
   (event: "open-webpage"): void;
+  (event: "reveal-folder"): void;
 }>();
 
 const { t, locale } = useI18n();
@@ -221,6 +224,17 @@ watch(
         </button>
         <button v-else type="button" class="danger" :disabled="subscribeBusy" @click="emit('uninstall')">
           {{ subscribeLabel }}
+        </button>
+        <!-- 已安装到本地时：卸载按钮右侧直接定位到磁盘上的模组文件夹 -->
+        <button
+          v-if="primaryAction === 'uninstall-local'"
+          type="button"
+          class="dv-btn-ghost"
+          :disabled="revealingFolder"
+          :title="t('detail.openFolder')"
+          @click="emit('reveal-folder')"
+        >
+          {{ revealingFolder ? t("detail.opening") : t("detail.openFolder") }}
         </button>
       </div>
 

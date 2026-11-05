@@ -192,6 +192,8 @@ const {
   confirmDeleteLocal,
   cancelDeleteLocal,
   openWebpage,
+  revealingFolder,
+  openLocalFolder,
   // 队列状态（进度 / 排队 / 安装中只认当前选中模组）
   queued,
   queuePos,
@@ -911,6 +913,7 @@ onUnmounted(() => {
         :install-error="installError"
         :install-note="installNote"
         :opening-web="openingWeb"
+        :revealing-folder="revealingFolder"
         :desc-text="descText"
         :detail-loading="detailLoading"
         :detail-error="detailError"
@@ -926,6 +929,7 @@ onUnmounted(() => {
         @reinstall="doInstall"
         @stop-install="stopInstall"
         @open-webpage="openWebpage"
+        @reveal-folder="openLocalFolder"
       />
     </template>
 

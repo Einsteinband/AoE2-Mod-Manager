@@ -35,7 +35,7 @@ import {
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
 import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
-import { downloadTasks, initDownloadQueue } from "./online/downloadQueue";
+import { initDownloadQueue } from "./online/downloadQueue";
 import { itemsById, updateIds } from "./modUpdates";
 import {
   applyTranslateSettings,
@@ -64,6 +64,7 @@ import { useLocalModActions } from "./composables/local/useLocalModActions";
 import { useBatchToggle } from "./composables/local/useBatchToggle";
 import { usePresets } from "./composables/local/usePresets";
 import { useLocalUpdate } from "./composables/local/useLocalUpdate";
+import { useGameLaunch } from "./composables/useGameLaunch";
 
 /**
  * 页面入口只做四件事：**页面级状态（模式 / 在线筛选）/ 组件协调 / 状态连接 / 启动引导**。
@@ -124,8 +125,6 @@ const collationLocale = computed(() =>
 // ---------------- 组合各业务层（顺序即依赖方向） ----------------
 
 const { toast, showToast } = useToast();
-/** 有下载任务时右下角会有悬浮按钮，toast 需要上移避让 */
-const hasDownloadTasks = computed(() => downloadTasks.value.length > 0);
 const { viewMode, cardSize, applyFromSettings: applyViewPrefs } = useViewPrefs();
 
 // ---------------- v2.2：主题（dark 深色羊皮纸 / light 明亮米白） ----------------
@@ -566,6 +565,21 @@ const update = useLocalUpdate({
 });
 const { updateNotice, updatingEntryId, handleUpdateMod, runStartupUpdateCheck, openUpdatePage } = update;
 
+/**
+ * v3.3：顶栏「启动游戏」。启动统一走 Steam 协议（保留启动项 / 游玩时长 / 成就）；
+ * 没配置游戏根目录时后端返回 GAME_PATH_MISSING，这里把用户送到
+ * 「设置 → 通用」并聚焦「游戏根目录」一行，不再弹选 exe 的文件框。
+ */
+const { launching: gameLaunching, launch: launchGameNow } = useGameLaunch({
+  notify: showToast,
+  normalizeError: scan.normalizeError,
+  openGameRootSettings,
+  texts: () => ({
+    started: t("toolbar.launchGameStarted"),
+    needRoot: t("toolbar.launchGameNoRoot"),
+  }),
+});
+
 /** 本地列表的滚动位置记忆（模式切换时滚动容器会被销毁重建） */
 const { el: localScrollEl } = useScrollRestore();
 
@@ -588,6 +602,13 @@ const showWarnings = ref(false);
 /** v0.4 独立设置弹窗（语言 / 网络 / 关于） */
 const showSettings = ref(false);
 
+/** 设置弹窗打开时停在哪个 Tab（「启动游戏」缺配置时会切到 general） */
+const settingsInitialTab = ref<
+  "general" | "appearance" | "network" | "local" | "online" | "storage" | "about"
+>("general");
+/** 打开设置后是否滚动并高亮「游戏根目录」一行 */
+const settingsFocusGameRoot = ref(false);
+
 /** v1.2：在线页「本地索引未开启 → 前往设置」的快捷入口 */
 watch(openSettingsNonce, () => {
   showSettings.value = true;
@@ -595,6 +616,16 @@ watch(openSettingsNonce, () => {
 
 function closeSettings() {
   showSettings.value = false;
+  // 下次从齿轮打开时回到默认状态，不带着上次的高亮 / Tab
+  settingsFocusGameRoot.value = false;
+  settingsInitialTab.value = "general";
+}
+
+/** 顶栏「启动游戏」缺配置时的落点：设置 → 通用 → 「游戏根目录」一行 */
+function openGameRootSettings() {
+  settingsInitialTab.value = "general";
+  settingsFocusGameRoot.value = true;
+  showSettings.value = true;
 }
 
 function closeWizard() {
@@ -997,6 +1028,17 @@ onBeforeUnmount(() => {
            两种模式共用同一个位置，切页时按钮不会跳动；
            排序模式仍留在本地页列表抬头的 .batch-actions 里。 -->
       <div class="topbar-actions">
+        <!-- v3.2：启动游戏（金色主按钮），钉在网格 / 列表切换左侧 -->
+        <button
+          type="button"
+          class="launch-game-btn"
+          :disabled="gameLaunching"
+          :title="t('toolbar.launchGameTitle')"
+          @click="launchGameNow"
+        >
+          <span class="glyph">🎮</span>
+          {{ gameLaunching ? t("toolbar.launchGameBusy") : t("toolbar.launchGame") }}
+        </button>
         <ViewSwitch v-model:view-mode="viewMode" />
       </div>
     </template>
@@ -1340,6 +1382,8 @@ onBeforeUnmount(() => {
       v-model:reader-font-weight="readerFontWeight"
       v-model:card-font-size="cardFontSize"
       :root-path="report?.root ?? ''"
+      :initial-tab="settingsInitialTab"
+      :focus-game-root="settingsFocusGameRoot"
       @close="closeSettings"
       @change-root="chooseRoot"
     />
@@ -1369,7 +1413,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 轻量提示（排序已保存等）：固定右下角，不挤压布局 -->
-    <div v-if="toast" class="app-toast" :class="[toast.kind, { 'shift-for-downloads': hasDownloadTasks }]">{{ toast.text }}</div>
+    <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
 
     <!-- 右下角全局下载管理（模块级队列，切页面 / 卸载在线页都不丢） -->
     <DownloadManager />
@@ -1402,8 +1446,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 右下角下载悬浮按钮可见时，toast 上移避让（不遮挡进度百分比） */
-.app-toast.shift-for-downloads {
+/* 右下角下载悬浮按钮常驻（v0.4.3：无任务时也显示），toast 始终上移避让 */
+.app-toast {
   bottom: 96px;
 }
 
@@ -1481,5 +1525,42 @@ onBeforeUnmount(() => {
   border-color: var(--gold-dim);
 }
 
-
+/* ================= v3.2：顶栏「启动游戏」按钮 =================
+   位置：顶栏右端 .topbar-actions 内、网格/列表切换左侧。
+   视觉：与主按钮同色（金色渐变 + 金色描边），高度对齐齿轮 30px；
+   .topbar-actions > * 已是 flex: 0 0 auto，所以窄窗口下只压搜索框、不压它。 */
+.topbar-actions .launch-game-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px;
+  white-space: nowrap;
+  font-family: inherit;
+  font-size: calc(11.5px * var(--global-scale));
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: var(--text-on-accent);
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  border: 1px solid var(--gold-dim);
+  border-radius: 4px;
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.22);
+}
+.topbar-actions .launch-game-btn:hover:not(:disabled) {
+  color: var(--text-on-accent);
+  border-color: var(--gold);
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  filter: brightness(1.08);
+}
+.topbar-actions .launch-game-btn:active:not(:disabled) {
+  transform: none;
+}
+.topbar-actions .launch-game-btn:disabled {
+  opacity: 0.62;
+  cursor: progress;
+}
+.topbar-actions .launch-game-btn .glyph {
+  font-size: calc(12.5px * var(--global-scale));
+  line-height: 1;
+}
 </style>

@@ -18,9 +18,10 @@
  *   - status = installing  → 解压 / 补 info.json / 写 mod-status.json 阶段后端**没有取消点**
  *                            （install.rs 全无 cancel 逻辑），只能标「正在停止…」并等真实结果。
  */
-import { ref } from "vue";
-import { cancelInstall, installMod, onDownloadProgress } from "./service";
+import { ref, watch } from "vue";
+import { cancelInstall, installMod, loadDownloadQueue, onDownloadProgress, saveDownloadQueue } from "./service";
 import { messageOf } from "./errors";
+import { sessionPhase } from "../sessionState";
 import {
   isApiFailure,
   type DownloadProgress,
@@ -29,6 +30,11 @@ import {
 
 /** 同一时刻允许同时执行的安装任务数（受后端全局取消标记限制，当前只能为 1） */
 export const MAX_CONCURRENT = 1;
+
+/** 持久化快照结构版本号（结构大改时递增，供将来迁移用） */
+const SNAPSHOT_VERSION = 1;
+/** 落盘防抖：连续入队 / 连续结束时只写一次 */
+const PERSIST_DEBOUNCE_MS = 400;
 
 /** 队列 / 历史最多保留条数（超出后丢弃最旧的已结束任务） */
 const HISTORY_LIMIT = 20;
@@ -107,6 +113,51 @@ let seq = 0;
 
 function touch(): void {
   downloadTasks.value = [...downloadTasks.value];
+  persistSoon();
+}
+
+// ---------------- 持久化（download_queue.json） ----------------
+
+let persistTimer: number | null = null;
+
+/** 把任务机态剥离成可落盘的纯数据（进度不存：重启后不可能续传） */
+function snapshotTask(task: DownloadTask): Record<string, unknown> {
+  return {
+    id: task.id,
+    modId: task.modId,
+    title: task.title,
+    kind: task.kind,
+    status: task.status,
+    error: task.error,
+    localized: task.localized,
+    needForce: task.needForce,
+    message: task.message,
+    payload: task.payload,
+    createdAt: task.createdAt,
+    startedAt: task.startedAt,
+    finishedAt: task.finishedAt,
+  };
+}
+
+/** 防抖写盘：状态变化（入队 / 出队 / 结束 / 移除）后 400ms 内只写一次 */
+function persistSoon(): void {
+  if (persistTimer !== null) window.clearTimeout(persistTimer);
+  persistTimer = window.setTimeout(() => {
+    persistTimer = null;
+    void flushPersist();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+async function flushPersist(): Promise<void> {
+  try {
+    await saveDownloadQueue({
+      version: SNAPSHOT_VERSION,
+      tasks: downloadTasks.value.map(snapshotTask),
+      savedAt: Date.now(),
+    });
+  } catch (e) {
+    console.warn("[downloader] 保存下载队列失败", e);
+  }
 }
 
 function isActive(task: DownloadTask): boolean {
@@ -194,6 +245,7 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
   };
   downloadTasks.value = [...downloadTasks.value, task];
   trimHistory();
+  persistSoon();
   void pump();
   return { accepted: true, task };
 }
@@ -231,11 +283,13 @@ export function removeTask(taskId: string): void {
   const task = downloadTasks.value[index];
   if (isActive(task)) return;
   downloadTasks.value = downloadTasks.value.filter((item) => item.id !== taskId);
+  persistSoon();
 }
 
 /** 清掉所有已结束（完成 / 失败 / 取消）的任务 */
 export function clearFinishedTasks(): void {
   downloadTasks.value = downloadTasks.value.filter((task) => isActive(task));
+  persistSoon();
 }
 
 function trimHistory(): void {
@@ -362,7 +416,87 @@ function handleProgress(payload: DownloadProgress): void {
 
 let initialized = false;
 
-/** 由 App.vue 在 mounted 时调用一次：注册下载进度事件（不依赖在线页是否挂载） */
+/** 把落盘数据还原成任务对象（字段级容错：单个坏任务只跳过它自己） */
+function coerceTask(raw: Record<string, unknown>): DownloadTask | null {
+  const modId = Number(raw.modId);
+  if (!Number.isFinite(modId) || modId <= 0) return null;
+  const status = raw.status as TaskStatus;
+  if (!["queued", "downloading", "installing", "done", "failed", "cancelled"].includes(status)) {
+    return null;
+  }
+  const payload = (raw.payload ?? {}) as Record<string, unknown>;
+  const message = raw.message as TaskMessage | null | undefined;
+  const id = typeof raw.id === "string" && raw.id ? raw.id : `${modId}-${Date.now()}-r`;
+  return {
+    id,
+    modId,
+    title: typeof raw.title === "string" && raw.title ? raw.title : `#${modId}`,
+    kind: raw.kind === "reinstall" ? "reinstall" : "install",
+    status,
+    progress: null, // 进度不持久化：重启后不可能续传，只看得到状态
+    error: typeof raw.error === "string" ? raw.error : null,
+    outcome: null, // 后端报告不回放（只显示状态与错误）
+    localized: typeof raw.localized === "boolean" ? raw.localized : null,
+    cancelRequested: false,
+    needForce: raw.needForce === true,
+    message:
+      message && typeof message.key === "string"
+        ? { key: message.key, params: message.params }
+        : null,
+    payload: {
+      tagIds: Array.isArray(payload.tagIds)
+        ? payload.tagIds.filter((n): n is number => typeof n === "number")
+        : [],
+      tagNames: Array.isArray(payload.tagNames)
+        ? payload.tagNames.filter((n): n is string => typeof n === "string")
+        : [],
+      creator: typeof payload.creator === "string" ? payload.creator : null,
+      description: typeof payload.description === "string" ? payload.description : null,
+      thumbnail: typeof payload.thumbnail === "string" ? payload.thumbnail : null,
+      force: payload.force === true,
+    },
+    createdAt: Number(raw.createdAt) || Date.now(),
+    startedAt: typeof raw.startedAt === "number" ? raw.startedAt : null,
+    finishedAt: typeof raw.finishedAt === "number" ? raw.finishedAt : null,
+  };
+}
+
+/** 启动时恢复上次退出前的队列（同步于任务落地事件之后，不阻塞首屏） */
+async function restorePersisted(): Promise<void> {
+  try {
+    const snapshot = await loadDownloadQueue();
+    const raw = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+    if (!raw.length) return;
+    const restored: DownloadTask[] = [];
+    for (const item of raw) {
+      const task = coerceTask(item as Record<string, unknown>);
+      if (!task) continue;
+      if (task.status === "downloading" || task.status === "installing") {
+        // 进程被杀时它根本没跑完，磁盘状态未知：不自动重跑，如实标记为「中断」
+        task.status = "failed";
+        task.error = null;
+        task.message = { key: "downloader.interrupted" };
+        task.finishedAt = task.finishedAt ?? Date.now();
+      }
+      restored.push(task);
+    }
+    if (!restored.length) return;
+    const active = restored.filter(isActive);
+    const finished = restored.filter((task) => !isActive(task)).slice(-HISTORY_LIMIT);
+    downloadTasks.value = [...active, ...finished].sort((a, b) => a.createdAt - b.createdAt);
+  } catch (e) {
+    console.warn("[downloader] 恢复下载队列失败", e);
+  }
+}
+
+/** 排队中的任务等登录态恢复后再自动续跑（离线硬跑只会立刻全部失败） */
+function resumeIfOnline(): void {
+  if (sessionPhase.value !== "online") return;
+  if (!downloadTasks.value.some((task) => task.status === "queued")) return;
+  void pump();
+}
+
+/** 由 App.vue 在 mounted 时调用一次：注册进度事件 + 恢复上次队列（不依赖在线页是否挂载） */
 export async function initDownloadQueue(): Promise<void> {
   if (initialized) return;
   initialized = true;
@@ -371,6 +505,14 @@ export async function initDownloadQueue(): Promise<void> {
   } catch (e) {
     console.warn("[downloader] 下载进度订阅失败", e);
   }
+  await restorePersisted();
+  watch(sessionPhase, () => resumeIfOnline(), { immediate: true });
+  if (downloadTasks.value.length) persistSoon();
+}
+
+/** 强制把当前队列写盘（退出前 / 手动清理后可用） */
+export function flushDownloadQueue(): Promise<void> {
+  return flushPersist();
 }
 
 /** 汇总数字（悬浮窗角标 / 底栏共用） */

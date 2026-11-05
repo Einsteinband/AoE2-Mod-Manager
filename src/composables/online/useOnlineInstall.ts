@@ -5,7 +5,7 @@
  * 本文件只做三件事：
  *   ① 把「当前选中模组」在队列里的任务投影成详情面板需要的字段；
  *   ② 提供入队入口（点击按钮 = 立即入队，不阻塞 UI）；
- *   ③ 保留与队列无关的本地文件删除 / 打开官网 / 本地安装记录。
+ *   ③ 保留与队列无关的本地文件删除 / 打开本地文件夹 / 打开官网 / 本地安装记录。
  *
  * 主按钮状态机仍以磁盘事实为准（不看服务器 userInstalled）：
  *   本地没有目录 → “下载并安装为本地模组”；已有目录（官方订阅或本工具安装）→ “卸载本地模组”。
@@ -13,7 +13,7 @@
  */
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { deleteModFiles } from "../../api";
+import { deleteModFiles, getSettings, revealModFolder } from "../../api";
 import { messageOf } from "../../online/errors";
 import { openModWebpage } from "../../online/service";
 import type { DownloadProgress, InstallOutcome, OnlineMod } from "../../online/types";
@@ -44,6 +44,8 @@ export function useOnlineInstall(deps: {
   const { selection, detail, installed } = deps;
 
   const openingWeb = ref(false);
+  /** 「打开所在文件夹」进行中（避免连点拉起多个资源管理器） */
+  const revealingFolder = ref(false);
 
   /** 删除本地文件前的二次确认 */
   const confirmDeleteOpen = ref(false);
@@ -256,6 +258,32 @@ export function useOnlineInstall(deps: {
     }
   }
 
+  /**
+   * 在资源管理器中定位「已安装到本地」的模组文件夹。
+   * 磁盘路径 = 模组根目录 + 索引条目的 kind + folderName，
+   * 合法性（必须位于模组根目录之下、必须是真实目录）仍由 Rust 侧 reveal_mod_folder 校验。
+   */
+  async function openLocalFolder(): Promise<void> {
+    const entry = localEntry.value;
+    if (!entry || revealingFolder.value) return;
+    revealingFolder.value = true;
+    try {
+      const settings = await getSettings();
+      const root = (settings.modRoot ?? "").trim();
+      if (!root) {
+        deps.showToast(t("detail.errReveal"), "error");
+        return;
+      }
+      const sep = root.includes("\\") ? "\\" : "/";
+      const base = root.endsWith(sep) ? root : root + sep;
+      await revealModFolder(`${base}${entry.kind}${sep}${entry.folderName}`);
+    } catch (e) {
+      deps.showToast(`${t("detail.errReveal")}: ${messageOf(e)}`, "error");
+    } finally {
+      revealingFolder.value = false;
+    }
+  }
+
   /** 切换模组：队列状态按 modId 存放，无需清理（保留接口以兼容调用点） */
   function resetForSwitch(): void {
     /* no-op */
@@ -295,6 +323,8 @@ export function useOnlineInstall(deps: {
     confirmDeleteLocal,
     cancelDeleteLocal,
     openWebpage,
+    revealingFolder,
+    openLocalFolder,
     resetForSwitch,
     clearMessages,
   };

@@ -219,6 +219,13 @@ pub struct Settings {
     /// 译文缓存（translation_cache.json / online_titles_zh.json）的存放目录；None = 应用配置目录
     #[serde(default)]
     pub translation_cache_dir: Option<String>,
+
+    /// v3.3：「启动游戏」用的游戏根目录（含 AoE2DE_s.exe 的那一层，如
+    /// `F:\Games\AoE2DE`）。启动走 Steam 协议，这里只用于校验与展示；
+    /// 空 = 未配置（点「启动游戏」时前端跳「设置 → 通用」引导用户配置）。
+    /// v3.2 的 `game_exe_path` 已被本字段取代，旧 settings.json 里的键由 serde 忽略。
+    #[serde(default)]
+    pub game_root_dir: Option<String>,
     /// v2.3 遗留：扁平的界面字号。v2.4 起只作为一次性迁移来源，
     /// 由 `migrate_legacy_typography` 搬进 reader_* 后置空；之后写入一律为 null。
     #[serde(default)]
@@ -493,6 +500,8 @@ impl Default for Settings {
             image_cache_dir: None,
             mod_info_cache_dir: None,
             translation_cache_dir: None,
+            // v3.3：游戏根目录默认未配置（启动前会引导用户去设置里选一次）
+            game_root_dir: None,
             // v2.3 遗留字段：新装 / 默认值里一律为空
             ui_font_size: None,
             ui_line_height: None,

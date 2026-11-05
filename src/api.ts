@@ -419,6 +419,38 @@ export async function pickFolder(defaultPath?: string | null): Promise<string | 
   return typeof picked === "string" ? picked : null;
 }
 
+/**
+ * 「启动游戏」：由 Rust 校验游戏根目录后，通过 Steam 协议
+ * （steam://rungameid/813780）唤起游戏 —— 启动项 / 游玩时长 / 成就都走 Steam。
+ *
+ * exePath 仅为向后兼容保留：现在前端恒传 null，后端只认 settings.game_root_dir。
+ * 没配置根目录时后端返回 GAME_PATH_MISSING，前端据此跳「设置 → 通用」。
+ */
+export function launchGame(exePath?: string | null): Promise<string> {
+  return invoke<string>("launch_game", { exePath: exePath ?? null });
+}
+
+/** 后端「未找到游戏路径」错误码（与 Rust 侧 launch_game 返回的字符串完全一致） */
+export const GAME_PATH_MISSING = "GAME_PATH_NOT_FOUND";
+
+/**
+ * 设置 → 通用：保存游戏根目录（null / 空串 = 清除配置）。
+ *
+ * Rust 侧会校验「绝对路径 + 目录存在 + 含 AoE2DE_s.exe」，非法目录直接抛错，
+ * 所以前端不需要自己判断目录合法性，只负责展示错误。
+ */
+export function setGameRootDir(dir: string | null): Promise<AppSettings> {
+  return invoke<AppSettings>("set_game_root_dir", { dir: dir ?? null });
+}
+
+/**
+ * 设置 → 通用「自动检测」：只读探测本机游戏目录（Steam 库 / 注册表 / 盘符常见路径），
+ * 不写配置；返回 null 表示没探测到。
+ */
+export function detectGameRoot(): Promise<string | null> {
+  return invoke<string | null>("detect_game_root");
+}
+
 /** 把本地绝对路径转成 webview 可加载的 asset URL */
 export function fileUrl(path: string): string {
   return convertFileSrc(path);

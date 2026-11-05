@@ -268,6 +268,90 @@ pub fn validate_structure(mod_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 应当位于 `resources/` 之下、却常被老旧/不规范压缩包直接摊在模组根目录的资源目录名。
+///
+/// 只认这张白名单：宁可漏搬也不误搬，避免把模组自带的普通子目录当成游戏资源。
+const ROOT_RESOURCE_DIRS: &[&str] = &[
+    "_common",
+    "widgetui",
+    "gamedata",
+    "wpfg",
+    "drs",
+    "sound",
+    "sounds",
+    "art",
+    "particles",
+];
+
+/// 修复“缺一层 resources”的模组结构（老旧/不规范压缩包常见毛病）。
+///
+/// 规则：
+/// - 根目录已有 `resources` 目录 → 原样不动（可能是特殊的非标准结构，动它反而会坏）
+/// - 没有 `resources`，但根目录直接躺着 `_common` / `widgetui` / `gamedata` 等资源目录
+///   → 新建 `resources`，把这些目录改名搬进去（同卷 rename，不复制、不丢数据）
+/// - 一个都没命中 → 什么都不做，也不会留下空的 `resources`
+///
+/// 返回被搬动的目录名（按白名单顺序）；调用方据此打日志即可。
+pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
+    if !mod_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let resources = mod_root.join("resources");
+    if resources.is_dir() {
+        return Ok(Vec::new());
+    }
+    if resources.exists() {
+        // 同名但不是目录（例如误放在根目录的文件）：不碰，交给上层提示
+        return Err(format!(
+            "{} 已存在但不是文件夹，已跳过结构补全",
+            resources.display()
+        ));
+    }
+
+    // 先整体探测，确认确实要搬再建目录，避免留下一个空的 resources
+    let pending: Vec<PathBuf> = ROOT_RESOURCE_DIRS
+        .iter()
+        .map(|name| mod_root.join(name))
+        .filter(|path| path.is_dir())
+        .collect();
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    fs::create_dir_all(&resources)
+        .map_err(|e| format!("无法创建 resources 目录（{}）：{e}", resources.display()))?;
+
+    let mut moved: Vec<String> = Vec::with_capacity(pending.len());
+    for from in pending {
+        let Some(name) = from.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let to = resources.join(&name);
+        if to.exists() {
+            // 目标已存在（resources 是刚建的，理论上不会发生）：绝不覆盖
+            log::warn!(
+                target: "install",
+                "resources 下已存在同名目录，跳过：{}",
+                to.display()
+            );
+            continue;
+        }
+        match fs::rename(&from, &to) {
+            Ok(()) => moved.push(name),
+            Err(e) => log::warn!(
+                target: "install",
+                "移入 resources 失败：{} - {e}",
+                from.display()
+            ),
+        }
+    }
+    if moved.is_empty() {
+        // 一个都没搬成功：撤掉刚建的空目录，保持与解压结果一致
+        let _ = fs::remove_dir(&resources);
+    }
+    Ok(moved)
+}
+
 pub fn install_dir_name(mod_id: i64, title: &str) -> String {
     format!("{mod_id}_{}", sanitize_component(title))
 }
@@ -632,6 +716,23 @@ pub fn install(
     force: bool,
     owned_before: bool,
 ) -> Result<InstallReport, String> {
+    // 老旧模组常见毛病：包内资源目录直接摊在根目录，缺一层 `resources`，
+    // 游戏读不到资源就会在模组列表里显示感叹号。这里在改名到 subscribed 之前就地补全，
+    // 原子改名之后留下的就是修好的目录；补全失败只记日志，绝不阻断安装。
+    // （不影响下面的 WorkshopID / 去 `{id}_` 前缀逻辑）
+    match fix_mod_structure(staging_mod_root) {
+        Ok(moved) if !moved.is_empty() => log::info!(
+            target: "install",
+            "已补全 resources 层级，移入：{}",
+            moved.join(", ")
+        ),
+        Ok(_) => {}
+        Err(e) => log::warn!(
+            target: "install",
+            "补全 resources 层级失败（不影响安装）：{e}"
+        ),
+    }
+
     let subscribed = mods_root.join("subscribed");
     fs::create_dir_all(&subscribed).map_err(|e| format!("无法创建 subscribed 目录：{e}"))?;
 
@@ -982,8 +1083,19 @@ mod tests {
         let second = install(&mod_root_b, &root, 424242, "Test Mod", false, true).unwrap();
         assert!(second.updated);
         let backup = second.backup_dir.expect("更新时必须给出备份目录");
-        assert!(Path::new(&backup).join("widgetui/textures/a.dds").is_file(), "旧版本文件应保留在备份里");
-        assert!(Path::new(&second.target_dir).join("widgetui/textures/b.dds").is_file());
+        // 两个 zip 都是老旧布局（widgetui 直接摊在根目录），安装时会被 fix_mod_structure
+        // 补进 resources/，因此断言路径同步到 resources/widgetui/…
+        assert!(
+            Path::new(&backup).join("resources/widgetui/textures/a.dds").is_file(),
+            "旧版本文件应保留在备份里"
+        );
+        assert!(Path::new(&second.target_dir)
+            .join("resources/widgetui/textures/b.dds")
+            .is_file());
+        assert!(
+            !Path::new(&second.target_dir).join("widgetui").exists(),
+            "根目录下的 widgetui 应已补进 resources/"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1055,6 +1167,60 @@ mod tests {
         let err = validate_structure(&dir).unwrap_err();
         assert!(err.contains("可执行文件"), "实际错误：{err}");
         assert!(err.contains("setup.exe"), "错误信息应指出具体文件：{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_moves_legacy_root_dirs_into_resources() {
+        let dir = temp_dir("fix-struct-move");
+        fs::write(dir.join("info.json"), r#"{"Title":"Old"}"#).unwrap();
+        fs::create_dir_all(dir.join("_common/widgetui")).unwrap();
+        fs::write(dir.join("_common/widgetui/a.dds"), "a").unwrap();
+        fs::create_dir_all(dir.join("gamedata")).unwrap();
+        fs::write(dir.join("gamedata/b.txt"), "b").unwrap();
+
+        let moved = fix_mod_structure(&dir).unwrap();
+        assert_eq!(moved, vec!["_common".to_string(), "gamedata".to_string()]);
+        assert!(dir.join("resources/_common/widgetui/a.dds").is_file());
+        assert!(dir.join("resources/gamedata/b.txt").is_file());
+        assert!(!dir.join("_common").exists(), "根目录下的 _common 应已被移走");
+        assert!(!dir.join("gamedata").exists());
+        assert!(dir.join("info.json").is_file(), "info.json 不得被搬动");
+
+        // 幂等：再跑一次什么都不做
+        assert!(fix_mod_structure(&dir).unwrap().is_empty());
+        assert!(dir.join("resources/_common/widgetui/a.dds").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_keeps_existing_resources_untouched() {
+        let dir = temp_dir("fix-struct-keep");
+        fs::create_dir_all(dir.join("resources/_common")).unwrap();
+        fs::write(dir.join("resources/_common/a.dds"), "a").unwrap();
+        // 根目录还残留一个资源目录，但既然已有 resources，一律不动
+        fs::create_dir_all(dir.join("widgetui")).unwrap();
+        fs::write(dir.join("widgetui/b.dds"), "b").unwrap();
+
+        assert!(fix_mod_structure(&dir).unwrap().is_empty());
+        assert!(dir.join("widgetui/b.dds").is_file(), "已有 resources 时不得移动");
+        assert!(dir.join("resources/_common/a.dds").is_file());
+        assert!(!dir.join("resources/widgetui").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_ignores_mods_without_resource_dirs() {
+        let dir = temp_dir("fix-struct-noop");
+        fs::write(dir.join("info.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("misc")).unwrap();
+
+        assert!(fix_mod_structure(&dir).unwrap().is_empty());
+        assert!(
+            !dir.join("resources").exists(),
+            "没有可搬目录时不得创建空的 resources"
+        );
+        assert!(dir.join("misc").is_dir(), "白名单外的目录不得被搬动");
         let _ = fs::remove_dir_all(&dir);
     }
 

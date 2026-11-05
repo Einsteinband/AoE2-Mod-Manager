@@ -22,7 +22,6 @@ const { t } = useI18n();
 
 const tasks = downloadTasks;
 const summary = computed(() => downloadSummary());
-const hasTasks = computed(() => tasks.value.length > 0);
 
 /** 最新入队的在最上面 */
 const ordered = computed(() => [...tasks.value].reverse());
@@ -84,7 +83,12 @@ function showBar(task: DownloadTask): boolean {
 }
 
 function noteText(task: DownloadTask): string {
-  if (task.status === "failed" && task.error) return task.error;
+  if (task.status === "failed") {
+    if (task.error) return task.error;
+    // 启动时从磁盘恢复的「上次退出时中断」没有 error 文本，用消息 key 兜底
+    if (task.message) return t(task.message.key, task.message.params ?? {});
+    return "";
+  }
   if (task.status === "downloading" || task.status === "installing") {
     const progress = task.progress;
     if (!progress) return t("downloader.waiting");
@@ -125,8 +129,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
 </script>
 
 <template>
-  <!-- 无任何任务 / 历史时整块不渲染（不打扰） -->
-  <div v-if="hasTasks" class="dlmgr">
+  <!-- 常驻悬浮按钮：无任务时也显示（灰色小图标），有任务时显示进度 / 排队角标 -->
+  <div class="dlmgr">
     <div v-if="managerOpen" class="dlmgr-panel" role="dialog" aria-label="downloads">
       <header class="dlmgr-head">
         <h4>{{ t("downloader.title") }}</h4>
@@ -137,6 +141,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
       </header>
 
       <div class="dlmgr-list">
+        <div v-if="!tasks.length" class="dlmgr-empty">{{ t("downloader.empty") }}</div>
         <div v-for="task in ordered" :key="task.id" class="dlmgr-row" :class="task.status">
           <div class="dlmgr-row-top">
             <span class="dlmgr-title" :title="task.title">{{ task.title }}</span>
@@ -170,7 +175,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
     <button
       type="button"
       class="dlmgr-fab"
-      :class="{ running: summary.running > 0 }"
+      :class="{ running: summary.running > 0, idle: summary.active === 0 }"
       :title="t('downloader.open')"
       :aria-label="t('downloader.open')"
       @click="toggle"

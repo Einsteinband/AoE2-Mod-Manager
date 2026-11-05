@@ -1,17 +1,15 @@
-# v0.4.3
+# v0.4.4
 
-## v0.4.3 - New Features
+## v0.4.4 - Improvements
 
-### 🚀 New Features
-- Added a Launch Game button with automatic game path detection, one-click launch through Steam.
-- Improved legacy or non-standard mod structures by auto-filling the missing resources level, removing the in-game mod warning icon.
-- The download list now stays docked and always visible.
+### 🛠 Improvements
+- Subscription conflict guard: fixed the case where a localized mod was still force-downloaded by the game. The local list now shows a red "Suggest unsubscribe" badge plus a dedicated dialog that guides you to cancel the subscription on the official website, so the same mod is no longer stored twice.
+- Removed the remaining hardcoded Chinese strings from the interface; the English UI is now fully localized.
 
 ---
 
-## v0.4.3 - 新增功能
+## v0.4.4 - 优化与修复
 
-### 🚀 新增功能
-- 新增「启动游戏」按钮，自动检测游戏路径，一键唤起 Steam 启动。
-- 优化老旧或不规范模组结构，自动补全 resources 层级，告别游戏内模组感叹号。
-- 下载列表改为常驻。
+### 🛠 优化与修复
+- 订阅冲突防呆：解决“本地化后游戏依然强制下载”的问题。本地列表新增“建议退订”红标与专属弹窗，引导用户前往官网取消订阅，防止文件重复。
+- 清洗了界面残留的硬编码中文，英文界面完美无瑕。

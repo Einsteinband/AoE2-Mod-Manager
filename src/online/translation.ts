@@ -103,7 +103,7 @@ export function setTargetLanguage(next: string, opts: { force?: boolean } = {}):
     pendingProbes.clear();
   }
   langEpoch.value += 1;
-  console.info(`[translation] 目标语言切换为 ${resolved}（changed=${changed}）`);
+  console.info(`[translation] target language switched to ${resolved} (changed=${changed})`);
 }
 
 /**
@@ -359,7 +359,7 @@ export async function loadCachedTranslation(
     return tr;
   } catch (error) {
     // 探测失败（IPC / 文件权限）不能让详情页报错，只记一笔就当作“没译文”
-    console.warn("[translation] 读取译文缓存失败", error);
+    console.warn("[translation] failed to read the translation cache", error);
     return null;
   }
 }
@@ -425,7 +425,7 @@ async function flushProbes(): Promise<void> {
   } catch (error) {
     // 失败就撤销标记，下一次列表变化时再试（不让一次 IPC 抖动把中文永久丢掉）
     for (const item of batch) hydratedIds.delete(item.modId);
-    console.warn("[translation] 批量读取译文缓存失败", error);
+    console.warn("[translation] failed to hydrate translations in batch", error);
   }
 }
 

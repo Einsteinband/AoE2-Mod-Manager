@@ -57,6 +57,10 @@ const props = defineProps<{
   actionMessage: string | null;
   installError: string | null;
   installNote: string | null;
+  /** 刚刚完成一次成功的本地化（结果区显示订阅警示块） */
+  localizedJustNow: boolean;
+  /** 入队时的订阅快照：true=确定仍订阅 / false=未订阅 / null=未知 */
+  wasSubscribed: boolean | null;
   openingWeb: boolean;
   /** 「打开所在文件夹」请求进行中 */
   revealingFolder: boolean;
@@ -259,6 +263,27 @@ watch(
       </label>
 
       <div v-if="installError" class="online-error">{{ installError }}</div>
+
+      <!-- 本地化成功后的订阅警示：本地没有任何退订手段，只能引导去官网 -->
+      <div v-if="localizedJustNow" class="online-warn-box">
+        <div class="warn-title">⚠ {{ t("subscription.installedTitle") }}</div>
+        <div class="warn-body">
+          {{
+            wasSubscribed === true
+              ? t("subscription.installedBodyConfirmed")
+              : t("subscription.installedBodyConditional")
+          }}
+        </div>
+        <button
+          type="button"
+          class="dv-btn-ghost warn-btn"
+          :disabled="openingWeb"
+          @click="emit('open-webpage')"
+        >
+          {{ t("subscription.goSite") }}
+        </button>
+      </div>
+
       <pre v-if="installNote" class="online-note-box">{{ installNote }}</pre>
     </section>
 
@@ -409,6 +434,31 @@ watch(
   font-size: calc(11.5px * var(--global-scale));
   line-height: 1.7;
   white-space: pre-wrap;
+}
+/* 订阅冲突警示：与 .online-error 同一色板，但内含金色行动按钮 */
+.online-warn-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--danger-rgb), 0.5);
+  border-radius: 3px;
+  background: rgba(var(--danger-rgb), 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.online-warn-box .warn-title {
+  font-size: calc(12px * var(--global-scale));
+  font-weight: 600;
+  color: var(--danger-text);
+}
+.online-warn-box .warn-body {
+  font-size: calc(11.5px * var(--global-scale));
+  line-height: 1.75;
+  color: var(--parch-dim);
+  white-space: pre-wrap;
+}
+.online-warn-box .warn-btn {
+  align-self: flex-start;
 }
 .online-note-box {
   margin-top: 10px;

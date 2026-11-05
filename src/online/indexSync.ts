@@ -31,7 +31,7 @@ export function kickIndexSync(epoch: number): Promise<IndexSyncReport | null> {
   consumedEpoch = epoch;
   inFlight = indexSync()
     .catch((error) => {
-      console.info("[index] 索引补建未执行（预期内：未登录 / 已在同步 / 限流冷却）", error);
+      console.info("[index] background index build skipped (expected: not signed in / already syncing / rate-limit cooldown)", error);
       return null;
     })
     .finally(() => {

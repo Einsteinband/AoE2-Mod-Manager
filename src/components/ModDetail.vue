@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, revealModFolder, toggleModEnabled } from "../api";
+import { activeTaskOfMod } from "../online/downloadQueue";
 import {
   formatBytes,
   formatDateTime,
@@ -45,12 +46,16 @@ const props = defineProps<{
   updateInfo?: ModUpdateItem | null;
   /** 正在覆盖安装 */
   updating?: boolean;
+  /** 本地/订阅重复的一句话提示（null = 无冲突） */
+  conflictHint?: string | null;
 }>();
 
 const emit = defineEmits<{
   (e: "toggled", payload: { enabled: boolean }): void;
   (e: "removed", payload: { id: string }): void;
   (e: "update"): void;
+  /** 「未安装」收藏条目：操作区的「下载安装」按钮上抛，由页面统一入队 */
+  (e: "download"): void;
   /** 数据模组的启用请求：互斥裁决在父组件，详情页自己不动磁盘 */
   (e: "request-enable", payload: { id: string }): void;
 }>();
@@ -96,6 +101,17 @@ const webError = ref<string | null>(null);
 
 // v0.5：收藏 / 备注名（只和 WorkshopID 绑定，改完立即落盘 + 局部 Patch，不重扫）
 const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
+/**
+ * v0.6：收藏里的「已卸载 / 未安装」占位条目。
+ * 它没有本地目录与 mod-status.json 记录，所以目录类 / 开关类操作全部隐藏，
+ * 只在操作区保留一个「下载安装」按钮（收藏、备注名、官网跳转照常可用）。
+ */
+const uninstalled = computed(() => props.mod.uninstalled === true);
+/** 正在下载 / 已在下载队列（同名模组不重复入队） */
+const downloadTask = computed(() => {
+  const id = props.mod.workshopId ?? 0;
+  return id > 0 ? activeTaskOfMod(id) : null;
+});
 const favorited = computed(() => isFavorite(props.mod.workshopId));
 const customName = computed(() => customNameOf(props.mod.workshopId));
 const favBusy = ref(false);
@@ -284,9 +300,9 @@ function translationErrorText(error: unknown): string {
 }
 
 function rawMessageOf(error: unknown): string {
-  if (typeof error === "string") return error;
+  if (typeof error === "string") return translateBackendMessage(error);
   const message = (error as Error)?.message;
-  return message ?? String(error ?? "");
+  return translateBackendMessage(message ?? String(error ?? ""));
 }
 
 const hasUpdate = computed(() => props.updateInfo?.hasUpdate === true);
@@ -402,9 +418,12 @@ async function revealFolder() {
   }
 }
 
-const coverUrl = computed(() =>
-  props.mod.thumbnail && !imgFailed.value ? fileUrl(props.mod.thumbnail) : null,
-);
+const coverUrl = computed(() => {
+  if (imgFailed.value) return null;
+  // v0.6：未安装占位条目只有图片缓存的 asset URL，没有磁盘路径
+  if (props.mod.coverUrl) return props.mod.coverUrl;
+  return props.mod.thumbnail ? fileUrl(props.mod.thumbnail) : null;
+});
 
 watch(
   () => [props.mod.id, props.mod.workshopId, translationLangEpoch()] as const,
@@ -446,8 +465,9 @@ watch(
       <div v-if="titleSub" class="detail-title-orig">{{ titleSub }}</div>
 
       <div class="detail-badges">
+        <span v-if="conflictHint" class="conflict-badge">{{ conflictHint }}</span>
         <span v-for="tag in mod.contentTags" :key="tag" class="badge">{{ localizedTagName(tag) }}</span>
-        <span v-if="mod.nameFromFolder !== mod.displayName" class="badge">
+        <span v-if="!uninstalled && mod.nameFromFolder !== mod.displayName" class="badge">
           {{ t("detail.folder") }}: {{ mod.nameFromFolder }}
         </span>
       </div>
@@ -526,8 +546,8 @@ watch(
         <span>{{ t("detail.dataModWarning") }}</span>
       </div>
 
-      <!-- 主操作：启用 / 停用（金色高亮的开关控件） -->
-      <div class="dv-action-row">
+      <!-- 主操作：启用 / 停用（金色高亮的开关控件）—— 未安装条目没有 mod-status.json 记录，不显示 -->
+      <div v-if="!uninstalled" class="dv-action-row">
         <button
           type="button"
           class="toggle dv-toggle"
@@ -541,6 +561,19 @@ watch(
           <span class="toggle-text">
             {{ toggling ? t("detail.writing") : statusLabel(mod.enabled) }}
           </span>
+        </button>
+      </div>
+
+      <!-- 未安装的收藏：唯一的写盘类操作就是把它装回来 -->
+      <div v-if="uninstalled" class="dv-action-row">
+        <button
+          type="button"
+          class="primary install-btn"
+          :disabled="!!downloadTask || !canFavorite"
+          :title="downloadTask ? t('detail.downloadQueued') : t('detail.downloadTitle')"
+          @click="emit('download')"
+        >
+          {{ downloadTask ? t("detail.downloadQueued") : t("detail.downloadInstall") }}
         </button>
       </div>
     </section>
@@ -561,7 +594,13 @@ watch(
 
       <!-- 辅助操作：打开目录 / 官网（描边 Ghost 样式） -->
       <div class="dv-action-row">
-        <button type="button" class="dv-btn-ghost" :disabled="revealing" @click="revealFolder">
+        <button
+          v-if="!uninstalled"
+          type="button"
+          class="dv-btn-ghost"
+          :disabled="revealing"
+          @click="revealFolder"
+        >
           {{ revealing ? t("detail.opening") : t("detail.openFolder") }}
         </button>
         <button
@@ -582,8 +621,8 @@ watch(
         <span class="path-error">{{ webError }}</span>
       </div>
 
-      <!-- 危险操作：卸载本机文件（红色 + 二次确认） -->
-      <div class="dv-action-row dv-action-danger">
+      <!-- 危险操作：卸载本机文件（红色 + 二次确认）—— 未安装条目无文件可删 -->
+      <div v-if="!uninstalled" class="dv-action-row dv-action-danger">
         <button
           type="button"
           class="danger delete-btn"
@@ -596,8 +635,8 @@ watch(
       </div>
     </section>
 
-    <!-- ⑤ 状态区：启用/停用、加载优先级、数据提示 -->
-    <section class="dv-zone dv-zone-status">
+    <!-- ⑤ 状态区：启用/停用、加载优先级、数据提示（仅已安装条目） -->
+    <section v-if="!uninstalled" class="dv-zone dv-zone-status">
       <h4 class="dv-zone-title">{{ ui.status }}</h4>
       <div class="detail-badges dv-status-badges">
         <span class="badge" :class="mod.enabled === null ? 'warn' : ''">{{ statusLabel(mod.enabled) }}</span>
@@ -652,7 +691,7 @@ watch(
           {{ mod.workshopId ?? t("detail.workshopIdMissing") }}
         </span>
       </div>
-      <div class="field">
+      <div v-if="!uninstalled" class="field">
         <span class="k">{{ t("detail.size") }}</span>
         <span class="v">
           <template v-if="statsLoading">{{ t("detail.counting") }}</template>
@@ -664,11 +703,11 @@ watch(
           <template v-else>—</template>
         </span>
       </div>
-      <div class="field">
+      <div v-if="!uninstalled" class="field">
         <span class="k">{{ t("detail.folder") }}</span>
         <span class="v mono">{{ mod.folderName }}</span>
       </div>
-      <div class="field">
+      <div v-if="!uninstalled" class="field">
         <span class="k">{{ t("detail.fullPath") }}</span>
         <span class="v mono">{{ mod.path }}</span>
       </div>
@@ -735,5 +774,12 @@ watch(
   flex: 0 0 auto;
   font-size: calc(13px * var(--global-scale));
   line-height: 1.4;
+}
+
+/* v0.6：未安装收藏条目的「下载安装」主按钮（与更新按钮同一金色主按钮风格） */
+.install-btn {
+  padding: 6px 14px;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
 }
 </style>

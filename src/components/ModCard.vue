@@ -16,6 +16,8 @@ const props = defineProps<{
   sortable?: boolean;
   /** v0.4：服务端版本比本地新（右上角红底白字 [可更新]） */
   hasUpdate?: boolean;
+  /** 同一模组在 local 与 subscribed 各有一份（账号仍订阅），左上角红色角标 */
+  conflict?: boolean;
 }>();
 const emit = defineEmits<{
   (event: "select", mod: ModEntry): void;
@@ -30,9 +32,14 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const imgFailed = ref(false);
-const coverUrl = computed(() =>
-  props.mod.thumbnail && !imgFailed.value ? fileUrl(props.mod.thumbnail) : null,
-);
+/** 占位条目走 coverUrl（图片缓存 asset URL）；真实条目仍走磁盘路径 thumbnail */
+const coverUrl = computed(() => {
+  if (imgFailed.value) return null;
+  if (props.mod.coverUrl) return props.mod.coverUrl;
+  return props.mod.thumbnail ? fileUrl(props.mod.thumbnail) : null;
+});
+/** 已卸载 / 未安装的收藏占位卡片：只多一个角标，交互与普通卡片一致（点击看详情） */
+const uninstalled = computed(() => props.mod.uninstalled === true);
 
 watch(
   () => props.mod.id,
@@ -133,7 +140,18 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
         {{ t("card.updateBadge") }}
       </span>
       <div class="thumb-badges">
-        <span class="source-badge" :class="mod.source" :title="sourceHint(mod.source)">
+        <span v-if="conflict" class="conflict-badge" :title="t('subscription.conflictBadgeHint')">
+          {{ t("subscription.conflictBadge") }}
+        </span>
+        <span v-if="uninstalled" class="source-badge uninstalled-badge">
+          {{ t("card.uninstalled") }}
+        </span>
+        <span
+          v-if="!uninstalled"
+          class="source-badge"
+          :class="mod.source"
+          :title="sourceHint(mod.source)"
+        >
           {{ sourceLabel(mod.source) }}
         </span>
         <span v-if="mod.isDataMod" class="data-badge" :title="t('card.dataModBadgeHint')">
@@ -302,6 +320,13 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   border-color: var(--line);
   color: var(--parch-dim);
   background: rgba(var(--badge-plain-rgb), 0.88);
+}
+
+/* v0.6：未安装的收藏卡片：左上角金色角标（其余交互与普通卡片完全一致） */
+.source-badge.uninstalled-badge {
+  border-color: var(--gold-dim);
+  color: var(--gold-bright);
+  background: rgba(var(--accent-rgb), 0.22);
 }
 
 /* 数据模组角标：金色描边，和来源角标区分开 */

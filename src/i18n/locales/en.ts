@@ -15,6 +15,10 @@ export default {
   lang: {
     label: "Language",
   },
+  /* ---------- Native dialogs (Tauri plugin-dialog titles) ---------- */
+  dialog: {
+    pickModRoot: "Choose the AoE2DE mod root folder (should contain local and subscribed)",
+  },
   settings: {
     open: "Settings (language / network / about)",
     title: "Settings",
@@ -271,6 +275,9 @@ export default {
     addedToast: "Added to favorites",
     removedToast: "Removed from favorites",
     failSave: "Save failed: {msg}",
+    downloadQueued: "Added to the download queue",
+    downloadBusy: "This mod is already in the download queue",
+    downloadNoId: "This favorite has no usable ID and cannot be downloaded",
   },
   content: {
     allMods: "All mods",
@@ -339,6 +346,7 @@ export default {
     dataModBadge: "⚙️ Data Mod",
     dataModBadgeHint:
       "This mod replaces the game's core data file (.dat); only one can be enabled at a time",
+    uninstalled: "Not installed",
   },
   dataMod: {
     conflictTitle: "Data mod conflict",
@@ -368,6 +376,9 @@ export default {
     enabledState: "Enabled state",
     toggleTitleWriting: "Writing mod-status.json…",
     toggleTitleIdle: "Click to enable / disable",
+    downloadInstall: "Download & install",
+    downloadQueued: "Already in the download queue",
+    downloadTitle: "Download and install this favorite again",
     dataModWarning:
       "⚙️ This is a data mod. The game can only load one data mod at a time. After enabling it, you still need to select it in the dropdown menu on the in-game start screen for it to take effect.",
     writing: "Writing…",
@@ -577,6 +588,11 @@ export default {
     recheck: "Re-check sign-in",
     clearCache: "Sign out / clear cache",
     clearing: "Clearing…",
+    logoutCleared:
+      "Signed out: the AoE cookies and the WebView2 data folder were both cleared ({path})",
+    logoutClearedNoPath: "Signed out: the AoE cookies and the WebView2 data folder were both cleared",
+    logoutFailed:
+      "Sign-out failed: some files are in use — restart the app and try again",
     network: "Network",
     followSystem: "Follow system proxy",
     rememberLogin: "Remember sign-in for 7 days",
@@ -763,6 +779,25 @@ export default {
     cardSubscribed: "Subscribed",
     cardOnline: "Online",
     cardInstalls: "{n} subs",
+  },
+  subscription: {
+    conflictBadge: "Unsubscribe advised",
+    conflictBadgeHint:
+      "The same mod already exists in local/; your account is still subscribed, so the game will download it into subscribed/ again",
+    localNoted: "Localized · still subscribed",
+    installedTitle: "Localized, but your account is still subscribed",
+    installedBodyConfirmed:
+      "Please unsubscribe in game or on the website; otherwise the game will download another copy into subscribed/, leaving duplicates.",
+    installedBodyConditional:
+      "If you are still subscribed on the website, please unsubscribe; otherwise the game may download another copy into subscribed/.",
+    goSite: "Open the mod page to unsubscribe",
+    modalTitle: "Localized, but the subscription remains",
+    modalMessageConfirmed:
+      "\"{title}\" was moved to local/ and enabled. Your account still subscribes to it, so the game will re-download it into subscribed/. Please unsubscribe on the website.",
+    modalMessageConditional:
+      "\"{title}\" was moved to local/ and enabled. If you still subscribe to it, please unsubscribe, or the game may re-download it into subscribed/.",
+    modalGoSite: "Open the website",
+    modalOk: "Got it",
   },
   translate: {
     trigger: "Translate to {lang}",

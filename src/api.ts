@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { translate } from "./i18n";
 import type {
   ApplyReport,
   AppSettings,
@@ -413,7 +414,7 @@ export async function pickFolder(defaultPath?: string | null): Promise<string | 
   const picked = await open({
     directory: true,
     multiple: false,
-    title: "选择 AoE2DE 模组根目录（应包含 local 与 subscribed）",
+    title: translate("dialog.pickModRoot"),
     defaultPath: defaultPath ?? undefined,
   });
   return typeof picked === "string" ? picked : null;

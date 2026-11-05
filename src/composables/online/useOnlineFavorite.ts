@@ -8,6 +8,7 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { messageOf } from "../../online/errors";
 import { customNameOf, isFavorite, setCustomName, setFavorite } from "../../userData";
+import { rememberOnlineMeta } from "../../favoriteMeta";
 import type { OnlineSelection } from "./useOnlineSelection";
 
 export function useOnlineFavorite(deps: {
@@ -34,6 +35,9 @@ export function useOnlineFavorite(deps: {
     favError.value = null;
     try {
       const next = await setFavorite(mod.modId, !favorited.value);
+      // v0.6：收藏那一刻就把标题 / 作者 / 分类 / 封面记进本地元数据缓存，
+      // 以后即使从未安装、或缓存被清空，「我的收藏」仍然能显示它
+      if (next) rememberOnlineMeta(mod);
       deps.showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
     } catch (e) {
       favError.value = messageOf(e);

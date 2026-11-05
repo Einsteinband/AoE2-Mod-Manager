@@ -48,6 +48,14 @@ function describe(e: unknown): string {
   return translate("labels.unknown");
 }
 
+/**
+ * 后端 SessionStatus.error 是简体中文原文，底栏 / 在线页直接展示会漏到英文界面，
+ * 统一在写入前过一遍后端文案转写。
+ */
+function errorText(raw: string | null | undefined): string | null {
+  return raw ? translateBackendMessage(raw) : null;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => reject(new Error(translate("statusbar.checkTimeout"))), ms);
@@ -96,7 +104,7 @@ export const localSearchEnabled = ref(false);
 export function markOnline(status?: SessionStatus | null): void {
   if (status) {
     sessionInfo.value = status;
-    sessionError.value = status.error ?? null;
+    sessionError.value = errorText(status.error);
   }
   const wasOnline = sessionPhase.value === "online";
   sessionPhase.value = "online";
@@ -142,14 +150,14 @@ function runSessionCheck(
       // 等结果的这段时间里用户退出了登录：这次结果作废，绝不把灯点回绿色
       if (generation !== sessionGeneration.value) return false;
       sessionInfo.value = status;
-      sessionError.value = status.error ?? null;
+      sessionError.value = errorText(status.error);
       lastCheckedMs.value = Date.now();
       if (status.loggedIn) {
         markOnline(status);
         statusMessage.value = translate("statusbar.onlineReady");
         return true;
       }
-      markOffline(status.error ?? null);
+      markOffline(errorText(status.error));
       statusMessage.value = translate("statusbar.offlineHint");
       return false;
     } catch (e) {

@@ -43,6 +43,16 @@ export interface ModEntry {
   infoJsonPresent: boolean;
   /** 数据模组：模组内含游戏核心数据库文件（如 empires2_x2_p1.dat），同一时间只能启用一个 */
   isDataMod: boolean;
+  /**
+   * v0.6：占位条目 —— 只存在于「我的收藏」里的已卸载 / 未安装模组。
+   * true 时 path / folderName 为空，enabled 恒为 null，点击卡片走“下载并安装”，不打开本地详情。
+   */
+  uninstalled?: boolean;
+  /**
+   * v0.6：已经转换好的封面 URL（占位条目走图片缓存 asset URL）。
+   * 有值时优先于 thumbnail（thumbnail 是磁盘绝对路径，卸载后失效）。
+   */
+  coverUrl?: string | null;
 }
 
 export interface ScanReport {

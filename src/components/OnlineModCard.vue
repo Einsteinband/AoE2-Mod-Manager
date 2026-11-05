@@ -52,7 +52,7 @@ const sub = computed(() => (custom.value ? props.mod.title : null));
 const favorited = computed(() => isFavorite(props.mod.modId));
 
 function formatCount(n: number | null): string {
-  if (n === null) return "未知";
+  if (n === null) return t("labels.unknown");
   if (n < 1000) return String(n);
   return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
 }
@@ -71,7 +71,7 @@ function formatCount(n: number | null): string {
       />
       <div v-else class="placeholder">{{ initials(mod.title) }}</div>
       <span v-if="favorited" class="fav-badge" :title="t('favorites.badgeTitle')">⭐</span>
-      <span v-if="!src" class="no-cover">无封面</span>
+      <span v-if="!src" class="no-cover">{{ t("card.noCover") }}</span>
     </div>
     <div class="card-body">
       <div class="card-title" :title="title">{{ title }}</div>
@@ -87,7 +87,7 @@ function formatCount(n: number | null): string {
       <div class="card-meta">
         <span>#{{ mod.modId }}</span>
         <span v-if="mod.creator" class="author" :title="mod.creator">{{ mod.creator }}</span>
-        <span v-else class="author missing">作者未提供</span>
+        <span v-else class="author missing">{{ t("card.authorMissing") }}</span>
       </div>
     </div>
   </button>

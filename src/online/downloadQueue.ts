@@ -63,6 +63,12 @@ export interface QueueTaskInput {
   creator?: string | null;
   description?: string | null;
   thumbnail?: string | null;
+  /**
+   * 入队瞬间的账号订阅状态快照（true=确定仍订阅 / false=未订阅 / null=未知）。
+   * 安装完成后 OnlineBrowser 会把列表里的 userInstalled 抹成 false，
+   * 之后再读就永远拿不到「仍订阅」这个事实了，所以必须在入队时钉下来。
+   */
+  wasSubscribed?: boolean;
   /** 目标目录已存在时是否覆盖 */
   force?: boolean;
 }
@@ -79,6 +85,8 @@ export interface DownloadTask {
   /** 成功时的后端报告（说明文本由 UI 翻译生成） */
   outcome: InstallOutcome | null;
   localized: boolean | null;
+  /** 入队时的账号订阅状态快照（见 QueueTaskInput.wasSubscribed） */
+  wasSubscribed: boolean | null;
   /** 用户点了取消（安装中取消时只能等真实结果） */
   cancelRequested: boolean;
   /** 需要勾选「覆盖」才能继续 */
@@ -130,6 +138,7 @@ function snapshotTask(task: DownloadTask): Record<string, unknown> {
     status: task.status,
     error: task.error,
     localized: task.localized,
+    wasSubscribed: task.wasSubscribed,
     needForce: task.needForce,
     message: task.message,
     payload: task.payload,
@@ -156,7 +165,7 @@ async function flushPersist(): Promise<void> {
       savedAt: Date.now(),
     });
   } catch (e) {
-    console.warn("[downloader] 保存下载队列失败", e);
+    console.warn("[downloader] failed to persist the download queue", e);
   }
 }
 
@@ -228,6 +237,8 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
     error: null,
     outcome: null,
     localized: null,
+    wasSubscribed:
+      input.wasSubscribed === true ? true : input.wasSubscribed === false ? false : null,
     cancelRequested: false,
     needForce: false,
     message: null,
@@ -322,7 +333,7 @@ function emitSettled(task: DownloadTask): void {
     try {
       handler(task);
     } catch (e) {
-      console.warn("[downloader] 完成回调异常", e);
+      console.warn("[downloader] settled callback threw", e);
     }
   }
 }
@@ -437,6 +448,7 @@ function coerceTask(raw: Record<string, unknown>): DownloadTask | null {
     error: typeof raw.error === "string" ? raw.error : null,
     outcome: null, // 后端报告不回放（只显示状态与错误）
     localized: typeof raw.localized === "boolean" ? raw.localized : null,
+    wasSubscribed: typeof raw.wasSubscribed === "boolean" ? raw.wasSubscribed : null,
     cancelRequested: false,
     needForce: raw.needForce === true,
     message:
@@ -485,7 +497,7 @@ async function restorePersisted(): Promise<void> {
     const finished = restored.filter((task) => !isActive(task)).slice(-HISTORY_LIMIT);
     downloadTasks.value = [...active, ...finished].sort((a, b) => a.createdAt - b.createdAt);
   } catch (e) {
-    console.warn("[downloader] 恢复下载队列失败", e);
+    console.warn("[downloader] failed to restore the download queue", e);
   }
 }
 
@@ -503,7 +515,7 @@ export async function initDownloadQueue(): Promise<void> {
   try {
     await onDownloadProgress(handleProgress);
   } catch (e) {
-    console.warn("[downloader] 下载进度订阅失败", e);
+    console.warn("[downloader] failed to subscribe to download progress", e);
   }
   await restorePersisted();
   watch(sessionPhase, () => resumeIfOnline(), { immediate: true });

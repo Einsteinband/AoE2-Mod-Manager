@@ -33,10 +33,12 @@ import {
   type UiFontFamily,
 } from "./api";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
-import { getTranslateSettings } from "./online/service";
+import { getTranslateSettings, openModWebpage } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
-import { initDownloadQueue } from "./online/downloadQueue";
+import { enqueueDownload, initDownloadQueue, onTaskSettled, type DownloadTask } from "./online/downloadQueue";
+import { enrichFavoriteMetaFromDetail, favoriteMetaOf, hydrateFavoriteMeta } from "./favoriteMeta";
 import { itemsById, updateIds } from "./modUpdates";
+import { buildConflictIndex, markSubscriptionWarned, shouldWarnSubscription } from "./modConflict";
 import {
   applyTranslateSettings,
   hydrateTranslations,
@@ -64,6 +66,7 @@ import { useLocalModActions } from "./composables/local/useLocalModActions";
 import { useBatchToggle } from "./composables/local/useBatchToggle";
 import { usePresets } from "./composables/local/usePresets";
 import { useLocalUpdate } from "./composables/local/useLocalUpdate";
+import { useUninstalledFavorites } from "./composables/local/useUninstalledFavorites";
 import { useGameLaunch } from "./composables/useGameLaunch";
 
 /**
@@ -173,7 +176,7 @@ watch(theme, (next) => {
   if (!themeReady) return;
   // v2.3：invoke 统一收口到 api.ts（setTheme），App.vue 不再直接碰 Tauri 命令
   void setTheme(next).catch((e) => {
-    console.warn("[theme] 保存主题失败", e);
+    console.warn("[theme] failed to save theme", e);
   });
 });
 
@@ -278,7 +281,7 @@ watch(
       if (sameTypography(next, persistedTypography)) return;
       persistedTypography = next;
       void saveTypographyPrefs(next).catch((e) => {
-        console.warn("[typography] 保存排版失败", e);
+        console.warn("[typography] failed to save typography prefs", e);
       });
     }, 300);
   },
@@ -288,6 +291,11 @@ onBeforeUnmount(() => {
   if (typographyTimer) clearTimeout(typographyTimer);
 });
 const scan = useLocalScan();
+/**
+ * v0.6：收藏与安装状态解耦 —— 收藏了但这次扫描没扫到的模组（已卸载 / 未安装）
+ * 用本地元数据 + 图片缓存拼成“未安装”占位条目，卡片不会从「我的收藏」里消失。
+ */
+const uninstalledFavorites = useUninstalledFavorites({ mods: scan.mods });
 const {
   report,
   mods,
@@ -302,7 +310,36 @@ const {
   chooseRoot,
 } = scan;
 
-const filters = useLocalFilters({ mods: scan.mods, collationLocale });
+const filters = useLocalFilters({
+  mods: scan.mods,
+  ghostMods: uninstalledFavorites.ghosts,
+  collationLocale,
+});
+
+/**
+ * 右栏详情实际渲染的对象。
+ *
+ * 关键：`scan.selected` 只在**扫描结果**里查 id，而「未安装」收藏占位条目
+ * （id = `fav:<modId>`）根本不在扫描结果里 —— 直接用它当详情数据源，
+ * 点击占位卡就会永远落到「未选择模组」。所以这里把占位条目补回同一条链路。
+ */
+const detailMod = computed<ModEntry | null>(() => {
+  const id = scan.selectedId.value;
+  if (!id) return null;
+  if (selected.value) return selected.value;
+  return uninstalledFavorites.ghosts.value.find((mod) => mod.id === id) ?? null;
+});
+/** 卡片高亮用：占位条目也要能高亮，所以不能再用 scan.selected（它在占位条目上恒为 null） */
+const selectedEntryId = computed(() => scan.selectedId.value);
+
+/**
+ * 选中「未安装」占位卡时，用本地详情缓存补一次描述（零网络）。
+ * 补齐后 favoriteMeta 是响应式的，占位条目会自己重算，右栏直接显示。
+ */
+watch(detailMod, (mod) => {
+  if (!mod?.uninstalled) return;
+  void enrichFavoriteMetaFromDetail(mod.workshopId ?? 0);
+});
 const {
   search,
   source,
@@ -356,6 +393,42 @@ const actions = useLocalModActions({
 });
 const { stats, statsLoading, statsError, selectMod, handleToggle, handleCardToggled, handleCardToggleError, handleRemoved } =
   actions;
+
+/**
+ * 「未安装」收藏条目的下载入口（唯一入口：右侧详情面板的「下载安装」按钮）。
+ * 直接用元数据缓存里的标题 / 分类 / 封面入队，不依赖在线页是否挂载、也不需要额外命令；
+ * 队列、取消、进度全部由现有的 downloadQueue（online_install）负责。
+ */
+function downloadUninstalledFavorite(mod: ModEntry): void {
+  const modId = Number(mod.workshopId ?? 0);
+  if (!Number.isFinite(modId) || modId <= 0) {
+    showToast(t("favorites.downloadNoId"), "error");
+    return;
+  }
+  const meta = favoriteMetaOf(modId);
+  const result = enqueueDownload({
+    modId,
+    title: meta?.title || mod.displayName,
+    kind: "install",
+    tagIds: meta?.tagIds ?? [],
+    tagNames: meta?.tagNames ?? [],
+    creator: meta?.creator ?? null,
+    description: meta?.description ?? null,
+    thumbnail: meta?.thumbnailUrl ?? null,
+  });
+  if (!result.accepted) {
+    showToast(t("favorites.downloadBusy"), "error");
+    return;
+  }
+  showToast(t("favorites.downloadQueued"));
+}
+
+/** 详情面板上抛的「下载安装」：目标就是当前选中项（占位条目） */
+function downloadSelected(): void {
+  const mod = detailMod.value;
+  if (!mod) return;
+  downloadUninstalledFavorite(mod);
+}
 
 // ---------------- 数据模组互斥（游戏同一时间只能加载一个 .dat） ----------------
 
@@ -552,6 +625,51 @@ async function refresh(root?: string | null): Promise<void> {
   }
   sort.exitSortMode();
   await scan.refresh(root);
+}
+
+/** 本地/订阅双份冲突索引（纯前端比对，只读扫描结果，不碰磁盘） */
+const conflicts = computed(() => buildConflictIndex(scan.mods.value));
+
+/** 详情面板的一句话冲突提示：订阅那份提示退订，本地那份提示订阅未取消 */
+function conflictHintOf(entryId: string): string | null {
+  if (conflicts.value.bySubscribedId.has(entryId)) return t("subscription.conflictBadge");
+  if (conflicts.value.byLocalId.has(entryId)) return t("subscription.localNoted");
+  return null;
+}
+
+// ---------------- 本地化完成后的订阅警示（每个 modId 只提示一次） ----------------
+
+const subscriptionWarn = ref<{ modId: number; title: string; confirmed: boolean } | null>(null);
+
+/**
+ * 任务落地时调用：只有「成功本地化」才提示。
+ * confirmed = 入队瞬间账号处于订阅状态（确定语气）；否则用条件语气。
+ */
+function maybeWarnSubscription(task: DownloadTask): void {
+  if (task.status !== "done" || task.localized !== true) return;
+  if (!shouldWarnSubscription(task.modId)) return;
+  subscriptionWarn.value = {
+    modId: task.modId,
+    title: task.title,
+    confirmed: task.wasSubscribed === true,
+  };
+  // 出现即记账：用户不关窗口直接杀进程也不会重复弹
+  markSubscriptionWarned(task.modId);
+}
+
+async function goUnsubscribe(): Promise<void> {
+  const target = subscriptionWarn.value;
+  if (!target) return;
+  subscriptionWarn.value = null;
+  try {
+    await openModWebpage(target.modId);
+  } catch (e) {
+    showToast(t("online.openFailed", { msg: scan.normalizeError(e) }), "error");
+  }
+}
+
+function dismissSubscriptionWarn(): void {
+  subscriptionWarn.value = null;
 }
 
 const presets = usePresets({ mods: scan.mods, rescan: () => refresh() });
@@ -765,7 +883,7 @@ function writeLastSeenVersion(version: string) {
     window.localStorage.setItem(LAST_SEEN_VERSION_KEY, version);
   } catch (e) {
     // 隐私模式 / 存储被禁用：下次启动会再弹一次，不影响主流程
-    console.warn("[version-notes] 写入 lastSeenVersion 失败", e);
+    console.warn("[version-notes] failed to write lastSeenVersion", e);
   }
 }
 
@@ -801,7 +919,7 @@ async function showVersionNotesIfNeeded() {
     current = await appVersion();
   } catch (e) {
     // 读不到版本就不写 lastSeenVersion，下次启动重试，不会漏掉更新说明
-    console.warn("[version-notes] 读取当前版本失败", e);
+    console.warn("[version-notes] failed to read the current version", e);
     return;
   }
   if (!current) {
@@ -821,7 +939,7 @@ async function showVersionNotesIfNeeded() {
     html = hit ? renderReleaseMarkdown(hit.body ?? "") : "";
   } catch (e) {
     // 网络不通 / 未发版 / 超时：不拦启动，只显示一句兜底文案，确认后照样记版本号
-    console.warn("[version-notes] 拉取更新说明失败，使用兜底文案", e);
+    console.warn("[version-notes] failed to fetch release notes; using fallback text", e);
   }
   versionNotes.value = { version: current, title, html };
 }
@@ -856,6 +974,9 @@ watch(
 
 // ---------------- 启动引导 ----------------
 
+/** 下载任务落地订阅（只在本地页需要：装完重扫，占位卡才会变回真实卡片） */
+let offDownloadSettled: (() => void) | null = null;
+
 onMounted(async () => {
   // v1.3：启动即静默校验登录态——持久登录关闭时 Rust 侧会自己跑一次隐藏窗口静默重登，
   // 同样不 await、不阻塞首屏，底栏先显示「正在恢复登录…」再变 🟢/⚪
@@ -864,6 +985,18 @@ onMounted(async () => {
   void initDownloadQueue();
   // v0.5：收藏/备注只读一次磁盘，失败不阻塞本地页
   void ensureUserData().catch(() => undefined);
+  // v0.6：已卸载 / 未安装收藏的标题与分类先用在线缓存补一次（零网络，等收藏表读完再补）
+  void ensureUserData()
+    .then(() => hydrateFavoriteMeta())
+    .catch(() => undefined);
+  // v0.6：下载队列里任何一个模组安装完成 → 重扫一次，让「未安装」占位卡变回真实卡片
+  offDownloadSettled = onTaskSettled((task) => {
+    if (task.status !== "done") return;
+    // 订阅警示与当前页面无关：下载队列是全局单例，切到本地页也要提醒
+    maybeWarnSubscription(task);
+    if (mode.value !== "local") return;
+    void refresh();
+  });
   // 启动即检查一次新版本（只此一次，失败静默）
   void runStartupUpdateCheck();
   try {
@@ -903,7 +1036,7 @@ onMounted(async () => {
     // 顺手把 settings.json 里的旧值覆盖掉（否则每次启动都要重新归一化一遍）。
     if (String(settings.uiFontFamily ?? "").trim().toLowerCase() !== typoPrefs.fontFamily) {
       void saveTypographyPrefs(typoPrefs).catch((e) => {
-        console.warn("[typography] 旧字体配置重写失败", e);
+        console.warn("[typography] failed to rewrite the legacy font config", e);
       });
     }
     // 语言：已保存的优先，否则按系统语言决定（并把结果回写，以后不再依赖 navigator）
@@ -917,7 +1050,7 @@ onMounted(async () => {
       const translateView = await getTranslateSettings();
       applyTranslateSettings(translateView, String(locale.value));
     } catch (e) {
-      console.warn("[translation] 读取翻译设置失败", e);
+      console.warn("[translation] failed to read translation settings", e);
     }
     if (settings.modRoot) {
       await refresh(settings.modRoot);
@@ -959,6 +1092,7 @@ window.addEventListener("keydown", onSortHotkey);
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onSortHotkey);
+  offDownloadSettled?.();
 });
 </script>
 
@@ -1228,10 +1362,16 @@ onBeforeUnmount(() => {
             </p>
           </div>
 
-          <!-- 收藏视图专用空态：计数 > 0 却看不到，说明是搜索没命中，必须说清楚 -->
+          <!-- 收藏视图专用空态：占位条目已包含未安装收藏，还空只可能是搜索没命中或真的没收藏 -->
           <div v-else-if="!sorted.length && favoritesOnly" class="state-panel">
             <h2>⭐ {{ t("favorites.empty") }}</h2>
-            <p>{{ favoriteLocalCount ? t("favorites.emptyLocalHint", { n: favoriteLocalCount }) : t("favorites.emptyNone") }}</p>
+            <p>
+              {{
+                favoriteLocalCount && search
+                  ? t("favorites.emptyLocalHint", { n: favoriteLocalCount })
+                  : t("favorites.emptyNone")
+              }}
+            </p>
             <div class="actions">
               <button v-if="search" type="button" @click="search = ''">
                 {{ t("search.clear") }}
@@ -1256,9 +1396,10 @@ onBeforeUnmount(() => {
               v-for="(mod, index) in sortMode ? dragList : sorted"
               :key="mod.id"
               :mod="mod"
-              :active="mod.id === selected?.id"
+              :active="mod.id === selectedEntryId"
               :order="sortMode ? index + 1 : undefined"
               :has-update="updateIds.has(mod.id)"
+              :conflict="conflicts.bySubscribedId.has(mod.id)"
               :sortable="sortMode"
               @select="selectMod"
               @toggled="handleCardToggled"
@@ -1272,16 +1413,18 @@ onBeforeUnmount(() => {
       <!-- 右：详情面板 -->
       <template #detail>
         <ModDetail
-          v-if="selected"
-          :mod="selected"
+          v-if="detailMod"
+          :mod="detailMod"
           :stats="stats"
           :stats-loading="statsLoading"
           :stats-error="statsError"
-          :update-info="itemsById.get(selected.id) ?? null"
-          :updating="updatingEntryId === selected.id"
+          :update-info="itemsById.get(detailMod.id) ?? null"
+          :updating="updatingEntryId === detailMod.id"
+          :conflict-hint="conflictHintOf(detailMod.id)"
           @toggled="handleToggle"
           @removed="handleRemoved"
-          @update="handleUpdateMod(selected)"
+          @download="downloadSelected"
+          @update="handleUpdateMod(detailMod)"
           @request-enable="requestEnableDataMod"
         />
         <div v-else class="detail-empty">
@@ -1357,6 +1500,23 @@ onBeforeUnmount(() => {
       :error="dataModError"
       @confirm="confirmDataModSwitch"
       @cancel="cancelDataModSwitch"
+    />
+
+    <!-- 本地化完成后的订阅警示（每个 modId 只弹一次；confirm = 直接跳官网退订） -->
+    <ConfirmDialog
+      v-if="subscriptionWarn"
+      :title="t('subscription.modalTitle')"
+      :subtitle="''"
+      :message="
+        subscriptionWarn.confirmed
+          ? t('subscription.modalMessageConfirmed', { title: subscriptionWarn.title })
+          : t('subscription.modalMessageConditional', { title: subscriptionWarn.title })
+      "
+      :confirm-label="t('subscription.modalGoSite')"
+      :cancel-label="t('subscription.modalOk')"
+      :danger="false"
+      @confirm="goUnsubscribe"
+      @cancel="dismissSubscriptionWarn"
     />
 
     <!-- 放弃未保存排序的二次确认 -->

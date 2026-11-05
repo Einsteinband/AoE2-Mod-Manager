@@ -174,6 +174,8 @@ const {
   installing,
   installError,
   installNote,
+  localizedJustNow,
+  wasSubscribed,
   needForce,
   forceOverwrite,
   actionMessage,
@@ -912,6 +914,8 @@ onUnmounted(() => {
         :action-message="actionMessage"
         :install-error="installError"
         :install-note="installNote"
+        :localized-just-now="localizedJustNow"
+        :was-subscribed="wasSubscribed"
         :opening-web="openingWeb"
         :revealing-folder="revealingFolder"
         :desc-text="descText"

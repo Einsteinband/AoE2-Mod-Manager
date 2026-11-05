@@ -27,13 +27,18 @@ export function useBatchToggle(deps: {
   const batchBusy = ref(false);
   const batchError = ref<string | null>(null);
 
-  /** 只传当前筛选出的列表：WorkshopID 优先，local 模组靠 kind + 文件夹名定位 */
+  /**
+   * 只传当前筛选出的列表：WorkshopID 优先，local 模组靠 kind + 文件夹名定位。
+   * v0.6：收藏占位条目（未安装）没有目录 / 状态，不参与批量启用禁用。
+   */
   const batchTargets = computed<BatchTarget[]>(() =>
-    sorted.value.map((mod) => ({
-      workshopId: mod.workshopId && mod.workshopId > 0 ? mod.workshopId : null,
-      kind: mod.kind,
-      folderName: mod.folderName,
-    })),
+    sorted.value
+      .filter((mod) => !mod.uninstalled)
+      .map((mod) => ({
+        workshopId: mod.workshopId && mod.workshopId > 0 ? mod.workshopId : null,
+        kind: mod.kind,
+        folderName: mod.folderName,
+      })),
   );
 
   function askBatch(enable: boolean): void {

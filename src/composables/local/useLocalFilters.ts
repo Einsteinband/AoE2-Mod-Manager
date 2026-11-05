@@ -36,10 +36,16 @@ const TAG_ORDER: Record<string, number> = Object.fromEntries(
 
 export function useLocalFilters(deps: {
   mods: ComputedRef<ModEntry[]>;
+  /**
+   * 已卸载 / 未安装的收藏占位条目（见 useUninstalledFavorites）。
+   * **只**在收藏视图里参与渲染：其它视图必须保持“侧栏计数 = 扫描结果条数”。
+   */
+  ghostMods?: ComputedRef<ModEntry[]>;
   collationLocale: ComputedRef<string>;
 }) {
   const { t } = useI18n();
   const { mods, collationLocale } = deps;
+  const ghostMods = deps.ghostMods ?? computed<ModEntry[]>(() => []);
 
   const search = ref("");
   const source = ref<SourceFilter>("all");
@@ -74,7 +80,12 @@ export function useLocalFilters(deps: {
      * 所以收藏视图下只按 isFavorite 过滤（外加搜索关键字）。
      */
     const fav = favoritesOnly.value;
-    return mods.value.filter((m) => {
+    /**
+     * 收藏视图的数据源 = 已安装条目 ∪ 已卸载/未安装占位条目。
+     * 这是“卸载后卡片不消失”的唯一改动点：占位条目同样按 isFavorite 过滤，天然就在结果里。
+     */
+    const base = fav ? [...mods.value, ...ghostMods.value] : mods.value;
+    return base.filter((m) => {
       if (fav && !isFavorite(m.workshopId)) return false;
       if (!fav) {
         if (source.value !== "all" && m.kind !== source.value) return false;
@@ -176,9 +187,9 @@ export function useLocalFilters(deps: {
     return t("content.allMods");
   });
 
-  /** v0.5：本地列表里的收藏数（侧栏计数） */
+  /** v0.5：本地列表里的收藏数（侧栏计数）—— 已安装 + 已卸载占位，两者都算 */
   const favoriteLocalCount = computed(
-    () => mods.value.filter((m) => isFavorite(m.workshopId)).length,
+    () => mods.value.filter((m) => isFavorite(m.workshopId)).length + ghostMods.value.length,
   );
 
   /** 内容区副标题右侧的状态文案 */

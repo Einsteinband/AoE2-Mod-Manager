@@ -62,8 +62,8 @@ const props = defineProps<{
   descText: string | null;
   detailLoading: boolean;
   detailError: string | null;
-  hasDetail: boolean;
-  rawEntries: { key: string; value: string }[];
+  /** 断网且本地无详情缓存：显示友好提示，不显示任何 DNS / 传输层报错 */
+  detailUncached: boolean;
 }>();
 
 /** 覆盖确认勾选 / 需要覆盖时的提示开关（v-model 双向绑定，父组件持有真源） */
@@ -94,8 +94,6 @@ const ui = computed(() =>
         moreActions: "其他操作",
         status: "状态",
         meta: "作者与版本",
-        more: "更多技术信息",
-        rawFields: "服务端原始字段",
         expand: "展开全文",
         collapse: "收起",
       }
@@ -104,8 +102,6 @@ const ui = computed(() =>
         moreActions: "More actions",
         status: "Status",
         meta: "Author & version",
-        more: "More technical info",
-        rawFields: "Raw server fields",
         expand: "Show more",
         collapse: "Show less",
       },
@@ -258,6 +254,7 @@ watch(
       <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
       <div v-else-if="detailLoading" class="note">{{ t("online.loading") }}</div>
       <div v-else-if="detailError" class="note">{{ detailError }}</div>
+      <div v-else-if="detailUncached" class="note">{{ t("online.detailUncached") }}</div>
       <div v-else class="note">{{ t("online.noDetail") }}</div>
       <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
         {{ descExpanded ? ui.collapse : ui.expand }}
@@ -341,9 +338,8 @@ watch(
       </div>
     </section>
 
-    <!-- ⑦ 低频信息：订阅数 / 评分 / 体积 / 服务端原始字段，默认收起 -->
-    <details class="dv-zone dv-more">
-      <summary class="dv-more-summary">{{ ui.more }}</summary>
+    <!-- ⑦ 低频信息：订阅数 / 评分 / 体积 / 状态（不折叠、不显示分区标题，直接平铺） -->
+    <section class="dv-zone dv-zone-more">
       <div class="field">
         <span class="k">{{ t("online.installs") }}</span>
         <span class="v">
@@ -371,20 +367,7 @@ watch(
         <span class="k">{{ t("online.subscribed") }}</span>
         <span class="v">{{ mod.userInstalled ? t("online.yesOfficial") : t("online.no") }}</span>
       </div>
-
-      <div class="dv-raw">
-        <h5 class="dv-sub-title">{{ ui.rawFields }} · #{{ mod.modId }}</h5>
-        <div v-if="detailLoading" class="note">{{ t("online.loading") }}</div>
-        <div v-else-if="detailError" class="note">{{ detailError }}</div>
-        <template v-else-if="hasDetail">
-          <div v-for="entry in rawEntries" :key="entry.key" class="field">
-            <span class="k">{{ entry.key }}</span>
-            <span class="v mono">{{ entry.value }}</span>
-          </div>
-        </template>
-        <div v-else class="note">{{ t("online.noDetail") }}</div>
-      </div>
-    </details>
+    </section>
   </div>
 </template>
 

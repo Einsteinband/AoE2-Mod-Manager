@@ -13,6 +13,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { readDetailCache, usableDetailCache } from "../../online/cache";
 import { messageOf } from "../../online/errors";
+import { isNetworkError, isNetworkFailure, noteRequestFailure } from "../../online/networkError";
 import { modDetail } from "../../online/service";
 import {
   activeTranslation,
@@ -61,7 +62,7 @@ function formatDate(text: string | null): string | null {
 function plainText(html: string): string {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li)>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|blockquote|tr)>/gi, "\n")
     .replace(/<[^>]+>/g, "")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
@@ -82,6 +83,12 @@ export function useOnlineDetail(deps: {
   const detail = ref<Record<string, unknown> | null>(null);
   const detailLoading = ref(false);
   const detailError = ref<string | null>(null);
+  /**
+   * v3.3：断网 / 已判定网络不可用 + 本地没有该模组详情缓存。
+   * 这种情况**不发任何请求**，界面只显示「详情未缓存，请连网后查看」，
+   * 绝不把 DNS / 传输层原始报错甩到描述区。
+   */
+  const detailUncached = ref(false);
   /** 下载过程中量到的真实体积（服务端详情缺 modFileSize 时兜底），由安装流程写入 */
   const measuredBytes = ref<number | null>(null);
 
@@ -97,6 +104,7 @@ export function useOnlineDetail(deps: {
     if (next) return;
     detail.value = null;
     detailError.value = null;
+    detailUncached.value = false;
     detailLoading.value = false;
   });
 
@@ -109,14 +117,24 @@ export function useOnlineDetail(deps: {
   function resetForSwitch(): void {
     detail.value = null;
     detailError.value = null;
+    detailUncached.value = false;
     detailLoading.value = false;
     measuredBytes.value = null;
+  }
+
+  /** 断网兜底文案：只有缓存也没有时才走到这里 */
+  function markUncached(): void {
+    detail.value = null;
+    detailError.value = null;
+    detailUncached.value = true;
+    detailLoading.value = false;
   }
 
   /** 拉取详情：缓存 → 离线判断 → 单飞 + 冷却 */
   async function loadDetail(mod: OnlineMod): Promise<void> {
     const id = mod.modId;
     detailLoading.value = false;
+    detailUncached.value = false;
 
     // ① 本地缓存优先
     try {
@@ -130,8 +148,12 @@ export function useOnlineDetail(deps: {
       /* 缓存不可用：继续走网络 */
     }
 
-    // ② 离线：只用缓存，绝不发请求
-    if (sessionPhase.value !== "online") return;
+    // ② 离线 / 刚发生过网络失败：只用缓存，绝不发请求（否则必吃 DNS 报错）
+    const browserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (sessionPhase.value !== "online" || isNetworkError.value || browserOffline) {
+      markUncached();
+      return;
+    }
 
     // ③ 单飞 + 冷却
     if (pendingDetailIds.has(id)) return;
@@ -148,7 +170,15 @@ export function useOnlineDetail(deps: {
         detailError.value = null;
       }
     } catch (e) {
-      if (selection.selectedId.value === id) detailError.value = messageOf(e);
+      if (selection.selectedId.value === id) {
+        if (isNetworkFailure(e)) {
+          // 网络类失败：点亮全局断网标志（后续点击直接走兜底），只给友好提示
+          noteRequestFailure(e);
+          markUncached();
+        } else {
+          detailError.value = messageOf(e);
+        }
+      }
     } finally {
       pendingDetailIds.delete(id);
       if (selection.selectedId.value === id) detailLoading.value = false;
@@ -338,6 +368,7 @@ export function useOnlineDetail(deps: {
     detail,
     detailLoading,
     detailError,
+    detailUncached,
     measuredBytes,
     detailTags,
     headerTitle,

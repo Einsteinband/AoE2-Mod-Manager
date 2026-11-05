@@ -147,6 +147,7 @@ const {
   detail: detailRaw,
   detailLoading,
   detailError,
+  detailUncached,
   detailTags,
   headerTitle,
   titleSub,
@@ -308,9 +309,6 @@ const translateActive = computed(() => selectedTranslated.value && !showingOrigi
 const translateNote = computed(() => (waitingDetail.value && !selectedTranslated.value
   ? t("translate.waitingContent")
   : null));
-
-/** 详情面板：原始字段表 */
-const rawEntryList = computed(() => detail.rawEntries());
 
 /** 详情面板：封面 */
 const selectedThumb = computed(() => thumbs.thumbOf(selected.value));
@@ -916,8 +914,7 @@ onUnmounted(() => {
         :desc-text="descText"
         :detail-loading="detailLoading"
         :detail-error="detailError"
-        :has-detail="Boolean(detailRaw)"
-        :raw-entries="rawEntryList"
+        :detail-uncached="detailUncached"
         v-model:need-force="needForce"
         v-model:force-overwrite="forceOverwrite"
         @translate="onTranslateClick"

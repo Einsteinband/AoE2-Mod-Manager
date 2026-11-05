@@ -10,6 +10,7 @@
 import { ref } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { clearLoginCache, sessionStatus, startupSession } from "./online/service";
+import { noteRequestSuccess } from "./online/networkError";
 import { translate } from "./i18n";
 import { translateBackendMessage } from "./format";
 import type { SessionStatus } from "./online/types";
@@ -99,6 +100,9 @@ export function markOnline(status?: SessionStatus | null): void {
   }
   const wasOnline = sessionPhase.value === "online";
   sessionPhase.value = "online";
+  // 会话探测能成功返回 = 网络确实通了：顺手清掉全局断网标志，
+  // 否则断网期间点过模组后，这个标志会一直把详情请求挡在门外
+  noteRequestSuccess();
   if (!wasOnline) sessionEpoch.value += 1;
   lastCheckedMs.value = Date.now();
 }

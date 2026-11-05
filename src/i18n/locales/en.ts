@@ -7,7 +7,7 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    taglinePrefix: "v0.4.1 · by ",
+    taglinePrefix: "v0.4.2 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -668,6 +668,7 @@ export default {
     description: "Mod description",
     rawFields: "Raw service fields (/Detail/{id})",
     noDetail: "No details fetched yet.",
+    detailUncached: "This mod's details are not cached. Connect to the internet to view them.",
     uninstallTitle: "Uninstall local mod",
     uninstallMessage:
       "Delete this local mod folder? The files are removed from disk and its mod-status.json record is cleaned up.\n\nNote: this only deletes local files. If you subscribed to this mod in game or on the website, click “View on website” to unsubscribe — otherwise the game may download it again on next launch.",

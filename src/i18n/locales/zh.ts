@@ -6,7 +6,7 @@ export const label = "中文";
 export default {
   app: {
     name: "帝国时代 II · 模组管理器",
-    taglinePrefix: "v0.4.1 · by ",
+    taglinePrefix: "v0.4.2 · by ",
     author: "Einsteinband",
     authorTitle: "打开作者 GitHub 主页（系统浏览器）",
     windowTitle: "AoE2 Mod Manager",
@@ -658,6 +658,7 @@ export default {
     description: "模组描述",
     rawFields: "服务端原始字段（/Detail/{id}）",
     noDetail: "尚未获取详情。",
+    detailUncached: "该模组的详情未缓存，请连网后查看。",
     uninstallTitle: "卸载本地模组",
     uninstallMessage:
       "确定要删除本机的这个模组目录吗？文件将从磁盘移除，mod-status.json 里的记录也会一并清理。\n\n注：此操作仅删除本地文件。如果这是您在官网/游戏内订阅的模组，请点击「在网站浏览」前往官网取消订阅，否则游戏启动时可能会自动重新下载。",

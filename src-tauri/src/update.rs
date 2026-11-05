@@ -5,6 +5,10 @@
 //!   WebView2 里的 fetch 只会跟系统代理，用户设的手动代理会失效。
 //! - 匿名请求（不带 Cookie），GitHub 要求必须带 User-Agent，否则 403。
 //! - 只读 latest release；版本比较在本地完成。
+//! - **国内网络优先走反代镜像**：[`API_MIRROR_PREFIXES`] 依次尝试（5s 连接 / 3s 读取），
+//!   全部失败才回退直连 `api.github.com`。国内直连 `api.github.com` 基本不可达，
+//!   旧实现只有直连，所以「更新检测收不到通知」。统一入口是 [`fetch_with_mirrors`]，
+//!   `lib::fetch_releases_blocking`（更新历史 / 首启新版本特性）也复用它。
 //! - 启动静默检查带 2 小时防抖（settings.json 的 last_auto_update_check_ms），
 //!   命中时直接返回、不发请求，只打一条 `[update] auto check skipped` 诊断日志；
 //!   手动检查不受限制。
@@ -19,6 +23,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// 仓库首页（Release 地址兜底用）
 pub const REPO_URL: &str = "https://github.com/Einsteinband/AoE2-Mod-Manager";
 const RELEASES_LATEST: &str = "https://api.github.com/repos/Einsteinband/AoE2-Mod-Manager/releases/latest";
+
+/// 国内可用的 GitHub API 反代前缀（用户 2026-11-06 裁决：gh-proxy.com 优先，gh.llkk.cc 已移除）。
+/// 请求时拼成 `{prefix}{完整 url}`，例如 `https://gh-proxy.com/https://api.github.com/...`。
+/// 放常量里是为了后续维护：某个反代失效时只删一行，数组顺序即尝试优先级。
+/// 2026-11-06 实测：gh-proxy.com 返回 200 正常 JSON，其余两个当前 403（公益反代，日后可能恢复），
+/// 已移除持续超时的 gh.llkk.cc。存活项放第一位，国内用户日常检测 1 次请求即命中。
+pub const API_MIRROR_PREFIXES: &[&str] = &[
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+    "https://ghfast.top/",
+];
+/// 镜像超时：5s 连接 / 3s 读取（用户 2026-11-06 裁决，为了快速失败而不是卡住）
+const MIRROR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MIRROR_READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// 直连超时：沿用改造前取值，给慢网络留足时间
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const DIRECT_READ_TIMEOUT: Duration = Duration::from_secs(12);
 /// JSON 里最多取多少个字符的更新说明（前端只做简短展示，避免撑破弹窗）
 const NOTES_LIMIT: usize = 600;
 /// GitHub 强制要求 User-Agent，缺失会被直接判 403
@@ -148,62 +169,149 @@ fn translate_status(code: u16) -> String {
 
 /// 一次请求的结局。区分「报错但请求确实发出去了」和「压根没连上」，
 /// 自动检查靠这个判断该不该写时间戳（已经烧掉的配额要算数）。
-enum Fetched {
-    /// 拿到 2xx
-    Response(ureq::Response),
+enum Attempt {
+    /// 拿到 2xx，已把响应体读成字符串
+    Body(String),
     /// 拿到响应但状态码是错误（403 限流也在这里）
-    HttpError { message: String },
+    HttpError { code: u16, message: String },
     /// 连响应都没拿到（DNS / 代理 / 超时），不消耗配额
-    Transport { message: String },
+    Transport(String),
 }
 
-/// 发请求：成功打印配额摘要；失败时打印完整响应头、限流字段与响应体
-fn request_latest(agent: &ureq::Agent) -> Fetched {
-    println!("[update] GET {RELEASES_LATEST}");
-    println!("[update] User-Agent: {USER_AGENT}");
+/// 打一个 URL。`verbose` 只在直连兜底时开：那时才打印完整响应头、限流字段与响应体；
+/// 镜像失败只打一行摘要，避免 4 个镜像把终端刷满。
+fn request_url(agent: &ureq::Agent, url: &str, verbose: bool) -> Attempt {
+    if verbose {
+        println!("[update] GET {url}");
+        println!("[update] User-Agent: {USER_AGENT}");
+    }
     match agent
-        .get(RELEASES_LATEST)
+        .get(url)
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", USER_AGENT)
         .call()
     {
         Ok(response) => {
-            log_rate_limit(&response);
-            Fetched::Response(response)
+            if verbose {
+                log_rate_limit(&response);
+            }
+            match response.into_string() {
+                Ok(body) => Attempt::Body(body),
+                Err(e) => Attempt::Transport(format!("读取 GitHub 响应失败：{e}")),
+            }
         }
         Err(ureq::Error::Status(code, response)) => {
-            println!("[update] request failed: HTTP {code}");
-            log_all_headers(&response);
-            log_rate_limit(&response);
-            match response.into_string() {
-                Ok(body) => {
-                    let body = body.trim();
-                    if body.is_empty() {
-                        println!("[update] response body: <empty>");
-                    } else {
-                        println!(
-                            "[update] response body: {}",
-                            body.chars().take(1200).collect::<String>()
-                        );
+            if verbose {
+                println!("[update] request failed: HTTP {code}");
+                log_all_headers(&response);
+                log_rate_limit(&response);
+                match response.into_string() {
+                    Ok(body) => {
+                        let body = body.trim();
+                        if body.is_empty() {
+                            println!("[update] response body: <empty>");
+                        } else {
+                            println!(
+                                "[update] response body: {}",
+                                body.chars().take(1200).collect::<String>()
+                            );
+                        }
                     }
+                    Err(e) => println!("[update] response body unreadable: {e}"),
                 }
-                Err(e) => println!("[update] response body unreadable: {e}"),
             }
-            Fetched::HttpError { message: translate_status(code) }
+            Attempt::HttpError { code, message: translate_status(code) }
         }
         Err(ureq::Error::Transport(t)) => {
-            println!("[update] transport error: {t}");
-            println!("[update] transport error debug: {t:?}");
-            Fetched::Transport { message: format!("网络请求失败：{t}") }
+            if verbose {
+                println!("[update] transport error: {t}");
+                println!("[update] transport error debug: {t:?}");
+            }
+            Attempt::Transport(format!("网络请求失败：{t}"))
         }
     }
 }
 
-/// 组装 Agent（8s 连接 / 12s 读取，UA 同时挂在 Agent 与请求头两处）
-fn build_agent(proxy: Option<ureq::Proxy>) -> (ureq::Agent, &'static str) {
+/// 廉价形状检查：两个接口都只返回 JSON 对象/数组。
+/// 反代把错误页当 200 返回时，靠它把这种响应当成失败继续试下一个镜像，
+/// 而不是让上层 `serde_json` 报「不是合法 JSON」后彻底放弃。
+fn looks_like_json(body: &str) -> bool {
+    matches!(body.trim_start().as_bytes().first(), Some(b'{') | Some(b'['))
+}
+
+/// **统一网络入口**：镜像优先（短超时）→ 直连 api.github.com 兜底。
+///
+/// 调用方：
+/// - [`run_once`]：请求 [`RELEASES_LATEST`]（`check_update` / `check_update_auto`）；
+/// - `lib::fetch_releases_blocking`：请求 `/releases?per_page=30`（更新历史 / 首启新版本特性）。
+///
+/// 返回值 `.0` = 是否有任何一次请求真的拿到了 HTTP 响应（含 403 等错误码）；
+/// 自动检查靠它判断要不要写时间戳——已经烧掉的配额要算数。
+/// 返回值 `.1` = 拿到 2xx 时的响应体；全部失败时为错误文案。
+///
+/// 镜像失败日志统一前缀 `[update] mirror failed:`，用户反馈时直接搜这一行就能定位是哪个反代挂了。
+pub fn fetch_with_mirrors(proxy: Option<ureq::Proxy>, url: &str) -> (bool, Result<String, String>) {
+    let mut reached = false;
+    let mut last_error = String::new();
+
+    for prefix in API_MIRROR_PREFIXES {
+        let full = format!("{prefix}{url}");
+        let (agent, _route) =
+            build_agent(proxy.clone(), MIRROR_CONNECT_TIMEOUT, MIRROR_READ_TIMEOUT);
+        match request_url(&agent, &full, false) {
+            Attempt::Body(body) => {
+                if looks_like_json(&body) {
+                    println!("[update] mirror ok: {full} ({} bytes)", body.len());
+                    return (true, Ok(body));
+                }
+                println!(
+                    "[update] mirror failed: not JSON, {} bytes (possibly an error page) ({full})",
+                    body.len()
+                );
+                last_error = format!("镜像返回的不是 JSON（{} 字节）", body.len());
+            }
+            Attempt::HttpError { code, message } => {
+                reached = true;
+                println!("[update] mirror failed: HTTP {code} {full}");
+                last_error = message;
+            }
+            Attempt::Transport(message) => {
+                println!("[update] mirror failed: {message} ({full})");
+                last_error = message;
+            }
+        }
+    }
+
+    println!(
+        "[update] all {} mirrors failed, falling back to direct GET",
+        API_MIRROR_PREFIXES.len()
+    );
+    let (agent, route) = build_agent(proxy, DIRECT_CONNECT_TIMEOUT, DIRECT_READ_TIMEOUT);
+    println!("[update] route: {route}");
+    match request_url(&agent, url, true) {
+        Attempt::Body(body) => (true, Ok(body)),
+        Attempt::HttpError { message, .. } => (true, Err(message)),
+        Attempt::Transport(message) => {
+            let message = if last_error.is_empty() {
+                message
+            } else {
+                format!("{message}（镜像同样失败：{last_error}）")
+            };
+            (reached, Err(message))
+        }
+    }
+}
+
+/// 组装 Agent（UA 同时挂在 Agent 与请求头两处）。
+/// 超时由调用方指定：镜像用短超时快速失败，直连沿用 8s/12s。
+fn build_agent(
+    proxy: Option<ureq::Proxy>,
+    connect: Duration,
+    read: Duration,
+) -> (ureq::Agent, &'static str) {
     let mut builder = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(8))
-        .timeout_read(Duration::from_secs(12))
+        .timeout_connect(connect)
+        .timeout_read(read)
         .user_agent(USER_AGENT);
     let route = if proxy.is_some() { "configured proxy" } else { "direct" };
     if let Some(proxy) = proxy {
@@ -214,12 +322,10 @@ fn build_agent(proxy: Option<ureq::Proxy>) -> (ureq::Agent, &'static str) {
 
 /// 发一次请求并解析。第一个返回值 = 请求是否真的发了出去（拿到任何 HTTP 响应都算）
 fn run_once(proxy: Option<ureq::Proxy>) -> (bool, Result<UpdateInfo, String>) {
-    let (agent, route) = build_agent(proxy);
-    println!("[update] route: {route}");
-    match request_latest(&agent) {
-        Fetched::Response(response) => (true, parse_info(response)),
-        Fetched::HttpError { message } => (true, Err(message)),
-        Fetched::Transport { message } => (false, Err(message)),
+    let (reached, result) = fetch_with_mirrors(proxy, RELEASES_LATEST);
+    match result {
+        Ok(body) => (reached, parse_info(&body)),
+        Err(message) => (reached, Err(message)),
     }
 }
 
@@ -228,13 +334,10 @@ pub fn fetch_latest(proxy: Option<ureq::Proxy>) -> Result<UpdateInfo, String> {
     run_once(proxy).1
 }
 
-/// 解析 2xx 响应体
-fn parse_info(response: ureq::Response) -> Result<UpdateInfo, String> {
-    let body = response
-        .into_string()
-        .map_err(|e| format!("读取 GitHub 响应失败：{e}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("GitHub 响应不是合法 JSON：{e}"))?;
+/// 解析 2xx 响应体（镜像与直连的响应体走同一条路径）
+fn parse_info(body: &str) -> Result<UpdateInfo, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("GitHub 响应不是合法 JSON：{e}（可能是镜像返回了错误页）"))?;
 
     let tag = value
         .get("tag_name")

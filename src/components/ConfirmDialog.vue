@@ -14,6 +14,8 @@ const props = defineProps<{
   error?: string | null;
   /** false = 用金色主按钮（“全部启用”这类非破坏性操作）；默认 true = 红色危险按钮 */
   danger?: boolean;
+  /** 左按钮文案；不传则用「取消」（订阅提示这类非取消语义的弹窗可传「我知道了」） */
+  cancelLabel?: string;
 }>();
 
 const emit = defineEmits<{ (e: "confirm"): void; (e: "cancel"): void }>();
@@ -42,7 +44,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
         <p v-if="detail" class="confirm-detail mono">{{ detail }}</p>
         <div v-if="error" class="path-error">{{ error }}</div>
         <div class="confirm-actions">
-          <button type="button" :disabled="busy" @click="emit('cancel')">{{ t("confirm.cancel") }}</button>
+          <button type="button" :disabled="busy" @click="emit('cancel')">
+            {{ cancelLabel ?? t("confirm.cancel") }}
+          </button>
           <button
             type="button"
             :class="danger === false ? 'primary' : 'danger'"

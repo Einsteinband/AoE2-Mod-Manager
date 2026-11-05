@@ -13,6 +13,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { getNetworkSettings, loginTargets, openLogin } from "../online/service";
 import { isNetworkError } from "../online/networkError";
+import { translateBackendMessage } from "../format";
 import {
   ensureSession,
   lastCheckedMs,
@@ -33,7 +34,15 @@ const menuOpen = ref(false);
 const platforms = ref<LoginTarget[]>([]);
 const platform = ref("microsoft");
 const loggingIn = ref(false);
-const proxyText = ref("");
+const proxySourceKey = ref<string | null>(null);
+/**
+ * 代理胶囊：只存「来源的 i18n key」，渲染时才拼文案。
+ * 之前是一枚 ref("") 快照，切换语言后仍停在旧语言（英文界面出现「代理：直连」），
+ * 改成 computed 后随 locale 重新求值。
+ */
+const proxyText = computed(() =>
+  proxySourceKey.value ? t("statusbar.proxyLabel", { src: t(proxySourceKey.value) }) : "",
+);
 /** 登录轮询的节拍与次数：2.5s × 24 ≈ 60s，超时就把 🟡 放回 ⚪ */
 const POLL_INTERVAL_MS = 2500;
 const POLL_TRIES = 24;
@@ -84,6 +93,12 @@ function labelFor(target: LoginTarget): string {
   return te(key) ? t(key) : target.label;
 }
 
+/** 登录方式说明：同样以 i18n 为准，后端 hint（简体中文原文）只在键缺失时兜底 */
+function hintFor(target: LoginTarget): string {
+  const key = `online.login.${target.key}.hint`;
+  return te(key) ? t(key) : target.hint;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -92,17 +107,16 @@ function sleep(ms: number): Promise<void> {
 async function loadProxy() {
   try {
     const view = await getNetworkSettings();
-    const source =
+    proxySourceKey.value =
       view.source === "manual"
-        ? t("statusbar.proxyManual")
+        ? "statusbar.proxyManual"
         : view.source === "system"
-          ? t("statusbar.proxySystem")
+          ? "statusbar.proxySystem"
           : view.source === "env"
-            ? t("statusbar.proxyEnv")
-            : t("statusbar.proxyDirect");
-    proxyText.value = t("statusbar.proxyLabel", { src: source });
+            ? "statusbar.proxyEnv"
+            : "statusbar.proxyDirect";
   } catch {
-    proxyText.value = "";
+    proxySourceKey.value = null;
   }
 }
 
@@ -141,7 +155,7 @@ async function startLogin() {
   try {
     await openLogin(platform.value);
   } catch (e) {
-    setStatusMessage(typeof e === "string" ? e : t("statusbar.loginFailed"));
+    setStatusMessage(translateBackendMessage(typeof e === "string" ? e : t("statusbar.loginFailed")));
     loggingIn.value = false;
     return;
   }
@@ -208,7 +222,7 @@ onBeforeUnmount(() => {
         @click="platform = item.key"
       >
         <span class="sb-menu-label">{{ labelFor(item) }}</span>
-        <span class="sb-menu-hint">{{ item.hint }}</span>
+        <span class="sb-menu-hint">{{ hintFor(item) }}</span>
       </button>
       <div class="sb-menu-actions">
         <button type="button" :disabled="loggingIn" @click="startLogin">
@@ -309,6 +323,7 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 .sb-pill {
   padding: 2px 7px;
@@ -318,6 +333,12 @@ onBeforeUnmount(() => {
   color: var(--muted);
   font-size: 10px;
   white-space: nowrap;
+  /* 英文比中文长（Proxy: direct / Environment proxy）：窄窗口下只省略，不换行不撑破底栏 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40vw;
 }
 .sb-pill.sb-mode {
   border-color: var(--gold-dim);

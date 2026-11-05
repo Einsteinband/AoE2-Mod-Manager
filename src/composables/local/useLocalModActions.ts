@@ -7,6 +7,7 @@
  */
 import { ref, watch, type Ref } from "vue";
 import { modStats } from "../../api";
+import { rememberModMeta } from "../../favoriteMeta";
 import type { ModEntry, ModStats, ScanReport } from "../../types";
 import type { SortMode } from "./useSortMode";
 
@@ -59,6 +60,8 @@ export function useLocalModActions(deps: {
     if (!list) return;
     const index = list.findIndex((m) => m.id === payload.id);
     if (index < 0) return;
+    // v0.6：卸载前先记住标题 / 作者 / 分类，收藏视图才能把它显示成「未安装」而不是凭空消失
+    rememberModMeta(list[index]);
     const wasSelected = selectedId.value === payload.id;
     list.splice(index, 1);
     if (!wasSelected) return;

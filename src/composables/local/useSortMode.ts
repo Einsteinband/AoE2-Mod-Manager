@@ -80,7 +80,7 @@ export function useSortMode(deps: {
     await nextTick();
     const el = gridEl.value;
     if (!el) {
-      console.warn("[sort] 排序网格未渲染出来，拖拽未挂载");
+      console.warn("[sort] sort grid is not rendered yet; drag-and-drop not mounted");
       return;
     }
     disposeDrag?.();

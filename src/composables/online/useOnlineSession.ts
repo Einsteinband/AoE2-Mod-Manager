@@ -177,6 +177,16 @@ export function useOnlineSession(deps: {
     }
   }
 
+  /**
+   * 退出登录成功的提示交给 i18n（英文界面不能出现后端中文原文）。
+   * 后端成功的返回值形如“… 均已清空（<数据目录>）”，这里只把括号里的路径抽出来做 {path}，
+   * 抽不到（换语言 / 改文案）就退到无路径的那条键，不把中文整包拼进英文界面。
+   */
+  function logoutClearedText(raw: string): string {
+    const match = raw.match(/[（(]([^（）()]+)[）)]\s*$/);
+    return match ? t("online.logoutCleared", { path: match[1] }) : t("online.logoutClearedNoPath");
+  }
+
   async function doLogout(): Promise<void> {
     if (netClearing.value) return;
     netClearing.value = true;
@@ -184,14 +194,16 @@ export function useOnlineSession(deps: {
     netMessage.value = null;
     try {
       const text = await withTimeout(clearLoginCache(), 30_000, t("online.clearCache"));
-      netMessage.value = text;
+      netMessage.value = logoutClearedText(text);
       session.value = null;
       deps.resetFavoritePool();
       await refreshSession();
       // 退出登录不清空列表：直接用缓存重绘，离线也能继续看
       await deps.reloadAfterLogout();
     } catch (e) {
-      netError.value = messageOf(e);
+      const raw = messageOf(e);
+      // 后端“退出登录失败：文件被占用…”走独立键，避免把中文原因原样带到英文界面
+      netError.value = /退出登录失败|退出登录未完成/.test(raw) ? t("online.logoutFailed") : raw;
     } finally {
       netClearing.value = false;
     }
@@ -209,13 +221,13 @@ export function useOnlineSession(deps: {
     sessionError.value = null;
     deps.onLoginStart?.();
     const chosen = platforms.value.find((p) => p.key === target);
-    void uiLog("info", `用户点击登录：platform=${target} url=${chosen?.url ?? "(未加载)"}`);
+    void uiLog("info", `user clicked sign in: platform=${target} url=${chosen?.url ?? "(not loaded)"}`);
     try {
       await withTimeout(openLogin(target), 25_000, t("online.openLogin"));
     } catch (e) {
       waitingLogin.value = false;
       sessionError.value = messageOf(e);
-      void uiLog("error", `打开登录窗口失败：${messageOf(e)}`);
+      void uiLog("error", `failed to open the sign-in window: ${messageOf(e)}`);
       return;
     }
     stopPoll();
@@ -223,10 +235,10 @@ export function useOnlineSession(deps: {
       try {
         const status = await withTimeout(sessionStatus(), 15_000, t("online.recheck"));
         session.value = status;
-        if (status.error) sessionError.value = status.error;
+        if (status.error) sessionError.value = messageOf(status.error);
         void uiLog(
           "info",
-          `轮询登录状态：loggedIn=${status.loggedIn} cookieCount=${status.cookieCount} windowReady=${status.windowReady}`,
+          `polling sign-in status: loggedIn=${status.loggedIn} cookieCount=${status.cookieCount} windowReady=${status.windowReady}`,
         );
         if (!status.loggedIn) return;
 
@@ -237,7 +249,7 @@ export function useOnlineSession(deps: {
             20_000,
             t("online.probe"),
           );
-          void uiLog("info", `验证通过（返回 ${probe.items.length} 条），关闭登录窗口并加载列表`);
+          void uiLog("info", `probe passed (${probe.items.length} items returned); closing the sign-in window and loading the list`);
           waitingLogin.value = false;
           stopPoll();
           await closeLoginWindow();
@@ -247,11 +259,11 @@ export function useOnlineSession(deps: {
         } catch (e) {
           const text = messageOf(e);
           sessionError.value = t("online.cookieButFailed", { text });
-          void uiLog("warn", `Cookie 存在但接口失败，保持窗口打开：${text}`);
+          void uiLog("warn", `cookies found but the API failed; keeping the window open: ${text}`);
         }
       } catch (e) {
         sessionError.value = messageOf(e);
-        void uiLog("warn", `轮询异常：${messageOf(e)}`);
+        void uiLog("warn", `polling error: ${messageOf(e)}`);
       }
     }, 2500);
   }
@@ -277,7 +289,7 @@ export function useOnlineSession(deps: {
     silentTried = true;
     silentAuth.value = true;
     silentAuthNote.value = t("online.silentNote", { reason });
-    void uiLog("info", `后台免密登录开始：${reason}`);
+    void uiLog("info", `background silent sign-in started: ${reason}`);
     try {
       await withTimeout(openLoginSilent(platform.value), 15_000, t("online.openLogin"));
     } catch (e) {
@@ -297,7 +309,7 @@ export function useOnlineSession(deps: {
         const status = await withTimeout(sessionStatus(), 15_000, t("online.recheck"));
         if (status.loggedIn) {
           ok = true;
-          void uiLog("info", "后台免密登录成功（会话 Cookie 已就绪）");
+          void uiLog("info", "background silent sign-in succeeded (session cookie ready)");
           stopSilentTimer();
           silentAuth.value = false;
           silentAuthNote.value = null;
@@ -308,7 +320,7 @@ export function useOnlineSession(deps: {
           setStatusMessage(t("statusbar.loginDone"));
         }
       } catch (e) {
-        void uiLog("info", `后台免密登录第 ${ticks} 次未完成：${messageOf(e)}`);
+        void uiLog("info", `background silent sign-in attempt ${ticks} did not finish: ${messageOf(e)}`);
       }
       if (!ok && ticks >= 6) {
         stopSilentTimer();
@@ -321,7 +333,7 @@ export function useOnlineSession(deps: {
   async function stopWaiting(): Promise<void> {
     waitingLogin.value = false;
     stopPoll();
-    void uiLog("info", "用户取消等待登录：隐藏登录窗口（前端主动 close）");
+    void uiLog("info", "user cancelled waiting for sign-in: hiding the sign-in window (closed by the front end)");
     await closeLoginWindow();
   }
 

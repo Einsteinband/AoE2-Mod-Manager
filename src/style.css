@@ -3117,3 +3117,25 @@ button.primary.queued {
   font-size: calc(11px * var(--global-scale));
   color: var(--muted);
 }
+
+/* v3.3：本地 / 订阅双份冲突角标（ModCard 左上角与 ModDetail 标签行共用）
+   红底白字用与「可更新」同一套危险色变量，只提示“建议退订”，不提供任何本地压制动作。 */
+.conflict-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  font-size: calc(var(--card-font-size) * 0.75);
+  letter-spacing: 0.4px;
+  line-height: 1.5;
+  border-radius: 999px;
+  border: 1px solid var(--danger-text-strong);
+  background: linear-gradient(180deg, var(--badge-danger-top), var(--badge-danger-bottom));
+  color: var(--text-inverse);
+  font-family: var(--app-font-family);
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* 详情页没有卡片层字号，按正文层比例显示，避免过小 */
+.detail-badges .conflict-badge {
+  font-size: calc(11px * var(--global-scale));
+}

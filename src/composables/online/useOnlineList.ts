@@ -22,6 +22,7 @@ import { findMods, installedMods } from "../../online/service";
 import { isApiFailure, type OnlineMod } from "../../online/types";
 import { sessionPhase, setStatusMessage } from "../../sessionState";
 import { ensureUserData, favoriteIdSet, isFavorite } from "../../userData";
+import { favoriteMetaOf } from "../../favoriteMeta";
 import type { OnlineSelection } from "./useOnlineSelection";
 
 /** 每批加载数量：本地网格每行 6 个（约 197px 列宽），24 = 4 行 */
@@ -48,6 +49,29 @@ function clockText(ms: number): string {
   const date = new Date(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
   return pad(date.getHours()) + ":" + pad(date.getMinutes());
+}
+
+/** 最低限度的占位列表项：只有离线元数据里有的字段，其余留空，界面自行降级展示 */
+function placeholderFavorite(modId: number): OnlineMod {
+  const meta = favoriteMetaOf(modId);
+  return {
+    modId,
+    title: meta?.title?.trim() || `#${modId}`,
+    creator: meta?.creator ?? null,
+    thumbnail: meta?.thumbnailUrl ?? null,
+    installs: null,
+    installsTruncated: false,
+    rating: null,
+    modStatus: null,
+    userInstalled: false,
+    userDownloaded: false,
+    updateAvailable: false,
+    gameTitleId: 2,
+    tagIds: meta?.tagIds ?? [],
+    tagNames: meta?.tagNames ?? [],
+    fileSize: null,
+    raw: {},
+  };
 }
 
 /** 只有字段真的变了才写回：避免无意义的响应式更新让卡片重绘（“不闪”的关键） */
@@ -301,6 +325,16 @@ export function useOnlineList(deps: {
     const matched = [...byId.values()]
       .filter((mod) => favorites.has(mod.modId))
       .sort((a, b) => (b.installs ?? 0) - (a.installs ?? 0));
+
+    /**
+     * v0.6：收藏过但「缓存池 + 当前列表」里都没有的 ID（从未下载、或缓存被清）
+     * → 用离线元数据拼一条占位列表项，保证“只要收藏过就一定显示”。
+     * 点开详情仍走原有 online_detail（缓存优先），可正常下载安装。
+     */
+    for (const id of favorites) {
+      if (matched.some((mod) => mod.modId === id)) continue;
+      matched.push(placeholderFavorite(id));
+    }
 
     totalCount.value = matched.length;
     hasMore.value = false;

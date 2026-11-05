@@ -270,35 +270,331 @@ pub fn validate_structure(mod_root: &Path) -> Result<(), String> {
 
 /// 应当位于 `resources/` 之下、却常被老旧/不规范压缩包直接摊在模组根目录的资源目录名。
 ///
-/// 只认这张白名单：宁可漏搬也不误搬，避免把模组自带的普通子目录当成游戏资源。
-const ROOT_RESOURCE_DIRS: &[&str] = &[
-    "_common",
-    "widgetui",
-    "gamedata",
-    "wpfg",
-    "drs",
-    "sound",
-    "sounds",
-    "art",
-    "particles",
-];
+/// 保守白名单：只认这 4 个游戏确实从 `resources/` 下层加载的目录。
+/// 宁可漏搬也不误搬——误搬的代价是整个模组失效。
+const ROOT_RESOURCE_DIRS: &[&str] = &["_common", "gamedata", "drs", "wpfg"];
 
-/// 修复“缺一层 resources”的模组结构（老旧/不规范压缩包常见毛病）。
+/// 永远保持原位的目录。
 ///
-/// 规则：
-/// - 根目录已有 `resources` 目录 → 原样不动（可能是特殊的非标准结构，动它反而会坏）
-/// - 没有 `resources`，但根目录直接躺着 `_common` / `widgetui` / `gamedata` 等资源目录
-///   → 新建 `resources`，把这些目录改名搬进去（同卷 rename，不复制、不丢数据）
-/// - 一个都没命中 → 什么都不做，也不会留下空的 `resources`
+/// `widgetui` 必须留在模组根目录：早期版本把它当成根目录资源搬进 `resources/`，
+/// 导致界面类模组大面积失效。这里作为硬约束写死，任何步骤都不得移动它。
+const NEVER_MOVE_DIRS: &[&str] = &["widgetui"];
+
+/// 该目录沿“唯一子目录”链向下，是否最终能碰到 `info.json`。
 ///
-/// 返回被搬动的目录名（按白名单顺序）；调用方据此打日志即可。
+/// 遇到散文件或分叉即判定为假：这种结构不敢展开，怕把内容搬到错误的层级。
+fn has_info_json_in_chain(dir: &Path) -> bool {
+    const MAX_DEPTH: usize = 8;
+    let mut cur = dir.to_path_buf();
+    for _ in 0..MAX_DEPTH {
+        if cur.join("info.json").is_file() {
+            return true;
+        }
+        let Ok(rd) = fs::read_dir(&cur) else { return false };
+        let mut next: Option<PathBuf> = None;
+        let mut dirs = 0usize;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if is_junk_dir(&name) {
+                    continue;
+                }
+                dirs += 1;
+                next = Some(path);
+            } else if !is_junk_file(&path) {
+                return false;
+            }
+        }
+        if dirs != 1 {
+            return false;
+        }
+        match next {
+            Some(path) => cur = path,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// 第 1 步：消除套娃。
+///
+/// 三个条件同时成立才动手，任一条不满足就一个字节都不碰：
+/// 1. 根目录没有 `info.json`
+/// 2. 根目录恰好只有一个真实子目录（散文件、`__MACOSX` 视为噪声，但散文件会打断判断）
+/// 3. 该子目录（或其唯一子目录链）里能找到 `info.json`
+///
+/// 通过后把子目录内所有内容 rename 上移一层，删掉空壳；多层套娃逐层剥。
+/// 返回被剥掉的子目录名（由外到内），供调用方打日志。
+fn unwrap_nested_mod_root(mod_root: &Path) -> Vec<String> {
+    const MAX_UNWRAP_DEPTH: usize = 8;
+    let mut unwrapped: Vec<String> = Vec::new();
+    for _ in 0..MAX_UNWRAP_DEPTH {
+        if mod_root.join("info.json").is_file() {
+            break;
+        }
+        let Ok(rd) = fs::read_dir(mod_root) else { break };
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut loose = 0usize;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if !is_junk_dir(&name) {
+                    dirs.push(path);
+                }
+            } else if !is_junk_file(&path) {
+                loose += 1;
+            }
+        }
+        if dirs.len() != 1 || loose != 0 {
+            break;
+        }
+        let shell = dirs.remove(0);
+        if !has_info_json_in_chain(&shell) {
+            break;
+        }
+        let Some(shell_name) = shell.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            break;
+        };
+        let Ok(inner) = fs::read_dir(&shell) else { break };
+        let children: Vec<PathBuf> = inner.flatten().map(|e| e.path()).collect();
+        let mut aborted = false;
+        for child in children {
+            let Some(child_name) = child.file_name().map(|n| n.to_owned()) else {
+                aborted = true;
+                break;
+            };
+            let to = mod_root.join(&child_name);
+            if to.exists() {
+                log::warn!(
+                    target: "install",
+                    "消除套娃时目标已存在，停止展开：{}",
+                    to.display()
+                );
+                aborted = true;
+                break;
+            }
+            if let Err(e) = fs::rename(&child, &to) {
+                log::warn!(
+                    target: "install",
+                    "消除套娃上移失败：{} - {e}",
+                    child.display()
+                );
+                aborted = true;
+                break;
+            }
+        }
+        // 只删空壳；删不掉就留着（数据安全优先于目录整洁）
+        if let Err(e) = fs::remove_dir(&shell) {
+            log::warn!(
+                target: "install",
+                "套娃空壳目录未能删除（已保留）：{} - {e}",
+                shell.display()
+            );
+        }
+        unwrapped.push(shell_name);
+        if aborted {
+            break;
+        }
+    }
+    unwrapped
+}
+
+/// 第 1.5 步：空壳根目录展开。
+///
+/// 实测畸形结构（`1385_Displayed HotKeys`）：根目录有 `info.json` + `thumbnail.jpg`，
+/// 真正的资源却藏在唯一一个数字命名的子目录里（`1270057352/resources/…`）。
+/// 第 1 步“消除套娃”的前提是根目录**没有** `info.json`，这种包会被整段跳过，
+/// 于是游戏在根目录既找不到 `resources` 也找不到 `widgetui`，模组报感叹号。
+///
+/// 四个条件同时成立才动手，任一不满足就一个字节都不碰：
+/// 1. 根目录有 `info.json`
+/// 2. 根目录既没有 `resources` 也没有 `widgetui`
+/// 3. 根目录恰好只有一个非垃圾子目录（`__MACOSX` 不算）
+/// 4. 该子目录里直接包含 `resources` 或 `widgetui`
+///
+/// 通过后把子目录内所有内容上移一层（根目录已有的同名文件原样保留，跳过并记日志），
+/// 再删空壳。返回被展开的子目录名；一个都没搬成时返回空 Vec。
+fn expand_empty_shell_root(mod_root: &Path) -> Vec<String> {
+    if !mod_root.join("info.json").is_file() {
+        return Vec::new();
+    }
+    // 正常模组的根目录同时也是资源目录：一旦有这个就不展开，避免误伤
+    if mod_root.join("resources").is_dir() || mod_root.join("widgetui").is_dir() {
+        return Vec::new();
+    }
+
+    let Ok(rd) = fs::read_dir(mod_root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() && !is_junk_dir(&name) {
+            dirs.push(path);
+        }
+    }
+    // 分叉即视为可疑：不敢猜哪个才是真正的资源
+    if dirs.len() != 1 {
+        return Vec::new();
+    }
+    let shell = dirs.remove(0);
+    if !shell.join("resources").is_dir() && !shell.join("widgetui").is_dir() {
+        return Vec::new();
+    }
+    let Some(shell_name) = shell.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return Vec::new();
+    };
+    let Ok(inner) = fs::read_dir(&shell) else {
+        return Vec::new();
+    };
+    let children: Vec<PathBuf> = inner.flatten().map(|e| e.path()).collect();
+
+    let mut moved = 0usize;
+    for child in children {
+        let Some(child_name) = child.file_name().map(|n| n.to_owned()) else {
+            continue;
+        };
+        let to = mod_root.join(&child_name);
+        if to.exists() {
+            // 根目录已有的 info.json / thumbnail.jpg 绝不覆盖
+            log::warn!(
+                target: "install",
+                "空壳根目录展开时目标已存在，跳过：{}",
+                to.display()
+            );
+            continue;
+        }
+        match fs::rename(&child, &to) {
+            Ok(()) => moved += 1,
+            Err(e) => log::warn!(
+                target: "install",
+                "空壳根目录展开上移失败：{} - {e}",
+                child.display()
+            ),
+        }
+    }
+    if moved == 0 {
+        return Vec::new();
+    }
+    // 只删空壳；删不掉（还有被跳过的残留）就留着，数据安全优先
+    if let Err(e) = fs::remove_dir(&shell) {
+        log::warn!(
+            target: "install",
+            "空壳子目录未能删除（已保留）：{} - {e}",
+            shell.display()
+        );
+    }
+    log::info!(target: "install", "空壳根目录已展开：{shell_name}");
+    vec![shell_name]
+}
+
+/// 第 1.6 步：widgetui 补全（`textures` 直接摊在根目录）。
+///
+/// 实测畸形结构（`zero two 02`）：根目录 `info.json` + `thumbnail.jpg` +
+/// `textures/backgrounds/mainmenu_bg.dds`，游戏报感叹号。游戏只从
+/// `widgetui/textures/…` 读取主菜单背景等界面资源，缺 `widgetui` 父级就整层失效。
+///
+/// 两个条件同时成立才动手，任一不满足就一个字节都不碰：
+/// 1. 根目录没有 `widgetui`（已存在则一概不合并、不覆盖）
+/// 2. 根目录有 `textures` 目录
+///
+/// 通过后新建 `widgetui/` 并把 `textures` 整体 `fs::rename` 进去；
+/// 失败时只记日志并撤掉刚建的空 `widgetui`，`textures` 留在原位。
+/// 没做任何事时返回 None。
+fn wrap_textures_in_widgetui(mod_root: &Path) -> Option<String> {
+    let textures = mod_root.join("textures");
+    if !textures.is_dir() {
+        return None;
+    }
+    let widgetui = mod_root.join("widgetui");
+    // 已有 widgetui（目录或同名文件）都不碰：宁可不动也不瞎合并
+    if widgetui.exists() {
+        return None;
+    }
+
+    if let Err(e) = fs::create_dir_all(&widgetui) {
+        log::warn!(
+            target: "install",
+            "创建 widgetui 目录失败，跳过 textures 归位：{e}"
+        );
+        return None;
+    }
+    let to = widgetui.join("textures");
+    if to.exists() {
+        log::warn!(
+            target: "install",
+            "widgetui 下已存在 textures，跳过不覆盖：{}",
+            to.display()
+        );
+        let _ = fs::remove_dir(&widgetui);
+        return None;
+    }
+    match fs::rename(&textures, &to) {
+        Ok(()) => {
+            log::info!(
+                target: "install",
+                "已补全 widgetui 层级：textures -> widgetui/textures"
+            );
+            Some("widgetui/textures".to_string())
+        }
+        Err(e) => {
+            log::warn!(
+                target: "install",
+                "textures 移入 widgetui 失败（保留原位）：{} - {e}",
+                textures.display()
+            );
+            let _ = fs::remove_dir(&widgetui);
+            None
+        }
+    }
+}
+
+/// 修复模组目录结构，按“三步规范化”执行：
+///
+/// 1. **消除套娃**：根目录没有 `info.json`、且唯一子目录里有 → 内容上移，删空壳。
+///    1.5 **空壳根目录展开**：根目录有 `info.json`、却没有任何 `resources` / `widgetui`，
+///    且唯一子目录里才有 → 内容上移，删空壳（根目录的 `info.json` / `thumbnail.jpg` 保留）。
+///    1.6 **widgetui 补全**：根目录没有 `widgetui`、却有直接摊开的 `textures` →
+///    新建 `widgetui/` 并把 `textures` 整体移进去。
+/// 2. **补 `resources`（保守白名单）**：根目录没有 `resources` 时，把 `_common` /
+///    `gamedata` / `drs` / `wpfg` 改名搬进新建的 `resources`；一个都没搬成就删掉空目录。
+/// 3. **绝不触碰 `widgetui`**：永远保持原位，不判断、不移动。
+///
+/// 根目录已有 `resources` 目录时不做任何搬迁。
+///
+/// 返回本次实际做过的动作：`"子目录/**"` 表示套娃展开，`"resources/目录名"` 表示补 resources，
+/// `"widgetui/textures"` 表示补 widgetui 层级。结构本来就规范时返回空 Vec。
 pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
     if !mod_root.is_dir() {
         return Ok(Vec::new());
     }
+
+    let mut actions: Vec<String> = Vec::new();
+
+    // ---------- 第 1 步：消除套娃 ----------
+    for name in unwrap_nested_mod_root(mod_root) {
+        actions.push(format!("{name}/**"));
+    }
+
+    // ---------- 第 1.5 步：空壳根目录展开 ----------
+    // 根目录有 info.json 但资源在唯一子目录里（如 `1385_Displayed HotKeys` 的 `1270057352/`）
+    for name in expand_empty_shell_root(mod_root) {
+        actions.push(format!("{name}/**"));
+    }
+
+    // ---------- 第 1.6 步：widgetui 补全（textures 直接摊在根目录） ----------
+    // 如 `zero two 02`：`textures/backgrounds/…` 少了 `widgetui/` 父级
+    if let Some(action) = wrap_textures_in_widgetui(mod_root) {
+        actions.push(action);
+    }
+
+    // ---------- 第 2 步：补 resources（已有则一律不动） ----------
     let resources = mod_root.join("resources");
     if resources.is_dir() {
-        return Ok(Vec::new());
+        return Ok(actions);
     }
     if resources.exists() {
         // 同名但不是目录（例如误放在根目录的文件）：不碰，交给上层提示
@@ -309,19 +605,28 @@ pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
     }
 
     // 先整体探测，确认确实要搬再建目录，避免留下一个空的 resources
-    let pending: Vec<PathBuf> = ROOT_RESOURCE_DIRS
-        .iter()
-        .map(|name| mod_root.join(name))
-        .filter(|path| path.is_dir())
-        .collect();
+    let mut pending: Vec<PathBuf> = Vec::new();
+    for name in ROOT_RESOURCE_DIRS {
+        // 第 3 步的硬约束：即使白名单被误改，widgetui 也绝不移动
+        if NEVER_MOVE_DIRS
+            .iter()
+            .any(|never| never.eq_ignore_ascii_case(*name))
+        {
+            continue;
+        }
+        let path = mod_root.join(name);
+        if path.is_dir() {
+            pending.push(path);
+        }
+    }
     if pending.is_empty() {
-        return Ok(Vec::new());
+        return Ok(actions);
     }
 
     fs::create_dir_all(&resources)
         .map_err(|e| format!("无法创建 resources 目录（{}）：{e}", resources.display()))?;
 
-    let mut moved: Vec<String> = Vec::with_capacity(pending.len());
+    let mut moved = 0usize;
     for from in pending {
         let Some(name) = from.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
@@ -337,7 +642,10 @@ pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
             continue;
         }
         match fs::rename(&from, &to) {
-            Ok(()) => moved.push(name),
+            Ok(()) => {
+                moved += 1;
+                actions.push(format!("resources/{name}"));
+            }
             Err(e) => log::warn!(
                 target: "install",
                 "移入 resources 失败：{} - {e}",
@@ -345,13 +653,12 @@ pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
             ),
         }
     }
-    if moved.is_empty() {
+    if moved == 0 {
         // 一个都没搬成功：撤掉刚建的空目录，保持与解压结果一致
         let _ = fs::remove_dir(&resources);
     }
-    Ok(moved)
+    Ok(actions)
 }
-
 pub fn install_dir_name(mod_id: i64, title: &str) -> String {
     format!("{mod_id}_{}", sanitize_component(title))
 }
@@ -716,14 +1023,14 @@ pub fn install(
     force: bool,
     owned_before: bool,
 ) -> Result<InstallReport, String> {
-    // 老旧模组常见毛病：包内资源目录直接摊在根目录，缺一层 `resources`，
-    // 游戏读不到资源就会在模组列表里显示感叹号。这里在改名到 subscribed 之前就地补全，
-    // 原子改名之后留下的就是修好的目录；补全失败只记日志，绝不阻断安装。
+    // 老旧模组常见毛病：包内套了一层多余文件夹、或资源目录直接摊在根目录缺一层 `resources`。
+    // 这里在改名到 subscribed 之前就地做“三步规范化”（消除套娃 / 补 resources / 不碰 widgetui），
+    // 原子改名之后留下的就是修好的目录；规范化失败只记日志，绝不阻断安装。
     // （不影响下面的 WorkshopID / 去 `{id}_` 前缀逻辑）
     match fix_mod_structure(staging_mod_root) {
         Ok(moved) if !moved.is_empty() => log::info!(
             target: "install",
-            "已补全 resources 层级，移入：{}",
+            "结构规范化完成：{}",
             moved.join(", ")
         ),
         Ok(_) => {}
@@ -1083,18 +1390,18 @@ mod tests {
         let second = install(&mod_root_b, &root, 424242, "Test Mod", false, true).unwrap();
         assert!(second.updated);
         let backup = second.backup_dir.expect("更新时必须给出备份目录");
-        // 两个 zip 都是老旧布局（widgetui 直接摊在根目录），安装时会被 fix_mod_structure
-        // 补进 resources/，因此断言路径同步到 resources/widgetui/…
+        // 两个 zip 都是老旧布局（widgetui 直接摊在根目录）。结构修复只搬白名单目录，
+        // widgetui 必须原地保留，因此断言路径仍在模组根目录下。
         assert!(
-            Path::new(&backup).join("resources/widgetui/textures/a.dds").is_file(),
+            Path::new(&backup).join("widgetui/textures/a.dds").is_file(),
             "旧版本文件应保留在备份里"
         );
         assert!(Path::new(&second.target_dir)
-            .join("resources/widgetui/textures/b.dds")
+            .join("widgetui/textures/b.dds")
             .is_file());
         assert!(
-            !Path::new(&second.target_dir).join("widgetui").exists(),
-            "根目录下的 widgetui 应已补进 resources/"
+            !Path::new(&second.target_dir).join("resources").exists(),
+            "只有 widgetui 时不得创建空的 resources"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1171,41 +1478,120 @@ mod tests {
     }
 
     #[test]
-    fn fix_mod_structure_moves_legacy_root_dirs_into_resources() {
-        let dir = temp_dir("fix-struct-move");
+    fn fix_mod_structure_keeps_already_normalized_layout() {
+        // “Battle of Gallach”：根目录已有 info.json + resources + widgetui —— 空操作，结构不变
+        let dir = temp_dir("fix-struct-gallach");
+        fs::write(dir.join("info.json"), r#"{"Title":"Battle of Gallach"}"#).unwrap();
+        fs::create_dir_all(dir.join("resources/_common")).unwrap();
+        fs::write(dir.join("resources/_common/a.dds"), "a").unwrap();
+        fs::create_dir_all(dir.join("widgetui/layouts")).unwrap();
+        fs::write(dir.join("widgetui/layouts/game.json"), "{}").unwrap();
+
+        assert!(
+            fix_mod_structure(&dir).unwrap().is_empty(),
+            "已规范的结构不得产生任何动作"
+        );
+        assert!(dir.join("info.json").is_file());
+        assert!(dir.join("resources/_common/a.dds").is_file());
+        assert!(dir.join("widgetui/layouts/game.json").is_file());
+        assert!(!dir.join("resources/widgetui").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_unwraps_nested_folders() {
+        // 套娃两层：<dir>/A/B/{info.json, resources, widgetui}
+        let dir = temp_dir("fix-struct-unwrap");
+        let inner = dir.join("A").join("B");
+        fs::create_dir_all(inner.join("resources/_common")).unwrap();
+        fs::create_dir_all(inner.join("widgetui/layouts")).unwrap();
+        fs::write(inner.join("info.json"), r#"{"Title":"Nested"}"#).unwrap();
+        fs::write(inner.join("resources/_common/a.dds"), "a").unwrap();
+        fs::write(inner.join("widgetui/layouts/game.json"), "{}").unwrap();
+
+        let actions = fix_mod_structure(&dir).unwrap();
+        assert_eq!(
+            actions,
+            vec!["A/**".to_string(), "B/**".to_string()],
+            "两层套娃应逐层展开"
+        );
+        assert!(!dir.join("A").exists(), "套娃空壳应被删除");
+        assert!(dir.join("info.json").is_file(), "info.json 应落到根目录");
+        assert!(
+            dir.join("resources/_common/a.dds").is_file(),
+            "resources 应与 widgetui 平级留在根目录"
+        );
+        assert!(
+            dir.join("widgetui/layouts/game.json").is_file(),
+            "widgetui 应与 resources 平级留在根目录"
+        );
+        assert!(
+            !dir.join("resources/widgetui").exists(),
+            "不得把 widgetui 塞进 resources"
+        );
+
+        // 幂等：再来一次什么都不做
+        assert!(fix_mod_structure(&dir).unwrap().is_empty());
+        assert!(dir.join("widgetui/layouts/game.json").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_moves_only_whitelisted_dirs_into_resources() {
+        let dir = temp_dir("fix-struct-whitelist");
         fs::write(dir.join("info.json"), r#"{"Title":"Old"}"#).unwrap();
-        fs::create_dir_all(dir.join("_common/widgetui")).unwrap();
-        fs::write(dir.join("_common/widgetui/a.dds"), "a").unwrap();
+        fs::create_dir_all(dir.join("_common/a")).unwrap();
+        fs::write(dir.join("_common/a/a.dds"), "a").unwrap();
         fs::create_dir_all(dir.join("gamedata")).unwrap();
         fs::write(dir.join("gamedata/b.txt"), "b").unwrap();
+        fs::create_dir_all(dir.join("widgetui/layouts")).unwrap();
+        fs::write(dir.join("widgetui/layouts/game.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("misc")).unwrap();
+        fs::write(dir.join("misc/c.txt"), "c").unwrap();
 
-        let moved = fix_mod_structure(&dir).unwrap();
-        assert_eq!(moved, vec!["_common".to_string(), "gamedata".to_string()]);
-        assert!(dir.join("resources/_common/widgetui/a.dds").is_file());
+        let actions = fix_mod_structure(&dir).unwrap();
+        assert_eq!(
+            actions,
+            vec![
+                "resources/_common".to_string(),
+                "resources/gamedata".to_string()
+            ]
+        );
+        assert!(dir.join("resources/_common/a/a.dds").is_file());
         assert!(dir.join("resources/gamedata/b.txt").is_file());
         assert!(!dir.join("_common").exists(), "根目录下的 _common 应已被移走");
         assert!(!dir.join("gamedata").exists());
         assert!(dir.join("info.json").is_file(), "info.json 不得被搬动");
+        assert!(
+            dir.join("widgetui/layouts/game.json").is_file(),
+            "widgetui 必须留在根目录"
+        );
+        assert!(
+            !dir.join("resources/widgetui").exists(),
+            "widgetui 不得被搬进 resources"
+        );
+        assert!(dir.join("misc/c.txt").is_file(), "白名单外的目录不得被搬动");
 
-        // 幂等：再跑一次什么都不做
+        // 幂等：已有 resources 后什么都不做
         assert!(fix_mod_structure(&dir).unwrap().is_empty());
-        assert!(dir.join("resources/_common/widgetui/a.dds").is_file());
+        assert!(dir.join("widgetui/layouts/game.json").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn fix_mod_structure_keeps_existing_resources_untouched() {
         let dir = temp_dir("fix-struct-keep");
+        fs::write(dir.join("info.json"), "{}").unwrap();
         fs::create_dir_all(dir.join("resources/_common")).unwrap();
         fs::write(dir.join("resources/_common/a.dds"), "a").unwrap();
-        // 根目录还残留一个资源目录，但既然已有 resources，一律不动
-        fs::create_dir_all(dir.join("widgetui")).unwrap();
-        fs::write(dir.join("widgetui/b.dds"), "b").unwrap();
+        // 根目录还残留一个白名单目录，但既然已有 resources，一律不动
+        fs::create_dir_all(dir.join("gamedata")).unwrap();
+        fs::write(dir.join("gamedata/b.txt"), "b").unwrap();
 
         assert!(fix_mod_structure(&dir).unwrap().is_empty());
-        assert!(dir.join("widgetui/b.dds").is_file(), "已有 resources 时不得移动");
+        assert!(dir.join("gamedata/b.txt").is_file(), "已有 resources 时不得移动");
         assert!(dir.join("resources/_common/a.dds").is_file());
-        assert!(!dir.join("resources/widgetui").exists());
+        assert!(!dir.join("resources/gamedata").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1221,6 +1607,152 @@ mod tests {
             "没有可搬目录时不得创建空的 resources"
         );
         assert!(dir.join("misc").is_dir(), "白名单外的目录不得被搬动");
+
+        // 没有 info.json 的单层套娃也不展开：链上没有 info.json 就不是模组根
+        let dir2 = temp_dir("fix-struct-noinfo");
+        fs::create_dir_all(dir2.join("Wrap/inner")).unwrap();
+        fs::write(dir2.join("Wrap/inner/a.dds"), "a").unwrap();
+        assert!(fix_mod_structure(&dir2).unwrap().is_empty());
+        assert!(dir2.join("Wrap/inner/a.dds").is_file(), "无 info.json 时不得展开");
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir2);
+    }
+    #[test]
+    fn fix_mod_structure_expands_empty_shell_root_with_info_json() {
+        // “1385_Displayed HotKeys”：根目录 info.json + thumbnail.jpg，资源藏在数字子目录里
+        let dir = temp_dir("fix-struct-empty-root");
+        let original_info = r#"{"Title":"Displayed HotKeys","Author":"someone"}"#;
+        fs::write(dir.join("info.json"), original_info).unwrap();
+        fs::write(dir.join("thumbnail.jpg"), "jpg").unwrap();
+        let inner = dir.join("1270057352");
+        fs::create_dir_all(inner.join("resources/_common/drs")).unwrap();
+        fs::write(inner.join("resources/_common/drs/a.sld"), "a").unwrap();
+
+        let actions = fix_mod_structure(&dir).unwrap();
+        assert_eq!(actions, vec!["1270057352/**".to_string()]);
+        assert!(
+            dir.join("resources/_common/drs/a.sld").is_file(),
+            "resources 应上移到根目录"
+        );
+        assert!(!inner.exists(), "空壳数字目录应被删除");
+        assert!(
+            dir.join("info.json").is_file(),
+            "根目录原有 info.json 必须保留"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("info.json")).unwrap(),
+            original_info,
+            "info.json 内容不得被改写"
+        );
+        assert!(dir.join("thumbnail.jpg").is_file());
+        assert!(
+            !dir.join("resources/1270057352").exists(),
+            "不得把子目录整个塞进 resources"
+        );
+
+        // 幂等：已有 resources 后什么都不做
+        assert!(fix_mod_structure(&dir).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_keeps_normal_mod_with_info_and_resources() {
+        // 正常模组：根目录同时有 info.json 和 resources —— 不得展开（即使没有 widgetui）
+        let dir = temp_dir("fix-struct-normal-mod");
+        fs::write(dir.join("info.json"), r#"{"Title":"Normal"}"#).unwrap();
+        fs::create_dir_all(dir.join("resources/_common")).unwrap();
+        fs::write(dir.join("resources/_common/a.dds"), "a").unwrap();
+        fs::create_dir_all(dir.join("misc")).unwrap();
+        fs::write(dir.join("misc/b.txt"), "b").unwrap();
+
+        assert!(
+            fix_mod_structure(&dir).unwrap().is_empty(),
+            "正常模组不得产生任何动作"
+        );
+        assert!(dir.join("resources/_common/a.dds").is_file());
+        assert!(dir.join("misc/b.txt").is_file());
+        assert!(!dir.join("resources/misc").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_does_not_expand_two_subfolders() {
+        // 根目录有 info.json + 两个子文件夹：不冒险展开
+        let dir = temp_dir("fix-struct-two-shells");
+        fs::write(dir.join("info.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("a/resources/_common")).unwrap();
+        fs::write(dir.join("a/resources/_common/x.dds"), "x").unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+        fs::write(dir.join("b/y.txt"), "y").unwrap();
+
+        assert!(
+            fix_mod_structure(&dir).unwrap().is_empty(),
+            "子文件夹不止一个时不得展开"
+        );
+        assert!(dir.join("a/resources/_common/x.dds").is_file());
+        assert!(dir.join("b/y.txt").is_file());
+        assert!(
+            !dir.join("resources").exists(),
+            "没有可搬目录时不得创建空的 resources"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_wraps_loose_textures_into_widgetui() {
+        // “zero two 02”：根目录 info.json + thumbnail.jpg + textures/backgrounds/…
+        let dir = temp_dir("fix-struct-textures");
+        fs::write(dir.join("info.json"), r#"{"Title":"zero two 02"}"#).unwrap();
+        fs::write(dir.join("thumbnail.jpg"), "jpg").unwrap();
+        fs::create_dir_all(dir.join("textures/backgrounds")).unwrap();
+        fs::write(dir.join("textures/backgrounds/mainmenu_bg.dds"), "dds").unwrap();
+
+        let actions = fix_mod_structure(&dir).unwrap();
+        assert_eq!(actions, vec!["widgetui/textures".to_string()]);
+        assert!(
+            dir.join("widgetui/textures/backgrounds/mainmenu_bg.dds")
+                .is_file(),
+            "textures 应被移入新建的 widgetui/ 下"
+        );
+        assert!(!dir.join("textures").exists(), "根目录的 textures 应已消失");
+        assert!(dir.join("info.json").is_file(), "info.json 必须保留");
+        assert!(dir.join("thumbnail.jpg").is_file());
+        assert!(
+            !dir.join("resources").exists(),
+            "不得凭空创建 resources 目录"
+        );
+
+        // 幂等：已有 widgetui 后什么都不做
+        assert!(fix_mod_structure(&dir).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_mod_structure_keeps_textures_when_widgetui_exists() {
+        // 已有 widgetui + 根目录又摊了一个 textures：不合并、不塞进去
+        let dir = temp_dir("fix-struct-widgetui-exists");
+        fs::write(dir.join("info.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("widgetui/layouts")).unwrap();
+        fs::write(dir.join("widgetui/layouts/game.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("textures/backgrounds")).unwrap();
+        fs::write(dir.join("textures/backgrounds/bg.dds"), "dds").unwrap();
+
+        assert!(
+            fix_mod_structure(&dir).unwrap().is_empty(),
+            "widgetui 已存在时不得产生任何动作"
+        );
+        assert!(
+            dir.join("widgetui/layouts/game.json").is_file(),
+            "原 widgetui 内容不得变动"
+        );
+        assert!(
+            !dir.join("widgetui/textures").exists(),
+            "不得把根目录 textures 塞进已有 widgetui"
+        );
+        assert!(
+            dir.join("textures/backgrounds/bg.dds").is_file(),
+            "根目录 textures 必须原位保留"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -54,7 +54,7 @@ export function attachDragSort(
 
   el.dataset.sortableReady = "1";
   console.info(
-    `[sort] Sortable 已挂载：容器内 ${el.querySelectorAll(".mod-card").length} 张可拖拽卡片`,
+    `[sort] Sortable mounted: ${el.querySelectorAll(".mod-card").length} draggable cards in the container`,
   );
 
   return () => {

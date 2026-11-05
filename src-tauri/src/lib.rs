@@ -172,41 +172,11 @@ fn normalize_version_tag(value: &str) -> String {
 
 /// 拉取 Releases 列表（阻塞；调用方放进 spawn_blocking）
 fn fetch_releases_blocking(proxy: Option<ureq::Proxy>) -> Result<Vec<GithubRelease>, String> {
-    // GitHub 强制要求 User-Agent：Agent 级挂一次，单个请求再挂一次，两条路径都不会漏
-    let user_agent = format!("AoE2ModManager/{} (Windows)", update::current_version());
-    let mut builder = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(8))
-        .timeout_read(std::time::Duration::from_secs(15))
-        .user_agent(&user_agent);
-    if let Some(proxy) = proxy {
-        builder = builder.proxy(proxy);
-    }
-    let agent = builder.build();
-
-    let response = agent
-        .get(RELEASES_LIST_URL)
-        .set("User-Agent", &user_agent)
-        .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| match e {
-            ureq::Error::Status(code, resp) => {
-                let text = resp.into_string().unwrap_or_default();
-                let message = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("message")
-                            .and_then(|m| m.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .unwrap_or_else(|| format!("GitHub 返回 {code}"));
-                format!("获取更新历史失败：{message}")
-            }
-            ureq::Error::Transport(t) => format!("获取更新历史失败：{t}"),
-        })?;
-
-    let raw = response
-        .into_string()
-        .map_err(|e| format!("读取 GitHub 响应失败：{e}"))?;
+    // 镜像优先 + 直连兜底：国内直连 api.github.com 基本不可达，
+    // 与软件更新检查共用 update::fetch_with_mirrors。
+    // User-Agent / 代理 / 镜像顺序与超时都在那一层统一处理，这里只管解析。
+    let (_reached, result) = update::fetch_with_mirrors(proxy, RELEASES_LIST_URL);
+    let raw = result.map_err(|e| format!("获取更新历史失败：{e}"))?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("GitHub 响应不是合法 JSON：{e}"))?;
     let items = value
@@ -1758,7 +1728,7 @@ async fn online_install(
         ];
         if localized {
             note_parts.push(format!(
-                "已移入 local/{final_folder} 并置为启用（目录已去掉 ID 前缀、WorkshopID=0，游戏不会再把它反向同步为订阅）"
+                "已移入 local/{final_folder} 并置为启用（目录已去掉 ID 前缀、WorkshopID=0）。账号订阅状态不会因本地化而改变：若仍订阅该模组，游戏下次启动会重新下载一份到 subscribed，请到官网或游戏内取消订阅"
             ));
             if !localize_note.is_empty() {
                 note_parts.push(localize_note.clone());

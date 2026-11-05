@@ -14,6 +14,10 @@ export default {
   lang: {
     label: "语言",
   },
+  /* ---------- 原生对话框（Tauri plugin-dialog 标题） ---------- */
+  dialog: {
+    pickModRoot: "选择 AoE2DE 模组根目录（应包含 local 与 subscribed）",
+  },
   settings: {
     open: "设置（语言 / 网络 / 关于）",
     title: "设置",
@@ -270,6 +274,9 @@ export default {
     addedToast: "已加入收藏",
     removedToast: "已取消收藏",
     failSave: "保存失败：{msg}",
+    downloadQueued: "已加入下载队列",
+    downloadBusy: "该模组已在下载队列中",
+    downloadNoId: "该收藏没有可用 ID，无法下载",
   },
   content: {
     allMods: "全部模组",
@@ -335,6 +342,7 @@ export default {
     notRegisteredHint: "请先启动一次游戏让它登记该模组",
     dataModBadge: "⚙️ 数据模组",
     dataModBadgeHint: "该模组替换游戏核心数据文件（.dat），同一时间只能启用一个",
+    uninstalled: "未安装",
   },
   dataMod: {
     conflictTitle: "数据模组冲突",
@@ -363,6 +371,9 @@ export default {
     enabledState: "启用状态",
     toggleTitleWriting: "正在写入 mod-status.json…",
     toggleTitleIdle: "点击切换启用 / 停用",
+    downloadInstall: "下载安装",
+    downloadQueued: "已加入下载队列",
+    downloadTitle: "重新下载并安装这个收藏模组",
     dataModWarning:
       "⚙️ 这是一个数据模组。由于游戏机制，同一时间只能启用一个数据模组。启用后，你还需要在游戏内的开始界面下拉菜单中手动选中它才能生效。",
     writing: "写入中…",
@@ -567,6 +578,9 @@ export default {
     recheck: "重新检查登录状态",
     clearCache: "退出登录 / 清缓存",
     clearing: "清理中…",
+    logoutCleared: "已退出登录：AoE Cookie 与 WebView2 数据目录均已清空（{path}）",
+    logoutClearedNoPath: "已退出登录：AoE Cookie 与 WebView2 数据目录均已清空",
+    logoutFailed: "退出登录失败：有文件被占用，请重启软件后重试",
     network: "网络",
     followSystem: "自动跟随系统代理",
     rememberLogin: "记住登录 7 天",
@@ -753,6 +767,24 @@ export default {
     cardSubscribed: "已订阅",
     cardOnline: "在线",
     cardInstalls: "订阅 {n}",
+  },
+  subscription: {
+    conflictBadge: "建议退订",
+    conflictBadgeHint: "local 里已有同一模组；账号仍在订阅，游戏下次启动会重下一份到 subscribed",
+    localNoted: "已本地化 · 订阅未取消",
+    installedTitle: "该模组已本地化，但账号仍处于订阅状态",
+    installedBodyConfirmed:
+      "请在游戏内或官网手动取消订阅，否则游戏下次启动会重新下载一份到 subscribed，导致 local 与 subscribed 各有一份。",
+    installedBodyConditional:
+      "如果你在官网仍订阅该模组，请手动取消；否则游戏可能重新下载一份到 subscribed，导致两份共存。",
+    goSite: "前往官网取消订阅",
+    modalTitle: "本地化完成，但订阅还在",
+    modalMessageConfirmed:
+      "「{title}」已移动到 local 并启用。你的账号仍订阅它，游戏下次启动会重新下载到 subscribed 造成重复。请前往官网取消订阅。",
+    modalMessageConditional:
+      "「{title}」已移动到 local 并启用。如果你仍在官网订阅它，请手动取消，否则游戏可能重新下载到 subscribed 造成重复。",
+    modalGoSite: "前往官网取消订阅",
+    modalOk: "我知道了",
   },
   translate: {
     trigger: "翻译为{lang}",

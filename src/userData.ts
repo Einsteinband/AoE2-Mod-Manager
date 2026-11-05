@@ -7,11 +7,18 @@
  *    绝不触发 scan_mods 全量重扫，滚动条与筛选状态都不会复位。
  * 3. 写入串行化：连点收藏时后一次必须等前一次落盘，避免旧快照覆盖新状态。
  */
-import { computed, reactive } from "vue";
+import { computed, reactive, ref } from "vue";
 import { loadUserData, saveUserData } from "./api";
 import type { ModUserData, UserDataStore } from "./types";
 
 const state = reactive<UserDataStore>({ version: 1, mods: {} });
+
+/**
+ * 收藏数据是否已经从 user_data.json 读进内存。
+ * 其他模块（收藏元数据缓存的条目裁剪）靠它判断“现在能不能相信 isFavorite”，
+ * 避免启动早期用空表把收藏记录误删。
+ */
+export const userDataLoaded = ref(false);
 
 /** 最近一次读写错误（界面可选用；不抛到全局） */
 export const userDataError = reactive<{ message: string | null }>({ message: null });
@@ -82,6 +89,7 @@ export function ensureUserData(): Promise<void> {
       state.version = store.version ?? 1;
       state.mods = store.mods ?? {};
       loaded = true;
+      userDataLoaded.value = true;
       userDataError.message = null;
     })
     .catch((e: unknown) => {
@@ -126,7 +134,7 @@ export async function setFavorite(
   favorite: boolean,
 ): Promise<boolean> {
   const key = modKey(workshopId);
-  if (!key) throw new Error("该模组没有 WorkshopID，无法收藏");
+  if (!key) throw new Error("This mod has no Workshop ID, so it cannot be favorited");
   await ensureUserData();
 
   const before = state.mods[key] ? { ...state.mods[key] } : null;
@@ -147,7 +155,7 @@ export async function setCustomName(
   name: string,
 ): Promise<string | null> {
   const key = modKey(workshopId);
-  if (!key) throw new Error("该模组没有 WorkshopID，无法设置备注名");
+  if (!key) throw new Error("This mod has no Workshop ID, so it cannot be renamed");
   await ensureUserData();
 
   const trimmed = name.trim();

@@ -237,6 +237,116 @@ fn steam_library_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// v3.2：「启动游戏」自动探测——只找主程序文件，不做递归扫描。
+///
+/// 顺序：Steam 库（libraryfolders.vdf）→ 卸载注册表 InstallLocation →
+/// 注册表 SteamPath 拼接 → 各盘符常见安装路径。
+/// 全部只做 `is_file()` 存在性检查，命中即返回。
+pub fn detect_game_exe() -> Option<PathBuf> {
+    // 1) 所有 Steam 库：<lib>\steamapps\common\AoE2DE
+    for lib in steam_library_roots() {
+        if let Some(exe) = game_exe_in(&lib.join("steamapps").join("common").join("AoE2DE")) {
+            return Some(exe);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+        // 2) Steam 卸载注册表项里的 InstallLocation 最准
+        let key64 = format!(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {AOE2_STEAM_APP_ID}"
+        );
+        let key32 = format!(
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {AOE2_STEAM_APP_ID}"
+        );
+        let probes: [(windows_sys::Win32::System::Registry::HKEY, &str); 3] =
+            [(HKEY_LOCAL_MACHINE, &key64), (HKEY_LOCAL_MACHINE, &key32), (HKEY_CURRENT_USER, &key64)];
+        for (hive, key) in probes {
+            if let Some(dir) = read_reg_string(hive, key, "InstallLocation") {
+                if let Some(exe) = game_exe_in(&PathBuf::from(dir.replace('/', "\\"))) {
+                    return Some(exe);
+                }
+            }
+        }
+
+        // 3) 注册表里的 Steam 根目录 → steamapps\common\AoE2DE
+        for steam in steam_install_roots() {
+            if let Some(exe) = game_exe_in(&steam.join("steamapps").join("common").join("AoE2DE")) {
+                return Some(exe);
+            }
+        }
+    }
+
+    // 4) 各盘符常见路径兜底（只做存在性检查，不递归）
+    for letter in b'C'..=b'Z' {
+        let drive = PathBuf::from(format!("{}:\\", letter as char));
+        if !drive.is_dir() {
+            continue;
+        }
+        for sub in [
+            r"SteamLibrary\steamapps\common\AoE2DE",
+            r"Steam\steamapps\common\AoE2DE",
+            r"Program Files (x86)\Steam\steamapps\common\AoE2DE",
+            r"Program Files\Steam\steamapps\common\AoE2DE",
+            r"Games\AoE2DE",
+            r"Games\Age of Empires II- Definitive Edition",
+            r"XboxGames\Age of Empires II- Definitive Edition\Content",
+        ] {
+            if let Some(exe) = game_exe_in(&drive.join(sub)) {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+/// 从主程序路径推导「游戏根目录」（就是 exe 所在的那一层）。
+pub fn game_root_of_exe(exe: &Path) -> PathBuf {
+    exe.parent()
+        .map(|dir| dir.to_path_buf())
+        .unwrap_or_else(|| exe.to_path_buf())
+}
+
+/// 校验游戏根目录：必须是绝对路径、目录存在、且含 `AoE2DE_s.exe`
+/// （兼容老版本的 `AoE2DE.exe`）。
+///
+/// 校验通过返回去掉尾部反斜杠的目录，便于直接写进 settings.json；
+/// 失败返回可直接展示给用户的中文原因（前端原样放进设置页的错误行）。
+pub fn validate_game_root(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return Err("游戏根目录不能为空".to_string());
+    }
+    let dir = PathBuf::from(trimmed);
+    if !dir.is_absolute() {
+        return Err(format!(
+            "请选择完整的游戏根目录（如 D:\\SteamLibrary\\steamapps\\common\\AoE2DE）：{trimmed}"
+        ));
+    }
+    if !dir.is_dir() {
+        return Err(format!("游戏根目录配置有误：目录不存在（{trimmed}）"));
+    }
+    if game_exe_in(&dir).is_none() {
+        return Err(format!(
+            "游戏根目录配置有误：目录里没有 AoE2DE_s.exe（{trimmed}）"
+        ));
+    }
+    Ok(dir)
+}
+
+/// 目录里的游戏主程序：优先 `AoE2DE_s.exe`，其次 `AoE2DE.exe`（老版本没有 _s）
+fn game_exe_in(dir: &Path) -> Option<PathBuf> {
+    for name in ["AoE2DE_s.exe", "AoE2DE.exe"] {
+        let exe = dir.join(name);
+        if exe.is_file() {
+            return Some(exe);
+        }
+    }
+    None
+}
+
 fn push_candidate(out: &mut Vec<RootCandidate>, path: PathBuf, source: &str) {
     if !looks_like_mod_root(&path) {
         return;

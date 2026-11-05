@@ -3105,3 +3105,15 @@ button.primary.queued {
   background: rgba(var(--accent-rgb), 0.1);
   color: var(--gold);
 }
+
+/* v0.4.3：悬浮按钮常驻（无任务时灰色小图标），面板空态 */
+.dlmgr-fab.idle { border-color: var(--line); }
+.dlmgr-fab.idle .dlmgr-fab-icon { color: var(--muted); }
+.dlmgr-fab.idle:hover { border-color: var(--gold-dim); }
+.dlmgr-fab.idle:hover .dlmgr-fab-icon { color: var(--gold); }
+.dlmgr-empty {
+  padding: 16px 10px;
+  text-align: center;
+  font-size: calc(11px * var(--global-scale));
+  color: var(--muted);
+}

@@ -6,7 +6,7 @@ export const label = "中文";
 export default {
   app: {
     name: "帝国时代 II · 模组管理器",
-    taglinePrefix: "v0.4.2 · by ",
+    taglinePrefix: "v0.4.3 · by ",
     author: "Einsteinband",
     authorTitle: "打开作者 GitHub 主页（系统浏览器）",
     windowTitle: "AoE2 Mod Manager",
@@ -104,6 +104,17 @@ export default {
     cacheDirResetDone: "{name}已恢复默认位置",
     cacheDirOpened: "已在资源管理器中打开{name}",
     cacheDirFailed: "操作失败：{msg}",
+    gameRoot: "游戏根目录",
+    gameRootEmpty: "未设置（点「启动游戏」会引导到这里）",
+    gameRootPick: "选择文件夹",
+    gameRootDetect: "自动检测",
+    gameRootClear: "清除",
+    gameRootSaved: "游戏根目录已保存",
+    gameRootCleared: "已清除游戏根目录配置",
+    gameRootPickTitle: "选择《帝国时代 II：决定版》游戏根目录（含 AoE2DE_s.exe）",
+    gameRootDetectFailed: "没有自动检测到游戏目录，请手动选择",
+    gameRootNote:
+      "「启动游戏」会通过 Steam 协议（steam://rungameid/813780）唤起游戏，启动项、游玩时长与成就都会正常记录。请选择包含 AoE2DE_s.exe 的目录，例如 …\\steamapps\\common\\AoE2DE。",
   },
   update: {
     lanzou: "蓝奏云高速下载",
@@ -141,6 +152,11 @@ export default {
     viewToList: "切换为列表视图",
     viewToGrid: "切换为网格视图",
     cardSize: "卡片大小：{n}px",
+    launchGame: "启动游戏",
+    launchGameTitle: "通过 Steam 启动 AoE2 决定版（steam://rungameid/813780），启动项、游玩时长与成就都会正常记录。未配置游戏根目录时会引导你去设置",
+    launchGameBusy: "启动中…",
+    launchGameStarted: "已请求 Steam 启动游戏",
+    launchGameNoRoot: "还没有配置游戏根目录，已为你打开「设置 → 通用」",
   },
   batch: {
     working: "处理中…",
@@ -518,6 +534,8 @@ export default {
     open: "打开下载管理",
     close: "收起",
     footer: "共 {total} 项 · 进行中 {active}",
+    empty: "暂无下载任务",
+    interrupted: "上次退出时未完成（可重新下载）",
     clearFinished: "清除已完成",
     queued: "排队中",
     queuedPos: "排队中（第 {n} 位）",

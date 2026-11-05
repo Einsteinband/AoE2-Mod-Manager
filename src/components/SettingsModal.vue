@@ -8,12 +8,24 @@
  *
  * 15 秒冷却：lastCheckMs 放在模块作用域，关掉弹窗再打开也绕不过去。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import ConfirmDialog from "./ConfirmDialog.vue";
-import { appVersion, checkUpdate, fetchGithubReleases, getSettings, openExternalUrl, renderReleaseMarkdown, setEnableIndexing, setEnableLocalSearch, setLocale } from "../api";
+import {
+  appVersion,
+  checkUpdate,
+  detectGameRoot,
+  fetchGithubReleases,
+  getSettings,
+  openExternalUrl,
+  renderReleaseMarkdown,
+  setEnableIndexing,
+  setEnableLocalSearch,
+  setGameRootDir,
+  setLocale,
+} from "../api";
 import type { GithubRelease } from "../api";
 import { translateBackendMessage } from "../format";
 import { applyLocale, LOCALE_OPTIONS, type Locale } from "../i18n";
@@ -69,15 +81,27 @@ import {
 } from "../api";
 
 /** 全局视图偏好：卡片大小与主界面用同一个 v-model（设置里拖完，列表立即跟着变） */
-const props = withDefaults(defineProps<{ /** 当前根目录（只用于展示，不参与业务） */ rootPath?: string }>(), {
-  rootPath: "",
-});
+const props = withDefaults(
+  defineProps<{
+    /** 当前根目录（只用于展示，不参与业务） */
+    rootPath?: string;
+    /** 打开时直接切到哪个 Tab（顶栏「启动游戏」缺配置时传 general） */
+    initialTab?: "general" | "appearance" | "network" | "local" | "online" | "storage" | "about";
+    /** 打开后滚动并高亮「游戏根目录」一行 */
+    focusGameRoot?: boolean;
+  }>(),
+  {
+    rootPath: "",
+    initialTab: "general",
+    focusGameRoot: false,
+  },
+);
 
 const emit = defineEmits<{ close: []; "change-root": [] }>();
 const { t, locale } = useI18n();
 
 type Tab = "general" | "appearance" | "network" | "local" | "online" | "storage" | "about";
-const tab = ref<Tab>("general");
+const tab = ref<Tab>(props.initialTab);
 
 /**
  * 仅本弹窗使用的补充文案（本次改造不改语言包文件）。
@@ -774,7 +798,122 @@ async function openCacheDir(entry: CacheDirEntry) {
   }
 }
 
-/** 折叠面板里那句“当前走哪条链路” */
+// ---------------- v3.3：游戏根目录（启动游戏走 Steam 协议） ----------------
+
+/** 当前配置的游戏根目录（null = 未配置）；保存后以后端回传的 Settings 为准 */
+const gameRoot = ref<string | null>(null);
+const gameRootBusy = ref(false);
+const gameRootMessage = ref<string | null>(null);
+const gameRootError = ref<string | null>(null);
+/** 从顶栏「启动游戏」跳过来时，短暂高亮这一行 */
+const gameRootFlash = ref(false);
+const gameRootRow = ref<HTMLElement | null>(null);
+const gameRootBtn = ref<HTMLButtonElement | null>(null);
+let gameRootFlashTimer: number | null = null;
+
+function clearGameRootFlash(): void {
+  if (gameRootFlashTimer !== null) {
+    window.clearTimeout(gameRootFlashTimer);
+    gameRootFlashTimer = null;
+  }
+  gameRootFlash.value = false;
+}
+
+/** 滚到「游戏根目录」一行并高亮 2 秒，告诉用户「就是这里」 */
+async function focusGameRootRow(): Promise<void> {
+  tab.value = "general";
+  await nextTick();
+  gameRootRow.value?.scrollIntoView({ block: "center", behavior: "smooth" });
+  gameRootBtn.value?.focus({ preventScroll: true });
+  clearGameRootFlash();
+  gameRootFlash.value = true;
+  gameRootFlashTimer = window.setTimeout(() => {
+    gameRootFlash.value = false;
+    gameRootFlashTimer = null;
+  }, 2000);
+}
+
+async function loadGameRoot(): Promise<void> {
+  try {
+    const settings = await getSettings();
+    gameRoot.value = settings.gameRootDir ?? null;
+  } catch {
+    gameRoot.value = null;
+  }
+}
+
+/** 选择文件夹 → 后端校验（必须有 AoE2DE_s.exe）并落盘；取消 / 校验失败都不改配置 */
+async function pickGameRoot(): Promise<void> {
+  if (gameRootBusy.value) return;
+  gameRootError.value = null;
+  gameRootMessage.value = null;
+  try {
+    const picked = await openFolderDialog({
+      directory: true,
+      multiple: false,
+      title: t("settings.gameRootPickTitle"),
+      defaultPath: gameRoot.value ?? undefined,
+    });
+    if (typeof picked !== "string" || !picked) return; // 用户取消
+    gameRootBusy.value = true;
+    const saved = await setGameRootDir(picked);
+    gameRoot.value = saved.gameRootDir ?? null;
+    gameRootMessage.value = t("settings.gameRootSaved");
+  } catch (e) {
+    gameRootError.value = describe(e);
+  } finally {
+    gameRootBusy.value = false;
+  }
+}
+
+/** 自动检测：复用 Rust 的 detect_game_exe（Steam 库 / 注册表 / 盘符），命中后直接保存 */
+async function detectGameRootDir(): Promise<void> {
+  if (gameRootBusy.value) return;
+  gameRootError.value = null;
+  gameRootMessage.value = null;
+  gameRootBusy.value = true;
+  try {
+    const found = await detectGameRoot();
+    if (!found) {
+      gameRootError.value = t("settings.gameRootDetectFailed");
+      return;
+    }
+    const saved = await setGameRootDir(found);
+    gameRoot.value = saved.gameRootDir ?? null;
+    gameRootMessage.value = t("settings.gameRootSaved");
+  } catch (e) {
+    gameRootError.value = describe(e);
+  } finally {
+    gameRootBusy.value = false;
+  }
+}
+
+/** 清除配置：写回 null，不动任何游戏文件 */
+async function clearGameRoot(): Promise<void> {
+  if (gameRootBusy.value) return;
+  gameRootError.value = null;
+  gameRootMessage.value = null;
+  gameRootBusy.value = true;
+  try {
+    const saved = await setGameRootDir(null);
+    gameRoot.value = saved.gameRootDir ?? null;
+    gameRootMessage.value = t("settings.gameRootCleared");
+  } catch (e) {
+    gameRootError.value = describe(e);
+  } finally {
+    gameRootBusy.value = false;
+  }
+}
+
+/** 弹窗已经打开时再次请求聚焦（例如用户又点了一次「启动游戏」） */
+watch(
+  () => props.focusGameRoot,
+  (next) => {
+    if (next) void focusGameRootRow();
+  },
+);
+
+/** 折叠面板里那句“当前走哪条链路” *//** 折叠面板里那句“当前走哪条链路” */
 const netSummary = computed(() => {
   const view = netView.value;
   if (!view) return t("online.netReading");
@@ -1124,6 +1263,7 @@ onMounted(async () => {
   void loadNetwork();
   void loadCacheStat();
   void loadCacheDirs();
+  void loadGameRoot();
   void loadTranslate();
   void loadTranslationCache();
   void loadTitleJob();
@@ -1136,9 +1276,12 @@ onMounted(async () => {
   if (lastCheckMs > 0 && Date.now() - lastCheckMs < COOLDOWN_MS) startCooldownTimer();
   // 模组批量检测的冷却同样跨弹窗保留
   resumeModCooldown();
+  // 从顶栏「启动游戏」跳过来：滚动到「游戏根目录」一行并高亮
+  if (props.focusGameRoot) void focusGameRootRow();
 });
 
 onBeforeUnmount(() => {
+  clearGameRootFlash();
   window.removeEventListener("keydown", onKeydown);
   stopTitleJobPoll();
   if (cooldownTimer !== null) {
@@ -1255,6 +1398,55 @@ onBeforeUnmount(() => {
             </div>
 
             <p class="settings-hint">{{ ui.rootNote }}</p>
+
+            <div class="settings-sep"></div>
+
+            <!-- v3.3：游戏根目录 —— 「启动游戏」走 Steam 协议，必须知道游戏装在哪 -->
+            <div
+              ref="gameRootRow"
+              class="settings-row game-root-row"
+              :class="{ 'game-root-flash': gameRootFlash }"
+            >
+              <div class="row-label">
+                <span class="row-title">{{ t("settings.gameRoot") }}</span>
+                <span class="row-note mono game-root-path" :title="gameRoot ?? ''">
+                  {{ gameRoot || t("settings.gameRootEmpty") }}
+                </span>
+                <span v-if="gameRootError" class="game-root-warn">{{ gameRootError }}</span>
+                <span v-else-if="gameRootMessage" class="game-root-ok">{{ gameRootMessage }}</span>
+              </div>
+              <div class="game-root-actions">
+                <button
+                  ref="gameRootBtn"
+                  type="button"
+                  class="settings-check"
+                  :disabled="gameRootBusy"
+                  @click="pickGameRoot"
+                >
+                  <span v-if="gameRootBusy" class="spinner"></span>
+                  {{ t("settings.gameRootPick") }}
+                </button>
+                <button
+                  type="button"
+                  class="settings-check"
+                  :disabled="gameRootBusy"
+                  @click="detectGameRootDir"
+                >
+                  {{ t("settings.gameRootDetect") }}
+                </button>
+                <button
+                  v-if="gameRoot"
+                  type="button"
+                  class="cache-dir-reset"
+                  :disabled="gameRootBusy"
+                  @click="clearGameRoot"
+                >
+                  {{ t("settings.gameRootClear") }}
+                </button>
+              </div>
+            </div>
+
+            <p class="settings-hint">{{ t("settings.gameRootNote") }}</p>
           </section>
 
           <!-- 外观（v2.0 新增）：主题模式 + 卡片大小滑块 -->
@@ -2410,5 +2602,42 @@ onBeforeUnmount(() => {
 .cache-dir-reset:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* v3.3：游戏根目录一行 —— 复用 .settings-row 的两列布局，
+   只补「长路径单行省略」与「从顶栏跳过来时的金色高亮」。 */
+.settings-row.game-root-row {
+  scroll-margin-block: 28px;
+  border-radius: 4px;
+  transition: background 0.25s ease, box-shadow 0.25s ease;
+}
+.settings-row.game-root-flash {
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: 0 0 0 1px var(--gold), 0 0 14px rgba(var(--accent-rgb), 0.4);
+}
+/* 优先级压过 .row-note.mono 的 break-all，否则长路径会把按钮顶出卡片 */
+.row-note.mono.game-root-path {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+  color: var(--parch-dim);
+}
+.game-root-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.game-root-warn {
+  font-size: calc(10.5px * var(--global-scale));
+  color: var(--danger-text);
+}
+.game-root-ok {
+  font-size: calc(10.5px * var(--global-scale));
+  color: var(--ok-text-strong);
 }
 </style>

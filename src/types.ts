@@ -145,6 +145,13 @@ export interface AppSettings {
   modInfoCacheDir?: string | null;
   /** v3.2：译文缓存（translation_cache.json / online_titles_zh.json）目录；null = 应用配置目录 */
   translationCacheDir?: string | null;
+
+  /**
+   * v3.3：游戏根目录（含 AoE2DE_s.exe 的那一层，如 F:\Games\AoE2DE）。
+   * 「启动游戏」按钮走 Steam 协议（steam://rungameid/813780），
+   * 这里只用于展示与前置校验；null = 未配置。
+   */
+  gameRootDir?: string | null;
   /** v2.3 遗留：扁平界面字号。v2.4 起只用于一次性迁移，新数据一律为 null，前端不再读取 */
   uiFontSize?: number | null;
   /** v2.3 遗留：扁平行距（已废弃，仅迁移用） */

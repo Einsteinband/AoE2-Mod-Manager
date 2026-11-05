@@ -5,6 +5,7 @@ use tauri::Manager;
 
 mod cache;
 mod download;
+mod download_queue;
 mod images;
 mod install;
 mod metadata;
@@ -2308,6 +2309,28 @@ fn save_user_data(
     user_data::save(&path, &backup_dir, &data)
 }
 
+// ---------------- v0.4.3：下载队列持久化（download_queue.json） ----------------
+//
+// 队列本身是前端状态机（src/online/downloadQueue.ts），Rust 只做“原样存 / 原样取”。
+// 每次前端状态变化写一次完整快照：临时文件 → rename 原子替换，不做 .bak 备份
+// （队列是易恢复数据，频繁备份会塞满 backups 目录）。
+
+/// 读取上次退出时尚未结束的下载队列快照（文件缺失 / 损坏都返回空表）。
+#[tauri::command]
+fn load_download_queue(app: tauri::AppHandle) -> download_queue::Snapshot {
+    download_queue::load_for_app(&app)
+}
+
+/// 覆盖式保存整份下载队列快照，返回最终文件路径。
+#[tauri::command]
+fn save_download_queue(
+    app: tauri::AppHandle,
+    data: download_queue::Snapshot,
+) -> Result<String, String> {
+    let path = download_queue::path_for(&app)?;
+    download_queue::save(&path, &data)
+}
+
 // ---------------- v3.2：三类本地缓存的存放位置（设置 → 缓存与存储） ----------------
 //
 // 缓存默认都在 AppData 里；图片与译文越攒越大时把 C 盘顶满，所以允许用户把它们
@@ -2590,6 +2613,184 @@ async fn open_cache_dir(app: tauri::AppHandle, kind: String) -> Result<String, S
     .map_err(|e| format!("打开缓存目录失败：{e}"))?
 }
 
+/// 「启动游戏」的错误码：后端没有配置游戏根目录（game_root_dir 为空）时返回它，
+/// 前端据此把用户送到「设置 → 通用」并聚焦「游戏根目录」一行（不再弹选 exe 的文件框）。
+pub const GAME_PATH_MISSING: &str = "GAME_PATH_NOT_FOUND";
+
+/// 主程序合法性：必须是文件、扩展名 .exe，且文件名包含 "aoe2de"（大小写不敏感）。
+/// 目的：防止用户在文件框里乱选别的 exe，被当成游戏启动。
+fn is_game_exe(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    match path.file_name().map(|v| v.to_string_lossy().to_ascii_lowercase()) {
+        Some(name) => name.ends_with(".exe") && name.contains("aoe2de"),
+        None => false,
+    }
+}
+
+// ---------------- v3.3：启动游戏统一走 Steam 协议 ----------------
+//
+// 为什么不直接 spawn AoE2DE_s.exe：绕过 Steam 会丢掉启动项、不计游玩时长、
+// 可能触发不了成就 / 覆盖层。所以这里只把 steam://rungameid/<appid> 交给系统协议处理器，
+// 由 Steam 客户端自己拉起游戏；软件不再直接创建游戏进程。
+
+/// AoE2 DE 的 Steam AppID（与 settings.rs 里的 AOE2_STEAM_APP_ID 同值）
+const AOE2_STEAM_APP_ID: &str = "813780";
+
+/// Steam 启动协议地址
+fn steam_launch_url() -> String {
+    format!("steam://rungameid/{AOE2_STEAM_APP_ID}")
+}
+
+/// 用系统协议处理器唤起 Steam。
+/// Windows 走 `cmd /C start`（CREATE_NO_WINDOW，不闪黑框）；其它平台给等价实现。
+/// 只负责「把请求交给系统」，Steam 未安装 / 未登录时由 Steam 自己提示。
+#[cfg(windows)]
+fn open_steam_protocol(url: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    /// CREATE_NO_WINDOW：cmd 窗口不闪出来
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法唤起 Steam：{e}（请确认已安装并登录 Steam）"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_steam_protocol(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法唤起 Steam：{e}（请确认已安装并登录 Steam）"))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn open_steam_protocol(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法唤起 Steam：{e}（请确认已安装并登录 Steam）"))
+}
+
+/// 启动游戏：校验游戏根目录 → 通过 Steam 协议拉起游戏。
+///
+/// 参数 `exe_path`：**向后兼容保留**。v3.2 之前前端会传用户手选的 exe，
+/// 现在前端恒传 `null`；真传了就用它的父目录反推根目录（仍然要求文件名含 AoE2DE）。
+///
+/// 返回值：`Ok(String)` 为实际交给系统的 `steam://` 地址，前端只关心「有没有抛错」。
+///
+/// 错误：
+/// - `GAME_PATH_MISSING`：完全没有配置根目录 → 前端跳设置页；
+/// - 其它文案：目录配置有误 / 无法唤起 Steam，原样 Toast 给用户。
+#[tauri::command]
+async fn launch_game(app: tauri::AppHandle, exe_path: Option<String>) -> Result<String, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = settings::load_for_app(&handle);
+        let mut changed = false;
+
+        // 1) 兼容分支：前端显式传了 exe 就校验它，并用它所在目录当根目录
+        let from_frontend = exe_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+        if let Some(picked) = from_frontend.as_ref() {
+            if !is_game_exe(picked) {
+                return Err(format!(
+                    "选择的文件不是 AoE2 决定版主程序（需要 AoE2DE_s.exe）：{}",
+                    picked.display()
+                ));
+            }
+        }
+
+        // 2) 确定游戏根目录：显式 exe 的父目录 > settings.game_root_dir
+        let root = match from_frontend.as_ref() {
+            Some(exe) => Some(settings::game_root_of_exe(exe)),
+            None => settings
+                .game_root_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from),
+        };
+
+        let Some(root) = root else {
+            // 3) 完全没配置：前端据此跳「设置 → 通用」并聚焦游戏根目录一行
+            return Err(GAME_PATH_MISSING.to_string());
+        };
+
+        // 4) 前置校验：目录必须存在且含主程序，配置错了就明确报错，绝不静默启动
+        let root = settings::validate_game_root(&root.to_string_lossy())?;
+        let root_text = root.to_string_lossy().to_string();
+        if settings.game_root_dir.as_deref() != Some(root_text.as_str()) {
+            settings.game_root_dir = Some(root_text.clone());
+            changed = true;
+        }
+        if changed {
+            if let Err(e) = settings::save_for_app(&handle, &settings) {
+                // 落盘失败不影响这次启动，只是下次还要重新推导一次
+                log::warn!(target: "launch", "保存游戏根目录失败：{e}");
+            }
+        }
+
+        // 5) 交给 Steam 启动：启动项 / 游玩时长 / 成就 / 覆盖层都在 Steam 侧生效
+        let url = steam_launch_url();
+        open_steam_protocol(&url)?;
+        log::info!(target: "launch", "已请求 Steam 启动游戏：{url}（根目录 {root_text}）");
+        Ok(url)
+    })
+    .await
+    .map_err(|e| format!("启动游戏失败：{e}"))?
+}
+
+/// 设置「游戏根目录」（设置 → 通用）。`None` / 空串 = 清除配置。
+///
+/// 保存前统一走 `settings::validate_game_root`（绝对路径 + 目录存在 + 含 `AoE2DE_s.exe`），
+/// 避免用户选错层级（选到 `steamapps`、模组目录或别的游戏）后才发现启动失败。
+#[tauri::command]
+async fn set_game_root_dir(
+    app: tauri::AppHandle,
+    dir: Option<String>,
+) -> Result<models::Settings, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut settings = settings::load_for_app(&handle);
+        let cleaned = dir.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        settings.game_root_dir = match cleaned {
+            Some(raw) => Some(settings::validate_game_root(raw)?.to_string_lossy().to_string()),
+            None => None,
+        };
+        settings::save_for_app(&handle, &settings)?;
+        log::info!(
+            target: "launch",
+            "游戏根目录已更新：{:?}",
+            settings.game_root_dir
+        );
+        Ok(settings)
+    })
+    .await
+    .map_err(|e| format!("保存游戏根目录失败：{e}"))?
+}
+
+/// 自动检测游戏根目录（设置页「自动检测」按钮）：只读探测，**不写配置**。
+/// 复用 `settings::detect_game_exe`（Steam 库 → 卸载注册表 → SteamPath → 盘符常见路径）。
+#[tauri::command]
+async fn detect_game_root() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        settings::detect_game_exe()
+            .map(|exe| settings::game_root_of_exe(&exe).to_string_lossy().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 
 /// 退出闸门：已经在 CloseRequested 里请求过退出，避免重复 exit / 重复起看门狗
@@ -2751,7 +2952,12 @@ pub fn run() {
             update_mod_priority,
             load_user_data,
             save_user_data,
-            open_external
+            load_download_queue,
+            save_download_queue,
+            open_external,
+            launch_game,
+            set_game_root_dir,
+            detect_game_root
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

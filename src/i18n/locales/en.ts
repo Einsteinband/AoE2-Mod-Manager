@@ -7,7 +7,7 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    taglinePrefix: "v0.4.2 · by ",
+    taglinePrefix: "v0.4.3 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -104,6 +104,17 @@ export default {
     cacheDirResetDone: "{name} is back to the default folder",
     cacheDirOpened: "Opened {name} in Explorer",
     cacheDirFailed: "Failed: {msg}",
+    gameRoot: "Game folder",
+    gameRootEmpty: "Not set (Launch game will bring you here)",
+    gameRootPick: "Choose folder",
+    gameRootDetect: "Auto-detect",
+    gameRootClear: "Clear",
+    gameRootSaved: "Game folder saved",
+    gameRootCleared: "Game folder configuration cleared",
+    gameRootPickTitle: "Choose the Age of Empires II: DE game folder (contains AoE2DE_s.exe)",
+    gameRootDetectFailed: "No game folder detected automatically — please choose it manually",
+    gameRootNote:
+      "Launch game uses the Steam protocol (steam://rungameid/813780) so launch options, playtime and achievements all work. Pick the folder that contains AoE2DE_s.exe, e.g. …\\steamapps\\common\\AoE2DE.",
   },
   update: {
     lanzou: "Lanzou cloud download",
@@ -141,6 +152,11 @@ export default {
     viewToList: "Switch to list view",
     viewToGrid: "Switch to grid view",
     cardSize: "Card size: {n}px",
+    launchGame: "Launch game",
+    launchGameTitle: "Launch AoE2: DE through Steam (steam://rungameid/813780) so launch options, playtime and achievements all work. You will be sent to Settings if the game folder is not configured",
+    launchGameBusy: "Launching…",
+    launchGameStarted: "Asked Steam to launch the game",
+    launchGameNoRoot: "No game folder configured yet — opened Settings → General for you",
   },
   batch: {
     working: "Working…",
@@ -528,6 +544,8 @@ export default {
     open: "Open download manager",
     close: "Collapse",
     footer: "{total} total · {active} active",
+    empty: "No downloads",
+    interrupted: "Interrupted when the app closed (re-download if needed)",
     clearFinished: "Clear finished",
     queued: "Queued",
     queuedPos: "Queued (#{n})",

@@ -57,8 +57,9 @@ const GOOGLE_CHUNK: usize = 1_500;
 const MYMEMORY_CHUNK: usize = 450;
 /// 两次外部翻译请求之间的**硬性**最小间隔（基础值）。
 /// 10 次连点、或一个长描述被拆成多块，出口实际节奏都受这里控制。
-/// 1 秒 → 250ms：批量标题翻译从 1 条/秒提到约 4 条/秒（配合 3 并发）。
-const MIN_REQUEST_GAP_MS: u64 = 250;
+/// 250ms → 800ms：Google 免费端点按 250ms 节奏批量打很容易被判定为脚本（429），
+/// 统一提到 800ms 降速；自适应退避只会在它之上继续拉长，永远不会低于这个值。
+const MIN_REQUEST_GAP_MS: u64 = 800;
 /// 自适应退避的上限：持续被限流时最多放慢到这个间隔
 const MAX_REQUEST_GAP_MS: u64 = 4_000;
 /// 连续成功多少次就把发送间隔收窄一档（逐步回到 [`MIN_REQUEST_GAP_MS`]）
@@ -226,10 +227,10 @@ impl Provider {
 ///
 /// 语义（用户 10 秒内点 10 个模组也不会碰限流）：
 /// 1. **严格 FIFO 起步**：按票号顺序开跑，最多 [`MAX_INFLIGHT_REQUESTS`] 个请求同时在飞；
-/// 2. **发送间隔**：任意两次外部 HTTP 请求之间至少 [`MIN_REQUEST_GAP_MS`]（250ms + 抖动），
+/// 2. **发送间隔**：任意两次外部 HTTP 请求之间至少 [`MIN_REQUEST_GAP_MS`]（800ms + 抖动），
 ///    包括同一个模组描述分段时产生的多块请求。
 ///
-/// 突发怎么控制：250ms 间隔保证 `throttle()` 不会把请求挤成一团，在飞数 ≤ 3 保证并发有上限；
+/// 突发怎么控制：800ms 间隔保证 `throttle()` 不会把请求挤成一团，在飞数 ≤ 3 保证并发有上限；
 /// 一旦某个请求返回 429 / quota，`note_rate_limited()` 立刻把间隔翻倍并追加冷却，
 /// 连续成功 [`GAP_RELAX_AFTER`] 次后再收窄一档，全程不需要用户手动调速。
 struct Queue {
@@ -852,8 +853,8 @@ fn load_config(app: &tauri::AppHandle) -> Config {
     })
 }
 
-/// 接口顺序：设置里显式指定就用指定的；`custom` 暂未实现（只落库），实际按 auto 走；
-/// 否则「有代理 → Google 优先，直连 → MyMemory 优先」。
+/// 接口顺序：设置里显式指定就用指定的（auto / google / mymemory）；
+/// 其它值（含已下线的 custom）一律回落到 auto：有代理 → Google 优先，直连 → MyMemory 优先。
 /// 兼容旧 `translate_config.json` 的 provider 字段（settings 未写时生效）。
 fn plan(provider_setting: &str, config: &Config, resolved: &net::NetResolution) -> Vec<Provider> {
     let chosen = if provider_setting.trim().is_empty() {
@@ -864,13 +865,7 @@ fn plan(provider_setting: &str, config: &Config, resolved: &net::NetResolution) 
     match chosen.as_str() {
         "google" => vec![Provider::Google],
         "mymemory" => vec![Provider::MyMemory],
-        "custom" => {
-            log::warn!(
-                target: "translate",
-                "自定义翻译接口尚未实现，本次按 auto 链路执行（后续版本会接入）"
-            );
-            auto_plan(resolved)
-        }
+        // 自定义接口已下线：历史配置里的 custom 与其它未知值一样回落到 auto 链路
         _ => auto_plan(resolved),
     }
 }
@@ -978,6 +973,8 @@ fn parse_google_body(body: &str) -> Option<String> {
 fn google(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, ApiFailure> {
     let mut last: Option<ApiFailure> = None;
     for url in GOOGLE_ENDPOINTS {
+        // 每个端点都是一次真实外部请求：单独占一个发送名额（≥ MIN_REQUEST_GAP_MS）
+        throttle();
         let call = agent
             .get(url)
             .query("client", "dict-chrome-ex")
@@ -1021,6 +1018,8 @@ fn google(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, ApiFa
 /// 源语言固定 en（模组标题/描述以英文为主）；目标语言由 `target` 决定。
 fn mymemory(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, ApiFailure> {
     let langpair = format!("en|{target}");
+    // 真实外部请求：先占发送名额（≥ MIN_REQUEST_GAP_MS）
+    throttle();
     let call = agent
         .get("https://api.mymemory.translated.net/get")
         .query("q", text)
@@ -1081,7 +1080,8 @@ fn translate_chunk(
     if text.is_empty() {
         return Ok(String::new());
     }
-    throttle();
+    // 限速下沉到「每一次真实 HTTP 请求」：google() 的两个端点各自名额，
+    // 避免失败重试的那一次请求绕开间隔。
     let result = match provider {
         Provider::Google => google(agent, text, target),
         Provider::MyMemory => mymemory(agent, text, target),
@@ -1402,10 +1402,11 @@ pub struct TranslateSettingsView {
     pub target_language: String,
     /// 实际生效的语言（小写）
     pub resolved_language: String,
-    /// auto | google | mymemory | custom
+    /// auto | google | mymemory
     pub provider: String,
+    /// 已下线（自定义接口）：字段保留只为兼容前端类型，值恒为空
     pub custom_url: Option<String>,
-    /// 只告诉前端“有没有存 key”，绝不回传密钥本体
+    /// 已下线（自定义接口）：字段保留只为兼容前端类型，值恒为 false
     pub custom_key_set: bool,
     pub supported_languages: Vec<String>,
 }
@@ -1425,12 +1426,9 @@ fn translate_view(app: &tauri::AppHandle) -> TranslateSettingsView {
         } else {
             settings.translate_provider.trim().to_ascii_lowercase()
         },
-        custom_url: settings.translate_custom_url.clone().filter(|v| !v.trim().is_empty()),
-        custom_key_set: settings
-            .translate_custom_key
-            .as_deref()
-            .map(|key| !key.trim().is_empty())
-            .unwrap_or(false),
+        // 自定义接口已下线：不再回传任何残留的 URL / Key 状态
+        custom_url: None,
+        custom_key_set: false,
         supported_languages: SUPPORTED_LANGS.iter().map(|lang| lang.to_string()).collect(),
     }
 }
@@ -1472,23 +1470,20 @@ pub fn set_translate_settings(
 
     if let Some(provider) = provider {
         let normalized = provider.trim().to_ascii_lowercase();
-        let allowed = ["auto", "google", "mymemory", "custom"];
+        let allowed = ["auto", "google", "mymemory"];
         if !allowed.contains(&normalized.as_str()) {
             return Err(format!("不支持的翻译引擎：{provider}"));
         }
         settings.translate_provider = normalized;
     }
 
-    if let Some(url) = custom_url {
-        let trimmed = url.trim().to_string();
-        settings.translate_custom_url = if trimmed.is_empty() { None } else { Some(trimmed) };
-    }
-    // 空串 = 保持原值（前端不回传密钥本体，避免把已存的 key 抹掉）
-    if let Some(key) = custom_key {
-        let trimmed = key.trim().to_string();
-        if !trimmed.is_empty() {
-            settings.translate_custom_key = Some(trimmed);
-        }
+    // 自定义接口已下线：入参保留（命令签名不变）但一律忽略，
+    // 并把 settings.json 里遗留的 URL / Key 直接抹掉，防止旧数据继续起作用。
+    let _ = (custom_url, custom_key);
+    if settings.translate_custom_url.is_some() || settings.translate_custom_key.is_some() {
+        log::info!(target: "translate", "已清理设置里遗留的自定义翻译接口配置");
+        settings.translate_custom_url = None;
+        settings.translate_custom_key = None;
     }
 
     settings::save_for_app(&app, &settings)?;
@@ -2045,8 +2040,8 @@ fn run_title_job_inner(app: &tauri::AppHandle, lang: &str) -> Result<String, Api
     let mut consecutive = 0u32;
     title_update_progress(0, 0, total, "正在翻译标题");
 
-    // 3 个 worker 并发取任务：起跑顺序仍严格 FIFO、在飞数 ≤ 3、发送间隔 250ms（429 退避），
-    // 吞吐从 1 条/秒提到约 4 条/秒。
+    // 3 个 worker 并发取任务：起跑顺序仍严格 FIFO、在飞数 ≤ 3、发送间隔 ≥ 800ms（429 退避），
+    // 实际吞吐约 1.2 条/秒（3 并发只用来避开单条请求卡死拖住整批）。
     // worker 只负责「发请求 + 取译文」，写盘 / 落盘节流 / 进度全部留在主线程，
     // 所以缓存文件的结构和写入时机跟以前完全一样。
     let workers = TITLE_WORKERS.min(total).max(1);
@@ -2540,7 +2535,8 @@ mod tests {
         // 设置里写死的引擎优先
         assert_eq!(plan("mymemory", &config, &via_proxy)[0], Provider::MyMemory);
         assert_eq!(plan("google", &config, &direct)[0], Provider::Google);
-        // custom 尚未实现 → 回落到 auto
+        // 已下线的 custom / 未知值 → 回落到 auto
         assert_eq!(plan("custom", &config, &via_proxy)[0], Provider::Google);
+        assert_eq!(plan("something-else", &config, &direct)[0], Provider::MyMemory);
     }
 }

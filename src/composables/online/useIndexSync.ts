@@ -18,7 +18,7 @@ import {
 } from "../../online/service";
 import { kickIndexSync } from "../../online/indexSync";
 import type { IndexStatus } from "../../online/types";
-import { sessionEpoch, setStatusMessage } from "../../sessionState";
+import { sessionEpoch, setStatusMessageKey } from "../../sessionState";
 
 /** 索引进度轮询间隔（纯内存读，开销可忽略） */
 const POLL_INTERVAL_MS = 6000;
@@ -154,7 +154,7 @@ export function useIndexSync(deps: {
     try {
       const report = force ? await indexSync() : await kickIndexSync(sessionEpoch.value);
       if (report && (report.fetched > 0 || report.done)) {
-        setStatusMessage(t("online.localSearchReady", { n: report.indexed }));
+        setStatusMessageKey("online.localSearchReady", { n: report.indexed });
       }
     } catch {
       // 手动路径才可能抛（自动路径已被 kickIndexSync 吃掉）：允许下次登录再自动试一次

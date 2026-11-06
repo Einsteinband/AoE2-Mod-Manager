@@ -105,108 +105,6 @@ const { t, locale } = useI18n();
 type Tab = "general" | "appearance" | "network" | "local" | "online" | "storage" | "about";
 const tab = ref<Tab>(props.initialTab);
 
-/**
- * 仅本弹窗使用的补充文案（本次改造不改语言包文件）。
- */
-const ui = computed(() =>
-  String(locale.value).toLowerCase().startsWith("zh")
-    ? {
-        tabAppearance: "外观",
-        themeTitle: "主题模式",
-        themeNote: "切换后立即生效，不重启界面；选择会写进 settings.json",
-        themeDark: "深色",
-        themeLight: "明亮",
-        cardSize: "卡片大小",
-        cardSizeNote: "拖动后立即生效，只影响网格视图（160–320px）；设置会写进 settings.json",
-        cardSizeHint: "列表视图不受影响；顶栏的「网格 / 列表」按钮就在列表抬头右侧的批量操作组里。",
-        groupUi: "界面",
-        groupReader: "正文阅读",
-        groupCard: "卡片列表",
-        fontFamilyTitle: "字体种类",
-        fontFamilyNote: "切换后立即生效并写入设置",
-        fontFamilyHei: "黑体",
-        fontFamilyYouyuan: "幼圆",
-        fontFamilySystem: "跟随系统",
-        uiFontWeightTitle: "界面字重",
-        uiFontWeightNote: "导航、按钮与设置界面的描边粗细",
-        globalScaleTitle: "全局缩放",
-        globalScaleNote: "80%–150%：侧边栏、顶栏与设置界面同步缩放",
-        readerFontSizeTitle: "正文字号",
-        readerFontSizeNote: "12–24px：只作用于模组描述正文",
-        lineHeightTitle: "行距",
-        lineHeightNote: "只影响正文行间空白，不改变控件尺寸",
-        lineHeightCompact: "紧凑 1.4",
-        lineHeightStandard: "标准 1.6",
-        lineHeightLoose: "宽松 1.8",
-        fontWeightTitle: "正文字重",
-        fontWeightNote: "只影响模组描述正文的描边粗细",
-        weightNormal: "常规 400",
-        weightBold: "加粗 700",
-        resetTypography: "恢复默认排版",
-        resetTypographyTitle: "恢复默认排版",
-        resetTypographyMessage: "确定要将所有字体、字号、行距和字重恢复为默认吗？",
-        resetTypographyConfirm: "恢复默认",
-        cardFontSizeTitle: "卡片字号",
-        cardFontSizeNote: "10–16px：只影响卡片标题与元信息",
-        typographyHint: "界面、正文、卡片三层互不干扰，深色与明亮主题同样生效。",
-        rootTitle: "模组根目录",
-        rootNote: "更换后会自动重新扫描，并写入 settings.json；主界面信息栏会同步刷新。",
-        changeRoot: "更换根目录",
-        rootEmpty: "尚未设置根目录",
-        rootPath:
-          "模组扫描路径（根目录）已统一到「通用」Tab 里的「更换根目录」按钮管理。",
-      }
-    : {
-        tabAppearance: "Appearance",
-        themeTitle: "Theme",
-        themeNote: "Applies instantly without reloading; the choice is saved to settings.json",
-        themeDark: "Dark",
-        themeLight: "Light",
-        cardSize: "Card size",
-        cardSizeNote: "Applies instantly, grid view only (160–320px); saved to settings.json",
-        cardSizeHint:
-          "List view is unaffected; the Grid / List switch lives in the batch group at the right of the list heading.",
-        groupUi: "Interface",
-        groupReader: "Reading text",
-        groupCard: "Card list",
-        fontFamilyTitle: "Font family",
-        fontFamilyNote: "Applies instantly and is saved to settings",
-        fontFamilyHei: "Hei (SimHei)",
-        fontFamilyYouyuan: "YouYuan",
-        fontFamilySystem: "Follow system",
-        uiFontWeightTitle: "Interface weight",
-        uiFontWeightNote: "Stroke weight of navigation, buttons and settings",
-        globalScaleTitle: "Global scale",
-        globalScaleNote: "80%–150%: sidebar, toolbar and settings scale together",
-        readerFontSizeTitle: "Reader font size",
-        readerFontSizeNote: "12–24px: mod description body only",
-        lineHeightTitle: "Line height",
-        lineHeightNote: "Changes only the spacing of body text, not control sizes",
-        lineHeightCompact: "Compact 1.4",
-        lineHeightStandard: "Standard 1.6",
-        lineHeightLoose: "Loose 1.8",
-        fontWeightTitle: "Body weight",
-        fontWeightNote: "Applies to mod description text only",
-        weightNormal: "Normal 400",
-        weightBold: "Bold 700",
-        resetTypography: "Restore default layout",
-        resetTypographyTitle: "Restore default layout",
-        resetTypographyMessage:
-          "Reset every font, size, line height and weight to its default value?",
-        resetTypographyConfirm: "Restore defaults",
-        cardFontSizeTitle: "Card font size",
-        cardFontSizeNote: "10–16px: card title and meta only",
-        typographyHint:
-          "Interface, reading text and cards are independent layers, and both dark and light themes are supported.",
-        rootTitle: "Mod root folder",
-        rootNote: "Changing the root rescans automatically and is saved to settings.json.",
-        changeRoot: "Change root folder",
-        rootEmpty: "No root folder set yet",
-        rootPath:
-          "The mod scan root is now managed by \"Change root folder\" in the General tab.",
-      },
-);
-
 /** 卡片最小宽度：与主界面滑块、Rust 侧 clamp 同口径 */
 const cardSize = defineModel<number>("cardSize", { default: 200 });
 
@@ -215,8 +113,8 @@ const theme = defineModel<string>("theme", { default: "dark" });
 
 /** 主题选项（文案跟随界面语言，不新增 i18n key） */
 const THEME_OPTIONS = computed(() => [
-  { value: "dark", label: ui.value.themeDark },
-  { value: "light", label: ui.value.themeLight },
+  { value: "dark", label: t("settingsUi.themeDark") },
+  { value: "light", label: t("settingsUi.themeLight") },
 ]);
 
 /** 取整到 20 的倍数并夹进 160..=320：与 useViewPrefs / Rust 侧完全一致 */
@@ -249,10 +147,10 @@ const FONT_FAMILY_OPTIONS_LABELED = computed(() =>
     value,
     label:
       value === "youyuan"
-        ? ui.value.fontFamilyYouyuan
+        ? t("settingsUi.fontFamilyYouyuan")
         : value === "system"
-          ? ui.value.fontFamilySystem
-          : ui.value.fontFamilyHei,
+          ? t("settingsUi.fontFamilySystem")
+          : t("settingsUi.fontFamilyHei"),
   })),
 );
 
@@ -262,10 +160,10 @@ const LINE_HEIGHT_OPTIONS_LABELED = computed(() =>
     value,
     label:
       value === 1.4
-        ? ui.value.lineHeightCompact
+        ? t("settingsUi.lineHeightCompact")
         : value === 1.8
-          ? ui.value.lineHeightLoose
-          : ui.value.lineHeightStandard,
+          ? t("settingsUi.lineHeightLoose")
+          : t("settingsUi.lineHeightStandard"),
   })),
 );
 
@@ -273,7 +171,7 @@ const LINE_HEIGHT_OPTIONS_LABELED = computed(() =>
 const FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
   READER_FONT_WEIGHT_OPTIONS.map((value) => ({
     value,
-    label: value >= 700 ? ui.value.weightBold : ui.value.weightNormal,
+    label: value >= 700 ? t("settingsUi.weightBold") : t("settingsUi.weightNormal"),
   })),
 );
 
@@ -281,7 +179,7 @@ const FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
 const UI_FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
   UI_FONT_WEIGHT_OPTIONS.map((value) => ({
     value,
-    label: value >= 700 ? ui.value.weightBold : ui.value.weightNormal,
+    label: value >= 700 ? t("settingsUi.weightBold") : t("settingsUi.weightNormal"),
   })),
 );
 
@@ -1078,9 +976,6 @@ const translateMessage = ref<string | null>(null);
 /** 下拉框的值："" = 跟随界面语言 */
 const targetChoice = ref("");
 const engineChoice = ref("auto");
-const customUrl = ref("");
-/** 只输入新 key；留空 = 不修改已保存的 key */
-const customKey = ref("");
 
 const translationCache = ref<TranslationCacheStat | null>(null);
 const translationCacheBusy = ref(false);
@@ -1136,6 +1031,14 @@ function pickSelect(event: Event): string {
   return (event.target as HTMLSelectElement).value;
 }
 
+/**
+ * 引擎下拉只剩 Auto / Google：历史配置里的 mymemory 一律按「自动」显示
+ * （auto 在直连时本来就走 MyMemory，实际行为不变）。
+ */
+function engineForSelect(provider: string): string {
+  return provider.trim().toLowerCase() === "google" ? "google" : "auto";
+}
+
 async function loadTranslate() {
   translateLoading.value = true;
   translateError.value = null;
@@ -1143,11 +1046,9 @@ async function loadTranslate() {
     const view = await getTranslateSettings();
     translateView.value = view;
     targetChoice.value = view.targetLanguage;
-    engineChoice.value = view.provider;
+    engineChoice.value = engineForSelect(view.provider);
     savedTargetChoice.value = view.targetLanguage;
-    savedEngineChoice.value = view.provider;
-    customUrl.value = view.customUrl ?? "";
-    customKey.value = "";
+    savedEngineChoice.value = engineForSelect(view.provider);
   } catch (e) {
     translateError.value = describe(e);
   } finally {
@@ -1168,15 +1069,15 @@ async function saveTranslate(): Promise<boolean> {
     const view = await setTranslateSettings({
       targetLanguage: targetChoice.value,
       provider: engineChoice.value,
-      customUrl: customUrl.value.trim() || null,
-      customKey: customKey.value.trim() || null,
+      // 自定义接口已下线：仍传 null，Rust 命令签名保持不变
+      customUrl: null,
+      customKey: null,
     });
     translateView.value = view;
     targetChoice.value = view.targetLanguage;
-    engineChoice.value = view.provider;
+    engineChoice.value = engineForSelect(view.provider);
     savedTargetChoice.value = view.targetLanguage;
-    savedEngineChoice.value = view.provider;
-    customKey.value = "";
+    savedEngineChoice.value = engineForSelect(view.provider);
     // 全局状态：立即更新 targetLang + langEpoch++，详情页/列表按钮文案同步刷新
     applyTranslateSettings(view, String(locale.value));
     translateMessage.value = t("settings.translateSaved");
@@ -1393,7 +1294,7 @@ onBeforeUnmount(() => {
             :class="{ active: tab === 'appearance' }"
             @click="tab = 'appearance'"
           >
-            🎨 {{ ui.tabAppearance }}
+            🎨 {{ t("settingsUi.tabAppearance") }}
           </button>
           <button
             type="button"
@@ -1417,7 +1318,7 @@ onBeforeUnmount(() => {
             :class="{ active: tab === 'online' }"
             @click="tab = 'online'"
           >
-            ☁ {{ t("nav.online") }}
+            ☁ {{ t("settings.tabTranslate") }}
           </button>
           <button
             type="button"
@@ -1464,15 +1365,15 @@ onBeforeUnmount(() => {
             <!-- v2.1：模组根目录从「外观」搬回「通用」 -->
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.rootTitle }}</span>
-                <span class="row-note mono">{{ props.rootPath || ui.rootEmpty }}</span>
+                <span class="row-title">{{ t("settingsUi.rootTitle") }}</span>
+                <span class="row-note mono">{{ props.rootPath || t("settingsUi.rootEmpty") }}</span>
               </div>
               <button type="button" class="settings-check" @click="emit('change-root')">
-                {{ ui.changeRoot }}
+                {{ t("settingsUi.changeRoot") }}
               </button>
             </div>
 
-            <p class="settings-hint">{{ ui.rootNote }}</p>
+            <p class="settings-hint">{{ t("settingsUi.rootNote") }}</p>
 
             <div class="settings-sep"></div>
 
@@ -1529,10 +1430,10 @@ onBeforeUnmount(() => {
             <!-- v2.2：主题模式（深色 / 明亮），点一下立即换肤，不重载页面 -->
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.themeTitle }}</span>
-                <span class="row-note">{{ ui.themeNote }}</span>
+                <span class="row-title">{{ t("settingsUi.themeTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.themeNote") }}</span>
               </div>
-              <div class="settings-segment" role="radiogroup" :aria-label="ui.themeTitle">
+              <div class="settings-segment" role="radiogroup" :aria-label="t('settingsUi.themeTitle')">
                 <button
                   v-for="option in THEME_OPTIONS"
                   :key="option.value"
@@ -1551,17 +1452,17 @@ onBeforeUnmount(() => {
             <div class="settings-sep"></div>
 
             <!-- 【界面】：字体种类 + 全局缩放（卡片大小仍归这一层） -->
-            <h3 class="settings-group-title">{{ ui.groupUi }}</h3>
+            <h3 class="settings-group-title">{{ t("settingsUi.groupUi") }}</h3>
 
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.fontFamilyTitle }}</span>
-                <span class="row-note">{{ ui.fontFamilyNote }}</span>
+                <span class="row-title">{{ t("settingsUi.fontFamilyTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.fontFamilyNote") }}</span>
               </div>
               <select
                 class="settings-select typography-select"
                 :value="uiFontFamily"
-                :aria-label="ui.fontFamilyTitle"
+                :aria-label="t('settingsUi.fontFamilyTitle')"
                 @change="applyFontFamily"
               >
                 <option v-for="opt in FONT_FAMILY_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
@@ -1572,13 +1473,13 @@ onBeforeUnmount(() => {
 
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.uiFontWeightTitle }}</span>
-                <span class="row-note">{{ ui.uiFontWeightNote }}</span>
+                <span class="row-title">{{ t("settingsUi.uiFontWeightTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.uiFontWeightNote") }}</span>
               </div>
               <select
                 class="settings-select typography-select"
                 :value="uiFontWeight"
-                :aria-label="ui.uiFontWeightTitle"
+                :aria-label="t('settingsUi.uiFontWeightTitle')"
                 @change="applyUiFontWeight"
               >
                 <option v-for="opt in UI_FONT_WEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
@@ -1589,8 +1490,8 @@ onBeforeUnmount(() => {
 
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.globalScaleTitle }}</span>
-                <span class="row-note">{{ ui.globalScaleNote }}</span>
+                <span class="row-title">{{ t("settingsUi.globalScaleTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.globalScaleNote") }}</span>
               </div>
               <div class="settings-range-wrap">
                 <input
@@ -1600,7 +1501,7 @@ onBeforeUnmount(() => {
                   :min="GLOBAL_SCALE_MIN"
                   :max="GLOBAL_SCALE_MAX"
                   :step="GLOBAL_SCALE_STEP"
-                  :aria-label="ui.globalScaleTitle"
+                  :aria-label="t('settingsUi.globalScaleTitle')"
                   :title="globalFontScale + '%'"
                   @change="snapGlobalScale"
                 />
@@ -1610,8 +1511,8 @@ onBeforeUnmount(() => {
 
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.cardSize }}</span>
-                <span class="row-note">{{ ui.cardSizeNote }}</span>
+                <span class="row-title">{{ t("settingsUi.cardSize") }}</span>
+                <span class="row-note">{{ t("settingsUi.cardSizeNote") }}</span>
               </div>
               <div class="settings-range-wrap">
                 <input
@@ -1629,17 +1530,17 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <p class="settings-hint">{{ ui.cardSizeHint }}</p>
+            <p class="settings-hint">{{ t("settingsUi.cardSizeHint") }}</p>
 
             <div class="settings-sep"></div>
 
             <!-- 【正文阅读】：字号 12–24px / 行距 / 字重 -->
-            <h3 class="settings-group-title">{{ ui.groupReader }}</h3>
+            <h3 class="settings-group-title">{{ t("settingsUi.groupReader") }}</h3>
 
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.readerFontSizeTitle }}</span>
-                <span class="row-note">{{ ui.readerFontSizeNote }}</span>
+                <span class="row-title">{{ t("settingsUi.readerFontSizeTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.readerFontSizeNote") }}</span>
               </div>
               <div class="settings-range-wrap">
                 <input
@@ -1649,7 +1550,7 @@ onBeforeUnmount(() => {
                   :min="READER_FONT_SIZE_MIN"
                   :max="READER_FONT_SIZE_MAX"
                   step="1"
-                  :aria-label="ui.readerFontSizeTitle"
+                  :aria-label="t('settingsUi.readerFontSizeTitle')"
                   :title="readerFontSize + 'px'"
                   @change="snapReaderFontSize"
                 />
@@ -1662,13 +1563,13 @@ onBeforeUnmount(() => {
             <!-- 行距（1.4 / 1.6 / 1.8） -->
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.lineHeightTitle }}</span>
-                <span class="row-note">{{ ui.lineHeightNote }}</span>
+                <span class="row-title">{{ t("settingsUi.lineHeightTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.lineHeightNote") }}</span>
               </div>
               <select
                 class="settings-select typography-select"
                 :value="readerLineHeight"
-                :aria-label="ui.lineHeightTitle"
+                :aria-label="t('settingsUi.lineHeightTitle')"
                 @change="applyLineHeight"
               >
                 <option v-for="opt in LINE_HEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
@@ -1682,13 +1583,13 @@ onBeforeUnmount(() => {
             <!-- 字重（400 / 500） -->
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.fontWeightTitle }}</span>
-                <span class="row-note">{{ ui.fontWeightNote }}</span>
+                <span class="row-title">{{ t("settingsUi.fontWeightTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.fontWeightNote") }}</span>
               </div>
               <select
                 class="settings-select typography-select"
                 :value="readerFontWeight"
-                :aria-label="ui.fontWeightTitle"
+                :aria-label="t('settingsUi.fontWeightTitle')"
                 @change="applyFontWeight"
               >
                 <option v-for="opt in FONT_WEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
@@ -1700,12 +1601,12 @@ onBeforeUnmount(() => {
             <div class="settings-sep"></div>
 
             <!-- 【卡片列表】：字号 10–16px -->
-            <h3 class="settings-group-title">{{ ui.groupCard }}</h3>
+            <h3 class="settings-group-title">{{ t("settingsUi.groupCard") }}</h3>
 
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ ui.cardFontSizeTitle }}</span>
-                <span class="row-note">{{ ui.cardFontSizeNote }}</span>
+                <span class="row-title">{{ t("settingsUi.cardFontSizeTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.cardFontSizeNote") }}</span>
               </div>
               <div class="settings-range-wrap">
                 <input
@@ -1715,7 +1616,7 @@ onBeforeUnmount(() => {
                   :min="CARD_FONT_SIZE_MIN"
                   :max="CARD_FONT_SIZE_MAX"
                   step="1"
-                  :aria-label="ui.cardFontSizeTitle"
+                  :aria-label="t('settingsUi.cardFontSizeTitle')"
                   :title="cardFontSize + 'px'"
                   @change="snapCardFontSize"
                 />
@@ -1723,12 +1624,12 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <p class="settings-hint">{{ ui.typographyHint }}</p>
+            <p class="settings-hint">{{ t("settingsUi.typographyHint") }}</p>
 
             <!-- v3.0：恢复默认排版（只盖排版七项，不动卡片大小与主题） -->
             <div class="typography-reset-row">
               <button type="button" class="typography-reset" @click="showResetConfirm = true">
-                {{ ui.resetTypography }}
+                {{ t("settingsUi.resetTypography") }}
               </button>
             </div>
           </section>
@@ -1848,10 +1749,10 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
-            <p class="settings-hint">{{ ui.rootPath }}</p>
+            <p class="settings-hint">{{ t("settingsUi.rootPath") }}</p>
           </section>
 
-          <!-- 在线模组：翻译 / 翻译缓存 / 批量标题翻译 / 在线数据缓存 -->
+          <!-- 模组翻译：翻译 / 翻译缓存 / 批量标题翻译 / 在线数据缓存 -->
           <section v-else-if="tab === 'online'" class="settings-card">
             <div class="settings-row">
               <div class="row-label">
@@ -1892,38 +1793,9 @@ onBeforeUnmount(() => {
               >
                 <option value="auto">{{ t("settings.translateEngineAuto") }}</option>
                 <option value="google">Google</option>
-                <option value="mymemory">MyMemory</option>
-                <option value="custom">{{ t("settings.translateEngineCustom") }}</option>
               </select>
             </div>
 
-            <template v-if="engineChoice === 'custom'">
-              <input
-                v-model="customUrl"
-                class="settings-input"
-                type="text"
-                placeholder="https://api.example.com/translate"
-                spellcheck="false"
-                :disabled="translateSaving"
-              />
-              <input
-                v-model="customKey"
-                class="settings-input"
-                type="password"
-                :placeholder="
-                  translateView?.customKeySet ? t('settings.translateCustomKeyKept') : t('settings.translateCustomKey')
-                "
-                spellcheck="false"
-                autocomplete="off"
-                :disabled="translateSaving"
-              />
-            </template>
-
-            <div class="settings-actions">
-              <button type="button" :disabled="translateSaving || translateLoading" @click="saveTranslate">
-                {{ translateSaving ? t("online.saving") : t("online.save") }}
-              </button>
-            </div>
             <p class="settings-hint">{{ t("settings.translateAutoSave") }}</p>
 
             <div v-if="translateError" class="settings-msg error">{{ translateError }}</div>
@@ -2220,9 +2092,9 @@ onBeforeUnmount(() => {
     <!-- v3.0：恢复默认排版的二次确认（叠在设置弹窗之上） -->
     <ConfirmDialog
       v-if="showResetConfirm"
-      :title="ui.resetTypographyTitle"
-      :message="ui.resetTypographyMessage"
-      :confirm-label="ui.resetTypographyConfirm"
+      :title="t('settingsUi.resetTypographyTitle')"
+      :message="t('settingsUi.resetTypographyMessage')"
+      :confirm-label="t('settingsUi.resetTypographyConfirm')"
       :danger="false"
       @confirm="resetTypography"
       @cancel="showResetConfirm = false"

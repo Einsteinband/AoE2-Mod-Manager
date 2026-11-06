@@ -60,33 +60,7 @@ const emit = defineEmits<{
   (e: "request-enable", payload: { id: string }): void;
 }>();
 
-const { t, locale } = useI18n();
-
-/**
- * 详情页分区标题 / 折叠按钮文案。
- * 只在本组件内使用，因此不额外新增语言包键（本次改造不改 i18n 文件）。
- */
-const ui = computed(() =>
-  String(locale.value).toLowerCase().startsWith("zh")
-    ? {
-        actions: "操作",
-        moreActions: "其他操作",
-        status: "状态",
-        meta: "作者与更新时间",
-        more: "更多技术信息",
-        expand: "展开全文",
-        collapse: "收起",
-      }
-    : {
-        actions: "Actions",
-        moreActions: "More actions",
-        status: "Status",
-        meta: "Author & updates",
-        more: "More technical info",
-        expand: "Show more",
-        collapse: "Show less",
-      },
-);
+const { t } = useI18n();
 
 const imgFailed = ref(false);
 const revealing = ref(false);
@@ -476,7 +450,7 @@ watch(
     <!-- ② 操作区（v2.0 前置）：所有可点按钮集中在这里，紧跟识别区，先能做再读描述
          （顺序：主操作 → 辅助 → 危险） -->
     <section class="dv-zone dv-zone-actions">
-      <h4 class="dv-zone-title">{{ ui.actions }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.actions") }}</h4>
 
       <!-- v0.2.4：一键翻译（仅手动触发；打开详情页只做一次本地缓存查询，绝无网络请求） -->
       <div v-if="translateId > 0" class="translate-row">
@@ -584,13 +558,13 @@ watch(
       <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
       <div v-else class="note">{{ t("detail.descriptionMissing") }}</div>
       <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
-        {{ descExpanded ? ui.collapse : ui.expand }}
+        {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}
       </button>
     </section>
 
     <!-- ④ 其他操作（v2.1 后置）：打开所在文件夹 / 在网站浏览 / 卸载模组 -->
     <section class="dv-zone dv-zone-actions">
-      <h4 class="dv-zone-title">{{ ui.moreActions }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.moreActions") }}</h4>
 
       <!-- 辅助操作：打开目录 / 官网（描边 Ghost 样式） -->
       <div class="dv-action-row">
@@ -637,7 +611,7 @@ watch(
 
     <!-- ⑤ 状态区：启用/停用、加载优先级、数据提示（仅已安装条目） -->
     <section v-if="!uninstalled" class="dv-zone dv-zone-status">
-      <h4 class="dv-zone-title">{{ ui.status }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.status") }}</h4>
       <div class="detail-badges dv-status-badges">
         <span class="badge" :class="mod.enabled === null ? 'warn' : ''">{{ statusLabel(mod.enabled) }}</span>
       </div>
@@ -669,7 +643,7 @@ watch(
 
     <!-- ⑥ 作者 / 版本 / 更新时间 -->
     <section class="dv-zone dv-zone-meta">
-      <h4 class="dv-zone-title">{{ ui.meta }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.metaUpdated") }}</h4>
       <div class="field">
         <span class="k">{{ t("detail.author") }}</span>
         <span class="v" :class="{ missing: !mod.author }">
@@ -684,7 +658,7 @@ watch(
 
     <!-- ⑦ 低频技术信息：默认收起，点开才占位 -->
     <details class="dv-zone dv-more">
-      <summary class="dv-more-summary">{{ ui.more }}</summary>
+      <summary class="dv-more-summary">{{ t("detailPanel.more") }}</summary>
       <div class="field">
         <span class="k">{{ t("detail.workshopId") }}</span>
         <span class="v" :class="{ missing: !mod.workshopId }">

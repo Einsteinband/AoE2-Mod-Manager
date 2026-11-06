@@ -97,14 +97,6 @@ export function useOnlineInstall(deps: {
     return outcome ? installNoteText(outcome) : null;
   });
 
-  /** 刚完成一次成功的本地化（详情面板结果区据此显示订阅警示块） */
-  const localizedJustNow = computed(
-    () => modTask.value?.status === "done" && modTask.value?.localized === true,
-  );
-
-  /** 入队时的订阅快照：true=确定仍订阅 / false=未订阅 / null=未知 */
-  const wasSubscribed = computed<boolean | null>(() => modTask.value?.wasSubscribed ?? null);
-
   /** 覆盖勾选：落到该模组的任务上（新任务入队时沿用） */
   const needForce = computed<boolean>({
     get: () => modTask.value?.needForce === true,
@@ -315,8 +307,6 @@ export function useOnlineInstall(deps: {
     cancelRequested,
     installError,
     installNote,
-    localizedJustNow,
-    wasSubscribed,
     needForce,
     forceOverwrite,
     actionMessage,

@@ -14,13 +14,12 @@
  * 官方搜索词 / 排序 / 升降序由顶栏（App.vue）持有，这里只通过 deps 读取，不自己维护一份。
  */
 import { computed, ref, type Ref } from "vue";
-import { useI18n } from "vue-i18n";
 import { allCachedItems, readCachedPages, readInstalledPages } from "../../online/cache";
 import { messageOf } from "../../online/errors";
 import { isNetworkError, isNetworkFailure } from "../../online/networkError";
 import { findMods, installedMods } from "../../online/service";
 import { isApiFailure, type OnlineMod } from "../../online/types";
-import { sessionPhase, setStatusMessage } from "../../sessionState";
+import { sessionPhase, setStatusMessageKey } from "../../sessionState";
 import { ensureUserData, favoriteIdSet, isFavorite } from "../../userData";
 import { favoriteMetaOf } from "../../favoriteMeta";
 import type { OnlineSelection } from "./useOnlineSelection";
@@ -113,7 +112,6 @@ export function useOnlineList(deps: {
   /** 退出本地搜索态（返回调用前是否处于本地搜索视图）—— 与官方列表互斥 */
   clearLocalSearch: () => boolean;
 }) {
-  const { t } = useI18n();
   const { selection, scrollEl } = deps;
 
   /** 列表（无限滚动累加） */
@@ -343,7 +341,7 @@ export function useOnlineList(deps: {
     loading.value = false;
     loadingMore.value = false;
     applyList(matched, mode);
-    setStatusMessage(t("favorites.localHint", { n: matched.length }));
+    setStatusMessageKey("favorites.localHint", { n: matched.length });
     deps.syncImages(matched);
   }
 
@@ -402,7 +400,7 @@ export function useOnlineList(deps: {
       error.value = null;
       loading.value = false;
       loadingMore.value = false;
-      setStatusMessage(t("statusbar.cacheLoaded"));
+      setStatusMessageKey("statusbar.cacheLoaded");
       deps.syncImages(visibleOfficialItems.value);
     } else {
       // ② 从未缓存过
@@ -414,7 +412,7 @@ export function useOnlineList(deps: {
         items.value = [];
         loading.value = false;
         noCacheOffline.value = true;
-        setStatusMessage(t("statusbar.networkDownHint"));
+        setStatusMessageKey("statusbar.networkDownHint");
         return;
       }
       noCacheOffline.value = false;
@@ -436,7 +434,7 @@ export function useOnlineList(deps: {
 
     if (sessionPhase.value !== "online") {
       loading.value = false;
-      if (!cached.hit) setStatusMessage(t("statusbar.offlineHint"));
+      if (!cached.hit) setStatusMessageKey("statusbar.offlineHint");
       return;
     }
 
@@ -445,7 +443,7 @@ export function useOnlineList(deps: {
       loading.value = false;
       hasMore.value = false;
       if (!cached.hit) noCacheOffline.value = true;
-      setStatusMessage(t("statusbar.networkDownHint"));
+      setStatusMessageKey("statusbar.networkDownHint");
       return;
     }
 
@@ -456,7 +454,7 @@ export function useOnlineList(deps: {
     const replaceOnFirst = cursor.value === 1;
     fetchSignature = signature;
     lastFetchMsBySignature.set(signature, Date.now());
-    setStatusMessage(cached.hit ? t("statusbar.refreshing") : t("statusbar.fetching"));
+    setStatusMessageKey(cached.hit ? "statusbar.refreshing" : "statusbar.fetching");
     try {
       let guard = 0;
       while (mySeq === seq && guard < 4) {
@@ -487,7 +485,7 @@ export function useOnlineList(deps: {
       if (mySeq !== seq) return;
       error.value = null;
       noCacheOffline.value = false;
-      setStatusMessage(t("statusbar.freshAt", { time: clockText(Date.now()) }));
+      setStatusMessageKey("statusbar.freshAt", { time: clockText(Date.now()) });
       deps.syncImages(visibleOfficialItems.value);
     } catch (e) {
       if (mySeq === seq) {
@@ -495,10 +493,10 @@ export function useOnlineList(deps: {
           // 断网 / DNS / 超时：不把技术性报错抛到脸上，只给“请检查网络”
           noCacheOffline.value = !items.value.length;
           error.value = null;
-          setStatusMessage(t("statusbar.networkDownHint"));
+          setStatusMessageKey("statusbar.networkDownHint");
         } else {
           if (!items.value.length) error.value = messageOf(e);
-          setStatusMessage(t("statusbar.offlineHint"));
+          setStatusMessageKey("statusbar.offlineHint");
         }
         if (isApiFailure(e) && e.kind === "unauthenticated") {
           deps.onUnauthorized(messageOf(e));

@@ -1,27 +1,31 @@
-# v0.4.5
+# v0.4.6
 
-## v0.4.5 - Fixes & Improvements
-
-### 🛠 Fixes
-- Sign-in fixed: the account window is no longer torn down right before opening it (the v0.4.0 regression that made "Sign in" look unresponsive), and the Steam / PlayStation sign-in entries were removed - the app now goes straight to Microsoft / Xbox.
-- **Please make sure your Steam account is already linked on the Age of Empires II website** (ageofempires.com) before signing in. An unlinked account can sign in, but the official site will not return your subscribed mods; the sign-in panel now links to the account page and explains this.
-
-### ✨ New
-- Settings - About: new "Diagnostics (run log)" section. Describe the problem, then copy a ready-to-paste report (version / OS / problem / last 100 log lines) for AI analysis, or open the log folder in one click. Logs now rotate at 5 MB and keep the latest 5 files, with local time stamps.
+## v0.4.6 - Fixes & Improvements
 
 ### 🔧 Changes
-- Settings - Storage: all caches now live in a single "Data & cache folder". A one-click migration moves the old image / mod-info / translation caches safely (copy, verify, atomic rename, delete old; automatic rollback on failure), and settings.json always stays in place as an anchor.
+- Subscription conflict notice reworked: the popup that appeared after a mod was localized is gone. Instead, the local list header now always shows a one-line note reminding you that mods living in the `local` folder can be downloaded a second time by the game while the account is still subscribed - check the "Unsubscribed?" badge on the card, then unsubscribe in game or on the website if you see duplicates. Nothing is blocked, nothing pops up.
+- The reminder is a single line of muted text in the list header: it never covers the list, never steals focus, and collapses to an ellipsis on narrow windows.
+- Translation request pacing lowered from 250 ms to 800 ms per outgoing HTTP request, to reduce HTTP 429 rate limiting from the free endpoints. The pace still widens automatically when throttled and narrows again after a run of successes.
+
+### 🛠 Fixes
+- English UI no longer shows hard-coded Chinese: the view switcher (grid / list), the mod detail panel section titles and the Settings - Appearance / Typography section are now fully localized.
+- The status bar now always speaks the language you selected, including messages that were raised before the language switch took effect.
+
+### ✨ New
+- Settings - Translation: the unfinished "Custom endpoint (in development)" option is removed. Only Auto / Google / MyMemory remain; an old config that still points at the custom endpoint falls back to Auto automatically.
 
 ---
 
-## v0.4.5 - 修复与优化
-
-### 🛠 修复
-- 登录问题修复：账号窗口不再在打开前被销毁（这是 v0.4.0 之后「点登录没反应」的根因），同时移除了 Steam / PlayStation 登录入口，现在直接使用微软 / Xbox 账号登录。
-- **请确保你的 Steam 账号已在帝国时代2官网（ageofempires.com）完成绑定**，否则即使登录成功，官网也不会返回你订阅的模组。登录面板已加入绑定说明与账号中心入口。
-
-### ✨ 新增
-- 设置 - 关于：新增「问题诊断（运行日志）」区域。填写问题描述后一键复制完整诊断信息（版本 / 系统 / 问题 / 最近 100 行日志），直接发给 AI 分析；也可一键打开日志所在文件夹。日志按 5MB 滚动，保留最近 5 份，时间戳为本地时间。
+## v0.4.6 - 修复与优化
 
 ### 🔧 调整
-- 设置 - 存储：所有缓存合并为单一「数据与缓存总目录」。支持一键安全迁移（复制、校验、原子改名、删除旧目录，失败自动回滚），settings.json 始终留在原处作为定位锚点。
+- 订阅冲突提示改版：本地化完成后弹出的提示框已移除。改为在本地列表抬头常驻一行说明——`local` 目录里的模组，在账号仍处于订阅状态时游戏会再下载一份；如果游戏内出现两个相同的模组，卡片上的「建议退订」标记仍在，请到游戏内或官网取消订阅。不弹窗、不阻塞操作。
+- 说明只占抬头的一行浅色文字：不遮挡列表、不抢焦点，窗口变窄时自动收成省略号。
+- 翻译请求的发送间隔由 250ms 放宽到 800ms，降低免费接口被判定为脚本（HTTP 429）的概率；被限流时仍会自动继续降速，连续成功后逐步恢复。
+
+### 🛠 修复
+- 英文界面不再出现硬编码中文：视图切换（网格 / 列表）、模组详情页的分区标题、设置里的「外观 / 排版」整块文案全部改为语言包驱动。
+- 底栏状态提示始终使用当前界面语言，包括在语言切换生效之前发出的那几条提示。
+
+### ✨ 新增
+- 设置 - 翻译：移除尚未实现的「自定义接口（开发中）」选项，只保留 自动 / Google / MyMemory；历史配置里指向自定义接口的会按「自动」执行，不再报错。

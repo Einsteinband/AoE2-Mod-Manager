@@ -1,4 +1,4 @@
-# publish.ps1
+﻿# publish.ps1
 # 自动读取 package.json 的版本号，创建 GitHub Release 并上传本地安装包。
 #
 # 默认策略（2026-11 起）：不推送仓库源代码。

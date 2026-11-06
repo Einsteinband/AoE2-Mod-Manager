@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
 mod cache;
+mod data_dir;
 mod download;
 mod download_queue;
 mod images;
@@ -24,6 +25,9 @@ mod user_data;
 
 use online::api::ApiClient;
 use online::ApiFailure;
+
+/// 数据与缓存总目录的统一入口（图片/在线数据/索引/译文/收藏/预设/队列/会话凭证）
+pub use data_dir::data_root;
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     settings::path_for(app)
@@ -569,35 +573,34 @@ async fn online_startup_session(app: tauri::AppHandle) -> SessionStatus {
     }
 }
 
-/// 打开登录窗口。`platform` = "steam" | "microsoft" | "psn"。
+/// 打开登录窗口。v3.3 起只保留**微软 / Xbox** 一条入口（用户指令：移除 Steam 与 PlayStation）。
 ///
-/// 默认地址 auth.ageofempires.com 会 302 到微软，这是官方行为；要选 Steam 就必须
-/// 直接导航到 /loginsteam（实测 → steamcommunity.com/openid/login → 回跳 /signin-steam）。
+/// auth.ageofempires.com 会 302 到 login.microsoftonline.com，这是官方行为，不是 bug。
 #[tauri::command]
-async fn online_open_login(app: tauri::AppHandle, platform: Option<String>) -> Result<(), String> {
-    let key = platform.unwrap_or_else(|| "microsoft".to_string());
-    let url = match key.as_str() {
-        "steam" => online::session::LOGIN_STEAM_URL,
-        "psn" => online::session::LOGIN_PSN_URL,
-        _ => online::session::LOGIN_URL,
-    };
-    log::info!(target: "account-window", "前端请求打开登录窗口 platform={key} url={url}");
-    // 主动登录意味着旧会话已失效，先丢掉缓存，避免"假登录态"
-    let _ = online::session::invalidate_cached_session(&app);
+async fn online_open_login(app: tauri::AppHandle) -> Result<(), String> {
+    let url = online::session::LOGIN_URL;
+    log::info!(target: "account-window", "前端请求打开登录窗口 url={url}");
+    // v3.2 回归修复：**不再销毁窗口**。旧代码走 invalidate_cached_session（内部 destroy），
+    // 而 destroy 是异步派发——紧接着的 ensure_account_window 会命中“正在销毁”的窗口，
+    // show/navigate 静默失败，前端永远停在「等待登录」（即用户报的「点登录没反应」）。
+    // 现在只清 AoE Cookie，窗口保留复用。
+    match online::session::purge_aoe_cookies_for_relogin(&app) {
+        Ok(n) => log::info!(target: "account-window", "登录前已清理 AoE Cookie {n} 条"),
+        Err(e) => log::warn!(target: "account-window", "登录前清理 AoE Cookie 未完成：{e}"),
+    }
     let window = online::session::ensure_account_window(&app, url, true)?;
-    let _ = window.show();
+    // show() 失败必须冒泡：否则前端拿到 Ok(()) 会一直停在 waitingLogin
+    window
+        .show()
+        .map_err(|e| format!("登录窗口无法显示：{e}"))?;
     let _ = window.unminimize();
     let _ = window.set_focus();
+    log::info!(
+        target: "account-window",
+        "登录窗口已显示 visible={:?}",
+        window.is_visible()
+    );
     Ok(())
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginTarget {
-    key: String,
-    label: String,
-    url: String,
-    hint: String,
 }
 
 /// 后台静默登录：用**隐藏**窗口打开登录入口，靠平台 SSO 的持久 Cookie 自动跑完
@@ -605,17 +608,9 @@ struct LoginTarget {
 /// 通常不需要用户再点一次“微软登录”（会话 Cookie 不跨进程存活，但 MS 的会）。
 /// 失败也不报错：窗口保持隐藏，用户手动点登录时会被 ensure_account_window 复用并显示。
 #[tauri::command]
-async fn online_open_login_silent(
-    app: tauri::AppHandle,
-    platform: Option<String>,
-) -> Result<(), String> {
-    let key = platform.unwrap_or_else(|| "microsoft".to_string());
-    let url = match key.as_str() {
-        "steam" => online::session::LOGIN_STEAM_URL,
-        "psn" => online::session::LOGIN_PSN_URL,
-        _ => online::session::LOGIN_URL,
-    };
-    log::info!(target: "account-window", "后台静默登录 platform={key} url={url}");
+async fn online_open_login_silent(app: tauri::AppHandle) -> Result<(), String> {
+    let url = online::session::LOGIN_URL;
+    log::info!(target: "account-window", "后台静默登录 url={url}");
     // 注意：不调用 invalidate_cached_session，失败时仍保留 DPAPI 兜底
     let window = online::session::ensure_account_window(&app, url, false)?;
     // 已有隐藏窗口时 ensure_account_window 不会导航，这里补一次，保证真的触发 SSO 回跳
@@ -625,31 +620,6 @@ async fn online_open_login_silent(
         }
     }
     Ok(())
-}
-
-/// 登录入口清单：前端只负责渲染，不自己拼 URL
-#[tauri::command]
-fn online_login_targets() -> Vec<LoginTarget> {
-    vec![
-        LoginTarget {
-            key: "steam".to_string(),
-            label: "用 Steam 账号登录".to_string(),
-            url: online::session::LOGIN_STEAM_URL.to_string(),
-            hint: "适合 Steam 版游戏；如果之后提示无权限，请改用微软/Xbox 账号".to_string(),
-        },
-        LoginTarget {
-            key: "microsoft".to_string(),
-            label: "用微软 / Xbox 账号登录".to_string(),
-            url: online::session::LOGIN_URL.to_string(),
-            hint: "官方 mod 接口的主体系，兼容性最好".to_string(),
-        },
-        LoginTarget {
-            key: "psn".to_string(),
-            label: "用 PlayStation Network 登录".to_string(),
-            url: online::session::LOGIN_PSN_URL.to_string(),
-            hint: "主机平台账号".to_string(),
-        },
-    ]
 }
 
 #[tauri::command]
@@ -2055,11 +2025,14 @@ fn open_external(url: String) -> Result<String, String> {
         "lanzoux.com",
         "lanzoub.com",
     ];
-    const ALLOWED_HOSTS: [&str; 4] = [
+    const ALLOWED_HOSTS: [&str; 5] = [
         "github.com",
         "www.github.com",
         "ageofempires.com",
         "www.ageofempires.com",
+        // v3.3：官方账号中心（登录后绑定 Steam）。实测 302 到 login.microsoftonline.com，
+        // 是「微软账号未绑定 Steam」时用户唯一该去的地方。
+        "auth.ageofempires.com",
     ];
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
@@ -2373,10 +2346,8 @@ fn usable_dir(raw: &str) -> Option<PathBuf> {
 /// 默认位置：图片缓存是 `%APPDATA%\<app>\image_cache`，
 /// 模组信息与译文缓存直接落在配置目录下（靠文件名区分）。
 fn default_cache_dir(app: &tauri::AppHandle, index: usize) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))?;
+    // v1.x：默认位置 = 「数据与缓存总目录」（没自定义时它就是 %APPDATA%\<bundleId>）
+    let base = data_dir::data_root(app)?;
     Ok(if index == CACHE_KIND_IMAGE {
         base.join(images::DIR_NAME)
     } else {
@@ -2392,25 +2363,28 @@ fn default_cache_dir(app: &tauri::AppHandle, index: usize) -> Result<PathBuf, St
 /// 任何情况下都返回一个可用路径，绝不因为配置坏掉让缓存功能整体失效。
 pub fn get_cache_dir(app: &tauri::AppHandle, kind: &str) -> Result<PathBuf, String> {
     let index = cache_kind_index(kind)?;
-    let configured = {
-        let mut guard = CACHE_DIR_OVERRIDES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.is_none() {
-            *guard = Some(cache_overrides(app));
+    // 总目录优先：用户既然设了统一目录，旧的「三类分目录」就不该再抢方向
+    if !data_dir::is_configured(app) {
+        let configured = {
+            let mut guard = CACHE_DIR_OVERRIDES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.is_none() {
+                *guard = Some(cache_overrides(app));
+            }
+            guard.as_ref().and_then(|all| all[index].clone())
+        };
+        if let Some(raw) = configured {
+            if let Some(path) = usable_dir(&raw) {
+                return Ok(path);
+            }
+            log::warn!(
+                target: "cache-dir",
+                "配置的 {} 缓存目录不可用（{}），本次回退默认位置",
+                cache_kind_code(index),
+                raw
+            );
         }
-        guard.as_ref().and_then(|all| all[index].clone())
-    };
-    if let Some(raw) = configured {
-        if let Some(path) = usable_dir(&raw) {
-            return Ok(path);
-        }
-        log::warn!(
-            target: "cache-dir",
-            "配置的 {} 缓存目录不可用（{}），本次回退默认位置",
-            cache_kind_code(index),
-            raw
-        );
     }
     default_cache_dir(app, index)
 }
@@ -2581,6 +2555,206 @@ async fn open_cache_dir(app: tauri::AppHandle, kind: String) -> Result<String, S
     })
     .await
     .map_err(|e| format!("打开缓存目录失败：{e}"))?
+}
+
+// ---------------- v1.x：数据与缓存总目录（设置 → 缓存与存储） ----------------
+//
+// 心智模型：图片缓存、在线数据、搜索索引、译文、收藏、预设、下载队列、DPAPI 会话凭证
+// 共用一个根目录。路径裁决 / 目标体检 / 迁移 / 回滚全在 data_dir.rs，前端只负责展示。
+
+/// 当前「数据与缓存总目录」的路径 / 占用 / 是否自定义
+#[tauri::command]
+async fn data_dir_view(app: tauri::AppHandle) -> data_dir::DataDirView {
+    tauri::async_runtime::spawn_blocking(move || data_dir::view(&app))
+        .await
+        .unwrap_or_else(|_| data_dir::empty_view())
+}
+
+/// 迁移到新目录：体检 → 预检同名 → 物理移动 → 落盘；任何一步失败自动回滚
+#[tauri::command]
+async fn migrate_data_dir(
+    app: tauri::AppHandle,
+    new_path: String,
+) -> Result<data_dir::DataDirView, String> {
+    tauri::async_runtime::spawn_blocking(move || data_dir::migrate(&app, &new_path))
+        .await
+        .map_err(|e| format!("迁移任务异常：{e}"))?
+}
+
+/// 在资源管理器中打开当前数据目录（不存在就先建出来）
+#[tauri::command]
+async fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = data_dir::data_root(&app)?;
+        if !dir.is_dir() {
+            fs::create_dir_all(&dir)
+                .map_err(|e| format!("无法创建数据目录 {}：{e}", dir.display()))?;
+        }
+        let shown = dir.display().to_string();
+        #[cfg(windows)]
+        {
+            std::process::Command::new("explorer.exe")
+                .arg(&dir)
+                .spawn()
+                .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+            Ok(shown)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = shown;
+            Err("仅支持 Windows".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("打开数据目录失败：{e}"))?
+}
+
+// ---------------- v0.4.5：本地日志与「复制诊断信息给 AI」 ----------------
+
+/// 日志目录：与 tauri-plugin-log 的 `LogDir` 目标完全一致
+/// （Windows 下 = `%LOCALAPPDATA%\com.aoe2.modmanager\logs`）。
+/// 前端不再让用户自己翻文件夹，统一走这个入口。
+fn logs_dir_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_log_dir()
+        .map_err(|e| format!("无法定位日志目录：{e}"))
+}
+
+/// 取日志目录里最新的 `aoe2mm*.log`。
+///
+/// 按大小滚动后旧文件会改名成 `aoe2mm_<时间戳>.log`，所以不能只认 `aoe2mm.log`：
+/// 当前文件刚滚走、新文件还没写第一行时，只认固定文件名会读到空内容。
+fn newest_log_file(dir: &std::path::Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("aoe2mm") || !name.ends_with(".log") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let better = match &best {
+            Some((best_time, _)) => mtime > *best_time,
+            None => true,
+        };
+        if better {
+            best = Some((mtime, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// 读一个日志文件的最后 `max` 行。
+///
+/// 用 `from_utf8_lossy`：日志可能被强杀截断在多字节字符中间，
+/// 这里宁可出现半个中文也不能直接报错（报错就等于用户拿不到日志）。
+fn tail_lines(path: &std::path::Path, max: usize) -> Vec<String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn!(target: "diagnostics", "读取日志文件 {} 失败：{e}", path.display());
+            return Vec::new();
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let total = text.lines().count();
+    let skip = total.saturating_sub(max);
+    text.lines()
+        .skip(skip)
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect()
+}
+
+/// 「设置 → 关于」→「打开日志所在文件夹」。
+///
+/// 首次启动时目录可能还没建（插件在第一条日志写入时才创建），这里主动建一次：
+/// 让用户点开就能看到文件夹，而不是收到“找不到路径”。
+#[tauri::command]
+async fn open_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = logs_dir_for(&app)?;
+        if !dir.is_dir() {
+            fs::create_dir_all(&dir)
+                .map_err(|e| format!("无法创建日志目录 {}：{e}", dir.display()))?;
+        }
+        log::info!(target: "diagnostics", "用户请求打开日志目录：{}", dir.display());
+        #[cfg(windows)]
+        {
+            let shown = dir.display().to_string();
+            std::process::Command::new("explorer.exe")
+                .arg(&dir)
+                .spawn()
+                .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+            Ok(shown)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &dir;
+            Err("仅支持 Windows".to_string())
+        }
+    })
+    .await
+    .map_err(|e| format!("打开日志目录失败：{e}"))?
+}
+
+/// 「复制诊断信息给 AI」的后端数据包：版本 / 系统 / 日志路径 / 最近 100 行日志。
+///
+/// 只回数据，不拼 Prompt：文案与问题描述都在前端（i18n 默认双语），
+/// 后端保持“只读事实”的定位，方便后续单独调整提示词。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsInfo {
+    version: String,
+    os: String,
+    log_dir: String,
+    log_file: String,
+    log_lines: Vec<String>,
+}
+
+#[tauri::command]
+async fn diagnostics_info(app: tauri::AppHandle) -> Result<DiagnosticsInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = logs_dir_for(&app)?;
+        let file = newest_log_file(&dir);
+        let log_lines = match file.as_deref() {
+            Some(path) => tail_lines(path, 100),
+            None => {
+                log::warn!(target: "diagnostics", "日志目录 {} 里没有 aoe2mm*.log", dir.display());
+                Vec::new()
+            }
+        };
+        let log_file = file
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        log::info!(
+            target: "diagnostics",
+            "导出诊断信息：{} 行日志（{}）",
+            log_lines.len(),
+            if log_file.is_empty() { "未找到日志文件" } else { &log_file }
+        );
+        Ok(DiagnosticsInfo {
+            version: update::current_version(),
+            os: format!(
+                "{} {} / {}",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                std::env::var("OS").unwrap_or_else(|_| "unknown".to_string())
+            ),
+            log_dir: dir.display().to_string(),
+            log_file,
+            log_lines,
+        })
+    })
+    .await
+    .map_err(|e| format!("读取诊断信息失败：{e}"))?
 }
 
 /// 「启动游戏」的错误码：后端没有配置游戏根目录（game_root_dir 为空）时返回它，
@@ -2796,12 +2970,25 @@ pub fn run() {
                 None => log::error!(target: "app-exit", "重复启动回调里找不到 label=main 的主窗口"),
             }
         }))
-        // 日志插件紧随其后：日志统一输出到 Stdout，终端里可见
+        // 日志插件紧随其后：Stdout + 落盘双路输出。
+        // v3.2：release 构建的 GUI 没有终端可看，只写 Stdout 等于没有日志；
+        // 现在同时写 %LOCALAPPDATA%\<bundleId>\logs\ 下的 aoe2mm.*.log，
+        // 用户报障时直接要这个文件即可（本次回归排查就是被这一点卡住的）。
         .plugin(
             tauri_plugin_log::Builder::new()
-                .targets([tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                )])
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("aoe2mm".into()),
+                    }),
+                ])
+                // v0.4.5：按大小滚动。单个文件上限 5MB，写满即改名成
+                // aoe2mm_<时间戳>.log，最多保留 5 份旧文件（含当前文件约 30MB 封顶），
+                // 用户长期挂机也不会把硬盘写满。
+                .max_file_size(5 * 1024 * 1024)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
+                // 时间戳用本地时区（默认 UTC，用户对照“几点点的登录按钮”时会差 8 小时）
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                 .level(log::LevelFilter::Info)
                 .level_for("tao", log::LevelFilter::Warn)
                 .level_for("wry", log::LevelFilter::Warn)
@@ -2858,7 +3045,6 @@ pub fn run() {
             mod_stats,
             online_session_status,
             online_startup_session,
-            online_login_targets,
             online_open_login,
             online_open_login_silent,
             online_close_login_window,
@@ -2884,6 +3070,11 @@ pub fn run() {
             set_cache_dir,
             reset_cache_dir,
             open_cache_dir,
+            data_dir_view,
+            migrate_data_dir,
+            open_data_dir,
+            open_logs_dir,
+            diagnostics_info,
             online_index_status,
             online_index_sync,
             online_index_pause,
@@ -2931,4 +3122,58 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    /// 临时目录：每次用不同名字，避免并行测试互相干扰
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "aoe2mm-diag-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tail_lines_keeps_the_last_hundred_only() {
+        let dir = temp_dir("tail");
+        let path = dir.join("aoe2mm.log");
+        let body: String = (1..=150).map(|i| format!("line{i}\n")).collect();
+        fs::write(&path, body).unwrap();
+        let lines = tail_lines(&path, 100);
+        assert_eq!(lines.len(), 100);
+        assert_eq!(lines.first().map(|s| s.as_str()), Some("line51"));
+        assert_eq!(lines.last().map(|s| s.as_str()), Some("line150"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newest_log_file_ignores_unrelated_files_and_picks_latest() {
+        let dir = temp_dir("newest");
+        fs::write(dir.join("aoe2mm.log"), "current\n").unwrap();
+        fs::write(dir.join("aoe2mm_2026-11-06.log"), "rotated\n").unwrap();
+        // 干扰项：同目录的其他文件不应被当成日志
+        fs::write(dir.join("readme.txt"), "x").unwrap();
+        let picked = newest_log_file(&dir).expect("应该找到一个日志文件");
+        let name = picked.file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("aoe2mm") && name.ends_with(".log"));
+        assert!(!tail_lines(&picked, 10).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_lines_on_missing_file_returns_empty_instead_of_panicking() {
+        let dir = temp_dir("missing");
+        assert!(tail_lines(&dir.join("nope.log"), 100).is_empty());
+        assert!(newest_log_file(&dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -155,6 +155,11 @@ export interface AppSettings {
   modInfoCacheDir?: string | null;
   /** v3.2：译文缓存（translation_cache.json / online_titles_zh.json）目录；null = 应用配置目录 */
   translationCacheDir?: string | null;
+  /**
+   * v1.x：**数据与缓存总目录**——图片/在线数据/索引/译文/收藏/预设/队列/登录凭证
+   * 共用的根目录；null / 缺省 = 默认的 %APPDATA%\<bundleId>。
+   */
+  dataDir?: string | null;
 
   /**
    * v3.3：游戏根目录（含 AoE2DE_s.exe 的那一层，如 F:\Games\AoE2DE）。
@@ -185,6 +190,23 @@ export interface CacheDirEntry {
 
 export interface CacheDirsView {
   dirs: CacheDirEntry[];
+}
+
+/** v1.x：数据与缓存总目录（Rust 的 data_dir_view / migrate_data_dir 返回） */
+export interface DataDirView {
+  /** 当前实际生效的目录（配置可用就是配置的，否则是默认的） */
+  path: string;
+  /** 默认目录（%APPDATA%\<bundleId>），迁移 / 回退时的参照点 */
+  defaultPath: string;
+  /** true = 用户自定义且正在生效 */
+  isCustom: boolean;
+  exists: boolean;
+  /** 白名单条目合计占用（字节） */
+  totalBytes: number;
+  /** 其中图片缓存占用（字节） */
+  imagesBytes: number;
+  /** true = 检测到旧版「三类分目录」配置，迁移后会被清空 */
+  legacy: boolean;
 }
 
 /** v0.3 预设：一条记录对应 mod-status.json 里的一条 Mods 项 */

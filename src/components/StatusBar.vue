@@ -11,8 +11,9 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { getNetworkSettings, loginTargets, openLogin } from "../online/service";
+import { getNetworkSettings, openLogin } from "../online/service";
 import { isNetworkError } from "../online/networkError";
+import { openExternalUrl } from "../api";
 import { translateBackendMessage } from "../format";
 import {
   ensureSession,
@@ -22,17 +23,15 @@ import {
   sessionInfo,
   sessionPhase,
   setStatusMessage,
+  setStatusMessageKey,
   statusMessage,
 } from "../sessionState";
-import type { LoginTarget } from "../online/types";
 
 const props = defineProps<{ localCount: number; mode: "local" | "online" }>();
-const { t, te } = useI18n();
+const { t } = useI18n();
 
 const root = ref<HTMLElement | null>(null);
 const menuOpen = ref(false);
-const platforms = ref<LoginTarget[]>([]);
-const platform = ref("microsoft");
 const loggingIn = ref(false);
 const proxySourceKey = ref<string | null>(null);
 /**
@@ -88,19 +87,20 @@ function clock(ms: number): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function labelFor(target: LoginTarget): string {
-  const key = `online.login.${target.key}.label`;
-  return te(key) ? t(key) : target.label;
-}
-
-/** 登录方式说明：同样以 i18n 为准，后端 hint（简体中文原文）只在键缺失时兜底 */
-function hintFor(target: LoginTarget): string {
-  const key = `online.login.${target.key}.hint`;
-  return te(key) ? t(key) : target.hint;
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+/** 帝国时代官网账号中心：微软 / Xbox 登录与 Steam 绑定的唯一入口（见 Rust open_external 白名单） */
+const ACCOUNT_CENTER_URL = "https://auth.ageofempires.com/";
+
+async function openAccountCenter(): Promise<void> {
+  menuOpen.value = false;
+  try {
+    await openExternalUrl(ACCOUNT_CENTER_URL);
+  } catch (e) {
+    setStatusMessage(translateBackendMessage(typeof e === "string" ? e : String(e)));
+  }
 }
 
 /** 代理链路只读一次：底栏不轮询网络设置（保存后由设置弹窗自己提示） */
@@ -122,15 +122,6 @@ async function loadProxy() {
 
 async function toggleMenu() {
   menuOpen.value = !menuOpen.value;
-  if (!menuOpen.value || platforms.value.length) return;
-  try {
-    platforms.value = await loginTargets();
-    if (!platforms.value.some((item) => item.key === platform.value)) {
-      platform.value = platforms.value[0]?.key ?? "microsoft";
-    }
-  } catch {
-    /* 后端不可用时仍保留「重新校验」按钮 */
-  }
 }
 
 /** 用户点击「立即重新校验」：强制再探一次，成功后推一次手工刷新信号 */
@@ -138,7 +129,7 @@ async function recheck() {
   menuOpen.value = false;
   const ok = await ensureSession(true);
   if (ok) {
-    setStatusMessage(t("statusbar.loginDone"));
+    setStatusMessageKey("statusbar.loginDone");
     requestManualRefresh();
   }
 }
@@ -151,9 +142,9 @@ async function startLogin() {
   if (loggingIn.value) return;
   loggingIn.value = true;
   menuOpen.value = false;
-  setStatusMessage(t("statusbar.loginWait"));
+  setStatusMessageKey("statusbar.loginWait");
   try {
-    await openLogin(platform.value);
+    await openLogin();
   } catch (e) {
     setStatusMessage(translateBackendMessage(typeof e === "string" ? e : t("statusbar.loginFailed")));
     loggingIn.value = false;
@@ -163,12 +154,12 @@ async function startLogin() {
     await sleep(POLL_INTERVAL_MS);
     const ok = await ensureSession(true);
     if (ok) {
-      setStatusMessage(t("statusbar.loginDone"));
+      setStatusMessageKey("statusbar.loginDone");
       loggingIn.value = false;
       return;
     }
   }
-  setStatusMessage(t("statusbar.loginTimeout"));
+  setStatusMessageKey("statusbar.loginTimeout");
   loggingIn.value = false;
 }
 
@@ -212,18 +203,14 @@ onBeforeUnmount(() => {
 
     <div v-if="menuOpen" class="sb-menu">
       <div class="sb-menu-title">{{ t("statusbar.loginTitle") }}</div>
-      <button
-        v-for="item in platforms"
-        :key="item.key"
-        type="button"
-        class="sb-menu-item"
-        :class="{ active: platform === item.key }"
-        :disabled="loggingIn"
-        @click="platform = item.key"
-      >
-        <span class="sb-menu-label">{{ labelFor(item) }}</span>
-        <span class="sb-menu-hint">{{ hintFor(item) }}</span>
-      </button>
+      <div class="sb-menu-platform">
+        <span class="sb-menu-label">{{ t("online.loginMicrosoftLabel") }}</span>
+        <span class="sb-menu-hint">{{ t("online.loginMicrosoftHint") }}</span>
+      </div>
+      <p class="sb-menu-bind">
+        {{ t("online.loginSteamBindNote") }}
+        <button type="button" class="sb-menu-link" @click="openAccountCenter">{{ t("online.loginAccountCenter") }}</button>
+      </p>
       <div class="sb-menu-actions">
         <button type="button" :disabled="loggingIn" @click="startLogin">
           {{ loggingIn ? t("statusbar.loginWait") : t("statusbar.loginOpen") }}
@@ -366,38 +353,47 @@ onBeforeUnmount(() => {
   letter-spacing: 1.2px;
   text-transform: uppercase;
 }
-.sb-menu-item {
+/* v3.3：平台选项已收敛为单一微软 / Xbox 入口，所以不再需要 hover / active 态 */
+.sb-menu-platform {
   display: flex;
   flex-direction: column;
   gap: 2px;
   width: 100%;
   margin-bottom: 6px;
   padding: 7px 9px;
-  text-align: left;
-  border: 1px solid var(--line);
+  border: 1px solid var(--gold);
   border-radius: 3px;
-  background: var(--bg-panel);
-  color: var(--parch);
-  cursor: pointer;
-}
-.sb-menu-item:hover {
-  border-color: var(--gold-dim);
-}
-.sb-menu-item.active {
-  border-color: var(--gold);
   background: linear-gradient(180deg, var(--item-active-top), var(--bg-hover));
+  text-align: left;
 }
 .sb-menu-label {
   font-size: 12px;
-  color: var(--parch);
-}
-.sb-menu-item.active .sb-menu-label {
   color: var(--gold-bright);
 }
 .sb-menu-hint {
   font-size: 10px;
   line-height: 1.5;
   color: var(--muted);
+}
+/* v3.3：Steam 版用户绑定微软账号的提示（可点击跳官网账号中心）。
+   注意不能用 `.sb-menu-note`：那一类是状态/错误提示（金色），复用会把报错样式冲掉。 */
+.sb-menu-bind {
+  margin: 0 0 6px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.sb-menu-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--gold-bright);
+  font-size: 10px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.sb-menu-link:hover {
+  color: var(--gold);
 }
 .sb-menu-actions {
   display: flex;

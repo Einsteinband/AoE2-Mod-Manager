@@ -15,11 +15,11 @@ pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 /// DPAPI 加密的会话 Cookie 缓存文件（不属于 settings 明文）
+///
+/// v1.x：跟随「数据与缓存总目录」。DPAPI blob 里不含路径信息、密钥由当前用户 SID 派生，
+/// 所以换目录后同一台机器同一账户仍然能解密，不需要重新加密。
 pub fn session_cache_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join("session.bin"))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    crate::data_root(app).map(|dir| dir.join("session.bin"))
 }
 
 pub fn load_for_app(app: &tauri::AppHandle) -> Settings {

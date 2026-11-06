@@ -17,9 +17,11 @@ import {
   appVersion,
   checkUpdate,
   detectGameRoot,
+  diagnosticsInfo,
   fetchGithubReleases,
   getSettings,
   openExternalUrl,
+  openLogsDir,
   renderReleaseMarkdown,
   setEnableIndexing,
   setEnableLocalSearch,
@@ -56,7 +58,7 @@ import {
   runModUpdateCheck,
 } from "../modUpdates";
 import type { CacheOverview, NetworkSettingsView, TitleJobStatus, TranslateSettingsView, TranslationCacheStat } from "../online/types";
-import type { CacheDirEntry, CacheDirKind, CacheDirsView, UpdateInfo } from "../types";
+import type { DataDirView, UpdateInfo } from "../types";
 import { CARD_SIZE_MAX, CARD_SIZE_MIN, CARD_SIZE_STEP, clampCardSize } from "../composables/useViewPrefs";
 import {
   CARD_FONT_SIZE_MAX,
@@ -593,6 +595,91 @@ function formatReleaseDate(value: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
+// ---------------- 关于：本地日志 + 复制诊断信息给 AI（v0.4.5） ----------------
+
+/** 用户填写的问题描述（可空，空则用默认文案） */
+const diagProblem = ref("");
+const diagBusy = ref(false);
+const diagError = ref<string | null>(null);
+const diagMessage = ref<string | null>(null);
+/** 「已复制」提示弹窗 */
+const diagCopied = ref(false);
+
+/**
+ * 写系统剪贴板。
+ *
+ * 优先用 WebView2 的 Clipboard API（tauri.localhost 属安全上下文，用户手势下可用）；
+ * 失败再退回 textarea + execCommand，保底不出现「点了没反应」。
+ */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 忽略，走下面的兜底
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 打开日志文件夹：目录由后端创建并拉起资源管理器 */
+async function openLogsFolder() {
+  diagError.value = null;
+  diagMessage.value = null;
+  try {
+    const path = await openLogsDir();
+    diagMessage.value = t("settings.diagOpenLogsDone", { path });
+  } catch (e) {
+    diagError.value = describe(e);
+  }
+}
+
+/** 拼 Prompt → 写剪贴板 → 弹「已复制」引导 */
+async function copyDiagnostics() {
+  diagBusy.value = true;
+  diagError.value = null;
+  diagMessage.value = null;
+  try {
+    const info = await diagnosticsInfo();
+    const problem = diagProblem.value.trim() || t("settings.diagProblemFallback");
+    const logs = info.logLines.length
+      ? info.logLines.join("\n")
+      : t("settings.diagNoLog");
+    const text = t("settings.diagPrompt", {
+      version: info.version,
+      problem,
+      os: info.os,
+      logFile: info.logFile || info.logDir,
+      logs,
+    });
+    const ok = await copyTextToClipboard(text);
+    if (!ok) {
+      diagError.value = t("settings.diagCopyFailed", { error: "clipboard rejected" });
+      return;
+    }
+    diagCopied.value = true;
+  } catch (e) {
+    diagError.value = t("settings.diagCopyFailed", { error: describe(e) });
+  } finally {
+    diagBusy.value = false;
+  }
+}
+
 // ---------------- 通用：本地模组批量更新检测（用户点击才触发） ----------------
 
 const modStatusText = computed(() => {
@@ -690,111 +777,99 @@ async function doClearCache() {
   }
 }
 
-// ---------------- v3.2：缓存与存储（三类本地缓存目录） ----------------
+// ---------------- v1.x：数据与缓存总目录（设置 → 缓存与存储） ----------------
 //
-// 三行固定顺序：图片 / 模组信息 / 翻译。目录由 Rust 的 get_cache_dir 统一裁决
-// （读配置优先、目录不可用则回退默认），前端只负责展示与触发，不在本地拼路径。
+// 心智模型：图片/在线数据/索引/译文/收藏/预设/队列/登录凭证共用一个根目录。
+// 前端只负责展示与触发；路径裁决、目标体检、迁移与回滚全在 Rust（data_dir.rs）。
 
-const CACHE_DIR_KINDS: CacheDirKind[] = ["image", "modinfo", "translation"];
+const dataDirView = ref<DataDirView | null>(null);
+const dataDirBusy = ref(false);
+const dataDirMessage = ref<string | null>(null);
+const dataDirError = ref<string | null>(null);
+/** 已选好、等待二次确认的目标目录（null = 没有待确认的迁移） */
+const migrateTarget = ref<string | null>(null);
+const migrateError = ref<string | null>(null);
 
-const cacheDirs = ref<CacheDirEntry[]>([]);
-/** 正在处理的那一行（kind）：按钮置灰 + 转圈，避免连点连开窗口 */
-const cacheDirBusy = ref<CacheDirKind | null>(null);
-const cacheDirMessage = ref<string | null>(null);
-const cacheDirError = ref<string | null>(null);
+const dataDirSizeText = computed(() => {
+  const view = dataDirView.value;
+  if (!view) return t("cache.reading");
+  const total = t("settings.dataDirSize", { size: formatBytes(view.totalBytes) });
+  return view.imagesBytes > 0
+    ? total + " · " + t("settings.dataDirImageSize", { size: formatBytes(view.imagesBytes) })
+    : total;
+});
 
-function cacheDirTitle(kind: CacheDirKind): string {
-  if (kind === "image") return t("settings.cacheDirImage");
-  if (kind === "modinfo") return t("settings.cacheDirModInfo");
-  return t("settings.cacheDirTranslation");
-}
-
-/** 固定三行：后端异常返回空时也保留行位，界面不塌陷 */
-const cacheDirRows = computed<CacheDirEntry[]>(() =>
-  CACHE_DIR_KINDS.map(
-    (kind) =>
-      cacheDirs.value.find((entry) => entry.kind === kind) ?? {
-        kind,
-        path: "",
-        defaultPath: "",
-        isCustom: false,
-        exists: false,
-      },
-  ),
-);
-
-async function loadCacheDirs() {
+async function loadDataDir() {
   try {
-    const view = await invoke<CacheDirsView>("cache_dirs");
-    cacheDirs.value = view.dirs;
+    dataDirView.value = await invoke<DataDirView>("data_dir_view");
   } catch {
-    cacheDirs.value = [];
+    dataDirView.value = null;
   }
 }
 
-/** 换目录后「在线模组」Tab 里的缓存概览（路径 / 体积）也要跟着刷新 */
-function applyCacheDirsView(view: CacheDirsView) {
-  cacheDirs.value = view.dirs;
-  void loadCacheStat();
+/** 打开目录：Rust 用 explorer.exe 拉起，目录不存在会先建出来 */
+async function openDataDir() {
+  if (dataDirBusy.value) return;
+  dataDirError.value = null;
+  dataDirMessage.value = null;
+  try {
+    await invoke<string>("open_data_dir");
+  } catch (e) {
+    dataDirError.value = t("settings.dataDirFailed", { msg: describe(e) });
+  }
 }
 
-/** 更改路径：先选文件夹，再由 Rust 校验可写并落盘；取消 / 校验失败都不改配置 */
-async function pickCacheDir(entry: CacheDirEntry) {
-  if (cacheDirBusy.value) return;
-  cacheDirError.value = null;
-  cacheDirMessage.value = null;
+/**
+ * 迁移第一步：只选目录，**不立刻搬**。
+ * 迁移含 session.bin（登录凭证）等敏感文件，必须先经过二次确认弹窗。
+ */
+async function migrateDataDir() {
+  if (dataDirBusy.value || migrateTarget.value) return;
+  dataDirError.value = null;
+  dataDirMessage.value = null;
+  migrateError.value = null;
   try {
     const picked = await openFolderDialog({
       directory: true,
       multiple: false,
-      title: `${t("settings.cacheDirChange")} · ${cacheDirTitle(entry.kind)}`,
-      defaultPath: entry.path || undefined,
+      title: t("settings.dataDirPickTitle"),
+      defaultPath: dataDirView.value?.path || undefined,
     });
     if (typeof picked !== "string" || !picked) return; // 用户取消
-    cacheDirBusy.value = entry.kind;
-    const view = await invoke<CacheDirsView>("set_cache_dir", {
-      kind: entry.kind,
-      newPath: picked,
-    });
-    applyCacheDirsView(view);
-    cacheDirMessage.value = t("settings.cacheDirChanged", { name: cacheDirTitle(entry.kind) });
+    migrateTarget.value = picked;
   } catch (e) {
-    cacheDirError.value = t("settings.cacheDirFailed", { msg: describe(e) });
-  } finally {
-    cacheDirBusy.value = null;
+    dataDirError.value = t("settings.dataDirFailed", { msg: describe(e) });
   }
 }
 
-/** 恢复默认：写回 null，不迁移、不删除任何文件 */
-async function resetCacheDir(entry: CacheDirEntry) {
-  if (cacheDirBusy.value) return;
-  cacheDirBusy.value = entry.kind;
-  cacheDirError.value = null;
-  cacheDirMessage.value = null;
-  try {
-    const view = await invoke<CacheDirsView>("reset_cache_dir", { kind: entry.kind });
-    applyCacheDirsView(view);
-    cacheDirMessage.value = t("settings.cacheDirResetDone", { name: cacheDirTitle(entry.kind) });
-  } catch (e) {
-    cacheDirError.value = t("settings.cacheDirFailed", { msg: describe(e) });
-  } finally {
-    cacheDirBusy.value = null;
-  }
+function cancelMigrate() {
+  if (dataDirBusy.value) return;
+  migrateTarget.value = null;
+  migrateError.value = null;
 }
 
-/** 打开目录：由 Rust 用 explorer.exe 拉起，目录不存在会先建出来 */
-async function openCacheDir(entry: CacheDirEntry) {
-  if (cacheDirBusy.value) return;
-  cacheDirBusy.value = entry.kind;
-  cacheDirError.value = null;
-  cacheDirMessage.value = null;
+/** 迁移第二步：用户确认后才真正执行；Rust 侧任何失败都会自动回滚并回传原因 */
+async function runMigrate() {
+  const target = migrateTarget.value;
+  if (!target || dataDirBusy.value) return;
+  dataDirBusy.value = true;
+  dataDirError.value = null;
+  dataDirMessage.value = null;
+  migrateError.value = null;
   try {
-    await invoke<string>("open_cache_dir", { kind: entry.kind });
-    cacheDirMessage.value = t("settings.cacheDirOpened", { name: cacheDirTitle(entry.kind) });
+    const view = await invoke<DataDirView>("migrate_data_dir", { newPath: target });
+    dataDirView.value = view;
+    dataDirMessage.value = t("settings.dataDirMigrated", { path: view.path });
+    migrateTarget.value = null;
+    // 卡片上的封面 URL 是按旧目录拼的，重载一次让它们全部指向新目录
+    // （确认弹窗本来就承诺「迁移后会重新加载」）
+    window.setTimeout(() => window.location.reload(), 600);
   } catch (e) {
-    cacheDirError.value = t("settings.cacheDirFailed", { msg: describe(e) });
+    // Rust 已给出中文原因（含「已回滚」与回滚失败清单），留在弹窗里展示
+    migrateError.value = describe(e);
+    void loadDataDir();
   } finally {
-    cacheDirBusy.value = null;
+    dataDirBusy.value = false;
   }
 }
 
@@ -1262,7 +1337,7 @@ onMounted(async () => {
   void loadLocalSearch();
   void loadNetwork();
   void loadCacheStat();
-  void loadCacheDirs();
+  void loadDataDir();
   void loadGameRoot();
   void loadTranslate();
   void loadTranslationCache();
@@ -1923,60 +1998,56 @@ onBeforeUnmount(() => {
             <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
           </section>
 
-          <!-- 缓存与存储（v3.2）：图片 / 模组信息 / 翻译 三类缓存的存放位置 -->
+          <!-- 数据与缓存（v1.x）：单目录 + 二次确认迁移 -->
           <section v-else-if="tab === 'storage'" class="settings-card">
-            <p class="settings-hint">{{ t("settings.cacheDirsNote") }}</p>
-
-            <div v-for="entry in cacheDirRows" :key="entry.kind" class="cache-dir-row">
+            <div class="cache-dir-row">
               <div class="row-label">
                 <span class="row-title">
-                  {{ cacheDirTitle(entry.kind) }}
-                  <span v-if="entry.isCustom" class="cache-dir-badge">
-                    {{ t("settings.cacheDirCustom") }}
+                  {{ t("settings.dataDirTitle") }}
+                  <span class="cache-dir-badge">
+                    {{
+                      dataDirView?.isCustom
+                        ? t("settings.dataDirCustomBadge")
+                        : t("settings.dataDirDefaultBadge")
+                    }}
                   </span>
                 </span>
-                <span
-                  class="row-note mono cache-dir-path"
-                  :title="entry.path || ''"
-                >
-                  {{ entry.path || "—" }}
+                <span class="row-note mono cache-dir-path" :title="dataDirView?.path || ''">
+                  {{ dataDirView?.path || "—" }}
                 </span>
-                <span v-if="entry.isCustom && !entry.exists" class="cache-dir-warn">
-                  {{ t("settings.cacheDirMissing") }}
+                <span class="row-note data-dir-size">{{ dataDirSizeText }}</span>
+                <span v-if="dataDirView && !dataDirView.exists" class="cache-dir-warn">
+                  {{ t("settings.dataDirMissing") }}
                 </span>
               </div>
               <div class="cache-dir-actions">
                 <button
                   type="button"
                   class="settings-check"
-                  :disabled="cacheDirBusy !== null"
-                  @click="pickCacheDir(entry)"
+                  :disabled="dataDirBusy"
+                  @click="openDataDir"
                 >
-                  <span v-if="cacheDirBusy === entry.kind" class="spinner"></span>
-                  {{ t("settings.cacheDirChange") }}
+                  {{ t("settings.dataDirOpen") }}
                 </button>
                 <button
                   type="button"
                   class="settings-check"
-                  :disabled="cacheDirBusy !== null"
-                  @click="openCacheDir(entry)"
+                  :disabled="dataDirBusy"
+                  @click="migrateDataDir"
                 >
-                  {{ t("settings.cacheDirOpen") }}
-                </button>
-                <button
-                  v-if="entry.isCustom"
-                  type="button"
-                  class="cache-dir-reset"
-                  :disabled="cacheDirBusy !== null"
-                  @click="resetCacheDir(entry)"
-                >
-                  {{ t("settings.cacheDirReset") }}
+                  <span v-if="dataDirBusy" class="spinner"></span>
+                  {{ dataDirBusy ? t("settings.dataDirMigrating") : t("settings.dataDirMigrate") }}
                 </button>
               </div>
             </div>
 
-            <div v-if="cacheDirError" class="settings-msg error">{{ cacheDirError }}</div>
-            <div v-else-if="cacheDirMessage" class="settings-msg">{{ cacheDirMessage }}</div>
+            <p class="settings-hint">{{ t("settings.dataDirNote") }}</p>
+
+            <div v-if="dataDirView?.legacy" class="settings-msg">
+              {{ t("settings.dataDirLegacy") }}
+            </div>
+            <div v-if="dataDirError" class="settings-msg error">{{ dataDirError }}</div>
+            <div v-else-if="dataDirMessage" class="settings-msg">{{ dataDirMessage }}</div>
           </section>
 
           <!-- 关于（v2.0）：「软件更新」从通用 Tab 整体搬到这里（版本号 / 检查更新 / 发布页） -->
@@ -2039,6 +2110,40 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
+            <!-- v0.4.5：本地日志 — 不用再让用户自己翻文件夹找日志 -->
+            <div class="diag-block">
+              <div class="diag-head">
+                <span class="row-title">{{ t("settings.diagTitle") }}</span>
+                <span class="row-note">{{ t("settings.diagNote") }}</span>
+              </div>
+              <input
+                v-model="diagProblem"
+                type="text"
+                class="diag-input"
+                maxlength="200"
+                :placeholder="t('settings.diagProblemPlaceholder')"
+              />
+              <div class="diag-actions">
+                <button type="button" class="settings-check" :disabled="diagBusy" @click="openLogsFolder">
+                  {{ t("settings.diagOpenLogs") }}
+                </button>
+                <button
+                  type="button"
+                  class="settings-check diag-copy"
+                  :disabled="diagBusy"
+                  :title="t('settings.diagCopyHint')"
+                  @click="copyDiagnostics"
+                >
+                  <span v-if="diagBusy" class="spinner"></span>
+                  {{ diagBusy ? t("settings.diagCopying") : t("settings.diagCopy") }}
+                </button>
+              </div>
+              <p v-if="diagError" class="settings-status bad">{{ diagError }}</p>
+              <p v-else-if="diagMessage" class="settings-status ok">{{ diagMessage }}</p>
+            </div>
+
+            <div class="settings-sep"></div>
+
             <!-- v3.1：更新历史（GitHub Releases，由 Rust 拉取，前端不直连 API） -->
             <div class="about-history-head">
               <span class="row-title">{{ t("settings.changelogTitle") }}</span>
@@ -2078,6 +2183,39 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- v0.4.5：「已复制」引导（告诉玩家粘贴给 AI 就行，不用懂日志） -->
+    <div v-if="diagCopied" class="modal-backdrop" @click.self="diagCopied = false">
+      <div class="modal confirm-modal" role="dialog" aria-modal="true">
+        <div class="modal-head">
+          <h2>{{ t("settings.diagCopiedTitle") }}</h2>
+          <span class="modal-sub">{{ t("settings.diagCopiedSubtitle") }}</span>
+          <button type="button" class="modal-x" @click="diagCopied = false">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="confirm-text">{{ t("settings.diagCopiedMessage") }}</p>
+          <div class="confirm-actions">
+            <button type="button" class="primary" @click="diagCopied = false">
+              {{ t("settings.diagCopiedOk") }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- v1.x：数据目录迁移的二次确认（含登录凭证，绝不能直接执行） -->
+    <ConfirmDialog
+      v-if="migrateTarget"
+      :title="t('settings.dataDirConfirmTitle')"
+      :message="t('settings.dataDirConfirmBody')"
+      :detail="migrateTarget"
+      :confirm-label="t('settings.dataDirConfirmOk')"
+      :cancel-label="t('settings.dataDirConfirmCancel')"
+      :busy="dataDirBusy"
+      :error="migrateError"
+      @confirm="runMigrate"
+      @cancel="cancelMigrate"
+    />
 
     <!-- v3.0：恢复默认排版的二次确认（叠在设置弹窗之上） -->
     <ConfirmDialog
@@ -2476,6 +2614,38 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 10px;
 }
+
+/* v0.4.5 关于页：日志诊断区（问题描述输入框 + 两枚按钮） */
+.diag-block {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.diag-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.diag-input {
+  width: 100%;
+  font-size: calc(12px * var(--global-scale));
+  padding: 7px 9px;
+}
+.diag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+/* 主按钮：金色描边高亮，和「检查更新」区分开 */
+.diag-copy {
+  border-color: var(--gold-dim);
+  color: var(--gold-text);
+}
+.diag-copy:hover:not(:disabled) {
+  border-color: var(--gold-text);
+  background: rgba(var(--accent-rgb), 0.1);
+}
 .about-history {
   display: flex;
   flex-direction: column;
@@ -2602,6 +2772,11 @@ onBeforeUnmount(() => {
 .cache-dir-reset:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* v1.x：总目录单行 —— 复用 v3.2 的 .cache-dir-* 骨架，只补体积行 */
+.data-dir-size {
+  color: var(--parch-dim);
 }
 
 /* v3.3：游戏根目录一行 —— 复用 .settings-row 的两列布局，

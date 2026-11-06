@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 /// 软件自己的元数据文件，和 settings.json 放在同一个配置目录。
 /// 绝不写入游戏目录（local / subscribed），避免游戏扫描到未知文件。
@@ -144,10 +143,8 @@ pub fn display_tags(meta: &ModMeta) -> Vec<String> {
 }
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v1.x：跟随「数据与缓存总目录」（未自定义时即 %APPDATA%\<bundleId>）
+    crate::data_root(app).map(|dir| dir.join(FILE_NAME))
 }
 
 pub fn load(path: &Path) -> Store {

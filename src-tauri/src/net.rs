@@ -317,6 +317,9 @@ pub fn resolve(config: &NetConfig) -> Result<NetResolution, String> {
 pub fn ureq_proxy(resolved: &NetResolution) -> Result<Option<ureq::Proxy>, String> {
     match resolved.proxy_url.as_deref() {
         Some(url) => ureq::Proxy::new(url).map(Some).map_err(|e| {
+            // 代理写错（含 socks:// 这类 ureq 不支持的写法）时，后续所有请求都会失败；
+            // 这里落一条 error，用户报「登录/更新全挂」时能第一眼看到代理地址不对。
+            log::error!(target: "http", "代理地址无法被 HTTP 客户端使用（{url}）：{e}");
             format!("代理地址 {url} 无法被 HTTP 客户端使用：{e}")
         }),
         None => Ok(None),

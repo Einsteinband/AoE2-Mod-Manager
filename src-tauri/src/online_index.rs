@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
 use crate::online::api::{ApiClient, ApiFailure, GAME_AOE2DE};
 use crate::online::models::{pick_str, FindResult, OnlineModSummary};
@@ -426,10 +426,8 @@ fn lock_runtime() -> std::sync::MutexGuard<'static, Runtime> {
 }
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v1.x：跟随「数据与缓存总目录」（未自定义时即 %APPDATA%\<bundleId>）
+    crate::data_root(app).map(|dir| dir.join(FILE_NAME))
 }
 
 fn read_store(path: &Path) -> Store {

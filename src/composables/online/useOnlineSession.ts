@@ -13,7 +13,6 @@ import {
   clearLoginCache,
   closeLoginWindow,
   findMods,
-  loginTargets,
   modTags,
   openLogin,
   openLoginSilent,
@@ -24,7 +23,6 @@ import {
 import {
   FALLBACK_TAGS,
   SORT_OPTIONS,
-  type LoginTarget,
   type ModTag,
   type SessionStatus,
 } from "../../online/types";
@@ -49,7 +47,7 @@ export function useOnlineSession(deps: {
   /** 开始登录：清掉上一条安装提示（避免“登录前那个模组的报错”一直挂着） */
   onLoginStart?: () => void;
 }) {
-  const { t, te } = useI18n();
+  const { t } = useI18n();
 
   const session = ref<SessionStatus | null>(null);
   const sessionError = ref<string | null>(null);
@@ -72,10 +70,6 @@ export function useOnlineSession(deps: {
     { immediate: true },
   );
 
-  /** 登录平台（Steam / 微软 / PSN），由 Rust 侧提供 URL */
-  const platforms = ref<LoginTarget[]>([]);
-  const platform = ref("microsoft");
-
   /** 会话 / 退出登录的临时提示（代理与登录项已迁到 SettingsModal） */
   const netClearing = ref(false);
   const netError = ref<string | null>(null);
@@ -87,17 +81,6 @@ export function useOnlineSession(deps: {
 
   let pollTimer: number | null = null;
   let silentTimer: number | null = null;
-
-  /** 登录入口按钮：后端只给平台 key，文案走 i18n（后端 label/hint 作为兜底） */
-  function loginLabel(target: LoginTarget): string {
-    const key = `online.login.${target.key}.label`;
-    return te(key) ? t(key) : target.label;
-  }
-
-  function loginHint(target: LoginTarget): string {
-    const key = `online.login.${target.key}.hint`;
-    return te(key) ? t(key) : target.hint;
-  }
 
   /** 给可能卡住的 invoke 加超时，避免界面永远停在“检查中” */
   function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
@@ -123,18 +106,6 @@ export function useOnlineSession(deps: {
     await ensureSession(true);
     session.value = sessionInfo.value;
     sessionError.value = sharedSessionError.value;
-  }
-
-  /** 平台清单（后端本地常量，不走网络） */
-  async function loadPlatforms(): Promise<void> {
-    try {
-      platforms.value = await loginTargets();
-      if (!platforms.value.some((p) => p.key === platform.value)) {
-        platform.value = platforms.value[0]?.key ?? "microsoft";
-      }
-    } catch (e) {
-      netError.value = t("online.loginTargetsFailed", { msg: messageOf(e) });
-    }
   }
 
   /** 分类字典：GET /api/v4/mods/Tags（匿名可读）；失败时用内置 17 项兜底 */
@@ -216,14 +187,13 @@ export function useOnlineSession(deps: {
     }
   }
 
-  async function startLogin(target = platform.value): Promise<void> {
+  async function startLogin(): Promise<void> {
     waitingLogin.value = true;
     sessionError.value = null;
     deps.onLoginStart?.();
-    const chosen = platforms.value.find((p) => p.key === target);
-    void uiLog("info", `user clicked sign in: platform=${target} url=${chosen?.url ?? "(not loaded)"}`);
+    void uiLog("info", "user clicked sign in (Microsoft / Xbox)");
     try {
-      await withTimeout(openLogin(target), 25_000, t("online.openLogin"));
+      await withTimeout(openLogin(), 25_000, t("online.openLogin"));
     } catch (e) {
       waitingLogin.value = false;
       sessionError.value = messageOf(e);
@@ -291,7 +261,7 @@ export function useOnlineSession(deps: {
     silentAuthNote.value = t("online.silentNote", { reason });
     void uiLog("info", `background silent sign-in started: ${reason}`);
     try {
-      await withTimeout(openLoginSilent(platform.value), 15_000, t("online.openLogin"));
+      await withTimeout(openLoginSilent(), 15_000, t("online.openLogin"));
     } catch (e) {
       silentAuth.value = false;
       silentAuthNote.value = t("online.silentFailedStart", { msg: messageOf(e) });
@@ -359,8 +329,6 @@ export function useOnlineSession(deps: {
     waitingLogin,
     probing,
     probeResult,
-    platforms,
-    platform,
     netClearing,
     netError,
     netMessage,
@@ -368,10 +336,7 @@ export function useOnlineSession(deps: {
     tagsError,
     silentAuth,
     silentAuthNote,
-    loginLabel,
-    loginHint,
     refreshSession,
-    loadPlatforms,
     loadTags,
     runProbe,
     doLogout,

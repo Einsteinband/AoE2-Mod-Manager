@@ -219,6 +219,12 @@ pub struct Settings {
     /// 译文缓存（translation_cache.json / online_titles_zh.json）的存放目录；None = 应用配置目录
     #[serde(default)]
     pub translation_cache_dir: Option<String>,
+    /// v1.x：**数据与缓存总目录**——图片缓存、在线缓存、索引、译文、收藏、预设、
+    /// 下载队列、DPAPI 会话凭证全部落在这个根的下面。None / 空串 / 目录不可用
+    /// 一律回退默认的 `%APPDATA%\<bundleId>`，判定统一在 [`crate::data_dir::data_root`]。
+    /// `settings.json` 本身永远留在默认位置——它是本字段的锚点，跟着搬会死循环。
+    #[serde(default)]
+    pub data_dir: Option<String>,
 
     /// v3.3：「启动游戏」用的游戏根目录（含 AoE2DE_s.exe 的那一层，如
     /// `F:\Games\AoE2DE`）。启动走 Steam 协议，这里只用于校验与展示；
@@ -500,6 +506,8 @@ impl Default for Settings {
             image_cache_dir: None,
             mod_info_cache_dir: None,
             translation_cache_dir: None,
+            // v1.x：默认不自定义总目录（= 用 %APPDATA%\<bundleId>）
+            data_dir: None,
             // v3.3：游戏根目录默认未配置（启动前会引导用户去设置里选一次）
             game_root_dir: None,
             // v2.3 遗留字段：新装 / 默认值里一律为空

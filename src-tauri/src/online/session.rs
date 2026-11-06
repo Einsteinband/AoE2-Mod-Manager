@@ -15,11 +15,6 @@ use crate::settings;
 pub const ACCOUNT_WINDOW: &str = "aoe-account";
 /// 官网登录入口：实测该地址会 302 到 login.microsoftonline.com（官方行为，不是 bug）
 pub const LOGIN_URL: &str = "https://auth.ageofempires.com/";
-/// 实测来源：www.ageofempires.com/mods 登录弹窗里的 "Sign in with your Steam Account"
-/// → 302 到 steamcommunity.com/openid/login → 回跳 /signin-steam?state=…
-pub const LOGIN_STEAM_URL: &str = "https://auth.ageofempires.com/loginsteam";
-/// 同上，PlayStation Network 入口
-pub const LOGIN_PSN_URL: &str = "https://auth.ageofempires.com/loginpsn";
 pub const HOME_URL: &str = "https://www.ageofempires.com/mods/";
 /// 判断“是否已登录”时以 API 目标域为准（避免把 www 域上的 WordPress 会话 Cookie 误当成登录态）
 pub const API_COOKIE_URL: &str = "https://api.ageofempires.com/";
@@ -220,7 +215,14 @@ pub fn ensure_account_window(
     }
 
     let window = builder.build().map_err(|e| {
-        log::error!(target: "account-window", "创建账号窗口失败：{e}");
+        // 用户报「点击登录没反应」时最先要看的就是这一条：
+        // 带上 label / 可见性 / 目标地址 + 完整 Debug（含底层 WebView2 HRESULT）
+        log::error!(
+            target: "account-window",
+            "创建账号窗口失败 label={} visible={} url={url}：{e}（debug: {e:?}）",
+            ACCOUNT_WINDOW,
+            visible
+        );
         format!("无法创建登录窗口：{e}")
     })?;
 
@@ -528,6 +530,13 @@ pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
         return Ok(SessionProbe { header, source: SessionSource::Webview });
     }
 
+    // 诊断（v3.2，只记录不改判定）：有 Cookie 却没有被认作真凭证时，把名字清单打全。
+    // 「登录成功却仍显示未登录」时，这一行能直接回答缺的是 wordpress_logged_in
+    // 还是 PHPSESSID，不用再靠猜。
+    if !header.is_empty() {
+        log_cookie_names_diagnostic(&header);
+    }
+
     if settings.remember_login {
         if let Ok(path) = settings::session_cache_for(app) {
             if let Some(cached) = secure::load(&path) {
@@ -654,6 +663,30 @@ fn log_key_credentials(header: &str) {
         has("AgeAuthSession"),
         has("wordpress_logged_in"),
         has("PHPSESSID")
+    );
+}
+
+/// 诊断（v3.2）：把 Cookie 名字清单完整打一次，并列出三个关键键的命中情况。
+/// **只记录，不参与任何判定**：[`has_real_credential`] 的逻辑一个字都没动。
+fn log_cookie_names_diagnostic(header: &str) {
+    let names = header_names(header);
+    let has = |key: &str| names.iter().any(|n| n.contains(key));
+    log::info!(
+        target: "account",
+        "Cookie 名字清单（有 Cookie 但未被认作登录凭证）：共 {} 条 → {}",
+        names.len(),
+        if names.is_empty() {
+            "(空)".to_string()
+        } else {
+            names.join(", ")
+        }
+    );
+    log::info!(
+        target: "account",
+        "凭证判定明细：wordpress_logged_in={} AgeAuthSession={} PHPSESSID={}",
+        has(WP_LOGIN_KEY),
+        has(AGE_AUTH_KEY),
+        has(PHP_SESSID_KEY)
     );
 }
 
@@ -978,6 +1011,31 @@ fn purge_webview_cookies(app: &AppHandle) -> Result<usize, String> {
     Ok(deleted)
 }
 
+/// 主动登录前的清理（v3.2 新增，替代 `online_open_login` 里的整段 `invalidate_cached_session`）。
+///
+/// 为什么要单独一个入口：`invalidate_cached_session` 会 `window.destroy()`，而 Tauri 的
+/// destroy 只是把消息派发给主线程，函数返回时窗口仍挂在窗口表里。紧接着
+/// `ensure_account_window` 的 `get_webview_window` 会命中这个“正在销毁”的窗口，
+/// 走复用分支后 `show()` / `navigate()` 全部失败（错误被吞掉，函数仍返回 Ok），
+/// 前端就一直停在「等待登录」——这就是 v0.4.0 之后「点登录没反应」的根因。
+///
+/// 这里只清 Cookie、**保留窗口**：用户重新登录后新 Cookie 会覆盖旧的，不需要销毁重建。
+/// 真正需要销毁的场景是**退出登录**，仍走 `clear_login_cache`。
+pub fn purge_aoe_cookies_for_relogin(app: &AppHandle) -> Result<usize, String> {
+    // 即将换掉登录态：先把可能还在跑的索引同步停掉，旧会话的请求没有意义
+    cancel_sync(app);
+    if app.get_webview_window(ACCOUNT_WINDOW).is_none() {
+        // 没有活窗口就没有“活 Cookie”可清（持久 Cookie 会被新登录覆盖），
+        // 这不是错误——首次登录就是这个状态。
+        log::info!(
+            target: "session-cookie",
+            "登录前清理：账号窗口尚未创建，跳过 Cookie 清理"
+        );
+        return Ok(0);
+    }
+    purge_webview_cookies(app)
+}
+
 /// 需要逐域查询的三个 AoE 入口。
 /// GetCookies 按 URI 返回“会发给该地址的 Cookie”，所以天然拿不到 login.live.com
 /// 或 login.microsoftonline.com 下的任何内容。
@@ -1293,11 +1351,10 @@ mod tests {
         assert!(!accept("login.live.com"));
     }
 
-    /// Steam / PSN 入口来自官网登录弹窗，改动前请重新实测（见对话记录里的 curl 结果）
+    /// 登录入口只剩微软 / Xbox 一条（v3.3 用户指令：移除 Steam 与 PlayStation）。
+    /// 改动前请重新实测：该地址实测 302 到 login.microsoftonline.com。
     #[test]
-    fn platform_entry_urls_are_stable() {
-        assert_eq!(LOGIN_STEAM_URL, "https://auth.ageofempires.com/loginsteam");
-        assert_eq!(LOGIN_PSN_URL, "https://auth.ageofempires.com/loginpsn");
+    fn single_login_entry_is_stable() {
         assert_eq!(LOGIN_URL, "https://auth.ageofempires.com/");
         assert_eq!(SessionSource::Cache.as_str(), "cache");
     }

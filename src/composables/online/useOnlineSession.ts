@@ -33,7 +33,7 @@ import {
   sessionError as sharedSessionError,
   sessionInfo,
   sessionPhase,
-  setStatusMessage,
+  setStatusMessageKey,
 } from "../../sessionState";
 
 /** 分类字典请求上限：官方接口偶尔很慢，不能把界面卡在“加载中” */
@@ -225,7 +225,7 @@ export function useOnlineSession(deps: {
           await closeLoginWindow();
           // 不在这里直接 reload：bump epoch 后由 handleSessionEpoch 统一刷新，避免重复请求
           markOnline(status);
-          setStatusMessage(t("statusbar.loginDone"));
+          setStatusMessageKey("statusbar.loginDone");
         } catch (e) {
           const text = messageOf(e);
           sessionError.value = t("online.cookieButFailed", { text });
@@ -287,7 +287,7 @@ export function useOnlineSession(deps: {
           await closeLoginWindow();
           // 只在 离线→在线 这一跳 bump epoch；重复探测不会反复触发列表刷新
           markOnline(status);
-          setStatusMessage(t("statusbar.loginDone"));
+          setStatusMessageKey("statusbar.loginDone");
         }
       } catch (e) {
         void uiLog("info", `background silent sign-in attempt ${ticks} did not finish: ${messageOf(e)}`);

@@ -57,10 +57,6 @@ const props = defineProps<{
   actionMessage: string | null;
   installError: string | null;
   installNote: string | null;
-  /** 刚刚完成一次成功的本地化（结果区显示订阅警示块） */
-  localizedJustNow: boolean;
-  /** 入队时的订阅快照：true=确定仍订阅 / false=未订阅 / null=未知 */
-  wasSubscribed: boolean | null;
   openingWeb: boolean;
   /** 「打开所在文件夹」请求进行中 */
   revealingFolder: boolean;
@@ -89,30 +85,7 @@ const emit = defineEmits<{
   (event: "reveal-folder"): void;
 }>();
 
-const { t, locale } = useI18n();
-
-/**
- * 分区标题 / 展开按钮文案：仅本组件内部使用，故不新增语言包键。
- */
-const ui = computed(() =>
-  String(locale.value).toLowerCase().startsWith("zh")
-    ? {
-        actions: "操作",
-        moreActions: "其他操作",
-        status: "状态",
-        meta: "作者与版本",
-        expand: "展开全文",
-        collapse: "收起",
-      }
-    : {
-        actions: "Actions",
-        moreActions: "More actions",
-        status: "Status",
-        meta: "Author & version",
-        expand: "Show more",
-        collapse: "Show less",
-      },
-);
+const { t } = useI18n();
 
 /** 长描述折叠：与本地详情页保持同一套阈值 */
 const DESC_COLLAPSE_AT = 260;
@@ -160,7 +133,7 @@ watch(
 
     <!-- ② 操作区（v2.0 前置）：翻译 / 收藏 / 备注 / 安装 / 卸载 / 重装 / 取消下载 / 官网 -->
     <section class="dv-zone dv-zone-actions">
-      <h4 class="dv-zone-title">{{ ui.actions }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.actions") }}</h4>
 
       <!-- v0.2.4：一键翻译（手动触发；未点击时绝不发任何翻译请求） -->
       <div class="translate-row">
@@ -264,26 +237,6 @@ watch(
 
       <div v-if="installError" class="online-error">{{ installError }}</div>
 
-      <!-- 本地化成功后的订阅警示：本地没有任何退订手段，只能引导去官网 -->
-      <div v-if="localizedJustNow" class="online-warn-box">
-        <div class="warn-title">⚠ {{ t("subscription.installedTitle") }}</div>
-        <div class="warn-body">
-          {{
-            wasSubscribed === true
-              ? t("subscription.installedBodyConfirmed")
-              : t("subscription.installedBodyConditional")
-          }}
-        </div>
-        <button
-          type="button"
-          class="dv-btn-ghost warn-btn"
-          :disabled="openingWeb"
-          @click="emit('open-webpage')"
-        >
-          {{ t("subscription.goSite") }}
-        </button>
-      </div>
-
       <pre v-if="installNote" class="online-note-box">{{ installNote }}</pre>
     </section>
 
@@ -296,13 +249,13 @@ watch(
       <div v-else-if="detailUncached" class="note">{{ t("online.detailUncached") }}</div>
       <div v-else class="note">{{ t("online.noDetail") }}</div>
       <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
-        {{ descExpanded ? ui.collapse : ui.expand }}
+        {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}
       </button>
     </section>
 
     <!-- ④ 其他操作（v2.1 后置）：重装 / 取消下载 / 在网站浏览 -->
     <section class="dv-zone dv-zone-actions">
-      <h4 class="dv-zone-title">{{ ui.moreActions }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.moreActions") }}</h4>
       <div class="detail-actions">
         <button
           v-if="localEntry"
@@ -330,7 +283,7 @@ watch(
 
     <!-- ⑤ 状态区：本机安装状态 / 是否可更新 -->
     <section class="dv-zone dv-zone-status">
-      <h4 class="dv-zone-title">{{ ui.status }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.status") }}</h4>
       <div class="field">
         <span class="k">{{ t("online.localState") }}</span>
         <span class="v source-cell" :class="{ missing: !localEntry }">
@@ -356,7 +309,7 @@ watch(
 
     <!-- ⑥ 作者 / 版本 / 时间 -->
     <section class="dv-zone dv-zone-meta">
-      <h4 class="dv-zone-title">{{ ui.meta }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.meta") }}</h4>
       <div class="field">
         <span class="k">{{ t("online.author") }}</span>
         <span class="v" :class="{ missing: !mod.creator }">
@@ -434,31 +387,6 @@ watch(
   font-size: calc(11.5px * var(--global-scale));
   line-height: 1.7;
   white-space: pre-wrap;
-}
-/* 订阅冲突警示：与 .online-error 同一色板，但内含金色行动按钮 */
-.online-warn-box {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid rgba(var(--danger-rgb), 0.5);
-  border-radius: 3px;
-  background: rgba(var(--danger-rgb), 0.1);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.online-warn-box .warn-title {
-  font-size: calc(12px * var(--global-scale));
-  font-weight: 600;
-  color: var(--danger-text);
-}
-.online-warn-box .warn-body {
-  font-size: calc(11.5px * var(--global-scale));
-  line-height: 1.75;
-  color: var(--parch-dim);
-  white-space: pre-wrap;
-}
-.online-warn-box .warn-btn {
-  align-self: flex-start;
 }
 .online-note-box {
   margin-top: 10px;

@@ -33,12 +33,12 @@ import {
   type UiFontFamily,
 } from "./api";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
-import { getTranslateSettings, openModWebpage } from "./online/service";
+import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
-import { enqueueDownload, initDownloadQueue, onTaskSettled, type DownloadTask } from "./online/downloadQueue";
+import { enqueueDownload, initDownloadQueue, onTaskSettled } from "./online/downloadQueue";
 import { enrichFavoriteMetaFromDetail, favoriteMetaOf, hydrateFavoriteMeta } from "./favoriteMeta";
 import { itemsById, updateIds } from "./modUpdates";
-import { buildConflictIndex, markSubscriptionWarned, shouldWarnSubscription } from "./modConflict";
+import { buildConflictIndex } from "./modConflict";
 import {
   applyTranslateSettings,
   hydrateTranslations,
@@ -637,41 +637,6 @@ function conflictHintOf(entryId: string): string | null {
   return null;
 }
 
-// ---------------- 本地化完成后的订阅警示（每个 modId 只提示一次） ----------------
-
-const subscriptionWarn = ref<{ modId: number; title: string; confirmed: boolean } | null>(null);
-
-/**
- * 任务落地时调用：只有「成功本地化」才提示。
- * confirmed = 入队瞬间账号处于订阅状态（确定语气）；否则用条件语气。
- */
-function maybeWarnSubscription(task: DownloadTask): void {
-  if (task.status !== "done" || task.localized !== true) return;
-  if (!shouldWarnSubscription(task.modId)) return;
-  subscriptionWarn.value = {
-    modId: task.modId,
-    title: task.title,
-    confirmed: task.wasSubscribed === true,
-  };
-  // 出现即记账：用户不关窗口直接杀进程也不会重复弹
-  markSubscriptionWarned(task.modId);
-}
-
-async function goUnsubscribe(): Promise<void> {
-  const target = subscriptionWarn.value;
-  if (!target) return;
-  subscriptionWarn.value = null;
-  try {
-    await openModWebpage(target.modId);
-  } catch (e) {
-    showToast(t("online.openFailed", { msg: scan.normalizeError(e) }), "error");
-  }
-}
-
-function dismissSubscriptionWarn(): void {
-  subscriptionWarn.value = null;
-}
-
 const presets = usePresets({ mods: scan.mods, rescan: () => refresh() });
 const { showPresets, lastAppliedPresetId, handlePresetApplied } = presets;
 
@@ -992,8 +957,6 @@ onMounted(async () => {
   // v0.6：下载队列里任何一个模组安装完成 → 重扫一次，让「未安装」占位卡变回真实卡片
   offDownloadSettled = onTaskSettled((task) => {
     if (task.status !== "done") return;
-    // 订阅警示与当前页面无关：下载队列是全局单例，切到本地页也要提醒
-    maybeWarnSubscription(task);
     if (mode.value !== "local") return;
     void refresh();
   });
@@ -1236,6 +1199,10 @@ onBeforeUnmount(() => {
         <div class="content-head">
           <h2>{{ heading }}</h2>
           <span class="hint">{{ contentHint }}</span>
+
+          <!-- 常驻说明（仅来源＝本地时显示）：local 目录的模组若账号仍在订阅，
+               游戏会再下一份到 subscribed/。只作文字提示，不给按钮、不阻塞布局 -->
+          <span v-if="source === 'local'" class="local-dir-note">{{ t("content.localDirNote") }}</span>
 
           <!-- v2.6 批量操作组：预设 / 全部启用 / 全部禁用 / 排序模式 / 视图切换（网格·列表），
                贴在列表标题（说明文字）右侧、整组右靠。视图切换与在线页列表抬头的位置一致。 -->
@@ -1502,23 +1469,6 @@ onBeforeUnmount(() => {
       @cancel="cancelDataModSwitch"
     />
 
-    <!-- 本地化完成后的订阅警示（每个 modId 只弹一次；confirm = 直接跳官网退订） -->
-    <ConfirmDialog
-      v-if="subscriptionWarn"
-      :title="t('subscription.modalTitle')"
-      :subtitle="''"
-      :message="
-        subscriptionWarn.confirmed
-          ? t('subscription.modalMessageConfirmed', { title: subscriptionWarn.title })
-          : t('subscription.modalMessageConditional', { title: subscriptionWarn.title })
-      "
-      :confirm-label="t('subscription.modalGoSite')"
-      :cancel-label="t('subscription.modalOk')"
-      :danger="false"
-      @confirm="goUnsubscribe"
-      @cancel="dismissSubscriptionWarn"
-    />
-
     <!-- 放弃未保存排序的二次确认 -->
     <ConfirmDialog
       v-if="showDiscardConfirm"
@@ -1609,6 +1559,23 @@ onBeforeUnmount(() => {
 /* 右下角下载悬浮按钮常驻（v0.4.3：无任务时也显示），toast 始终上移避让 */
 .app-toast {
   bottom: 96px;
+}
+
+/* ================= 抬头中段的常驻说明（local 目录 / 重复模组） =================
+   .content-head 是定高单行：这里给足收缩能力，窗口窄时用省略号收尾，
+   绝不给按钮、不加边框与背景，只占中间那段空白。 */
+.content-head .local-dir-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11px * var(--global-scale));
+  font-weight: 400;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+  /* 淡金色微光，和羊皮纸底色协调，但不抢标题 */
+  text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.10);
 }
 
 /* ================= v2.0：列表抬头右侧的批量操作组 =================

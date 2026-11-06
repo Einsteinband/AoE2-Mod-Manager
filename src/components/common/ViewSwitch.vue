@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 
 /**
@@ -22,14 +21,7 @@ const props = withDefaults(
 
 const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
 
-const { t, locale } = useI18n();
-
-/** 只在本组件内使用的文案（不新增语言包键，与项目其他组件保持一致） */
-const ui = computed(() =>
-  String(locale.value).toLowerCase().startsWith("zh")
-    ? { grid: "网格", list: "列表", group: "视图切换" }
-    : { grid: "Grid", list: "List", group: "View mode" },
-);
+const { t } = useI18n();
 
 function setView(next: "grid" | "list") {
   viewMode.value = next;
@@ -37,7 +29,7 @@ function setView(next: "grid" | "list") {
 </script>
 
 <template>
-  <div class="view-switch" role="group" :aria-label="props.groupLabel || ui.group">
+  <div class="view-switch" role="group" :aria-label="props.groupLabel || t('viewSwitch.group')">
     <button
       type="button"
       class="view-btn"
@@ -46,7 +38,7 @@ function setView(next: "grid" | "list") {
       :aria-pressed="viewMode === 'grid'"
       @click="setView('grid')"
     >
-      {{ ui.grid }}
+      {{ t("viewSwitch.grid") }}
     </button>
     <button
       type="button"
@@ -56,7 +48,7 @@ function setView(next: "grid" | "list") {
       :aria-pressed="viewMode === 'list'"
       @click="setView('list')"
     >
-      {{ ui.list }}
+      {{ t("viewSwitch.list") }}
     </button>
   </div>
 </template>

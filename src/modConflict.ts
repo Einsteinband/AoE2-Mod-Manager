@@ -37,9 +37,6 @@ export interface ConflictIndex {
   count: number;
 }
 
-/** 「每个 modId 只提示一次」的记账 key（localStorage，不进 user_data.json / settings.json） */
-const WARNED_KEY = "aoe2.subscriptionWarned.v1";
-
 /**
  * 名字归一化：小写 + 去掉空白、下划线、连字符、句点。
  * 只用于兜底比对：宁可漏判，也不要把明显不同的两个模组强行拉平。
@@ -123,47 +120,4 @@ export function buildConflictIndex(mods: ModEntry[]): ConflictIndex {
   }
 
   return { bySubscribedId, byLocalId, count: bySubscribedId.size };
-}
-
-// ---------------- 「每个 modId 只提示一次」的本地记账 ----------------
-// 与用户数据无关，损坏时静默重建，绝不因为存储异常挡住安装流程。
-
-function readWarned(): Record<string, number> {
-  try {
-    const raw = window.localStorage.getItem(WARNED_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const out: Record<string, number> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      const modId = Number(key);
-      if (!Number.isFinite(modId) || modId <= 0) continue;
-      out[String(modId)] = typeof value === "number" ? value : 0;
-    }
-    return out;
-  } catch {
-    return {};
-  }
-}
-
-function writeWarned(map: Record<string, number>): void {
-  try {
-    window.localStorage.setItem(WARNED_KEY, JSON.stringify(map));
-  } catch {
-    /* 隐私模式 / 配额满：记不住就算了，下次再提示一次不影响功能 */
-  }
-}
-
-/** 这个 modId 是否还没提示过订阅冲突 */
-export function shouldWarnSubscription(modId: number): boolean {
-  if (!Number.isFinite(modId) || modId <= 0) return false;
-  return readWarned()[String(modId)] === undefined;
-}
-
-/** 记账：只在弹窗**出现时**调用（用户不关窗口直接杀进程也不会重复弹） */
-export function markSubscriptionWarned(modId: number): void {
-  if (!Number.isFinite(modId) || modId <= 0) return;
-  const map = readWarned();
-  map[String(modId)] = Date.now();
-  writeWarned(map);
 }

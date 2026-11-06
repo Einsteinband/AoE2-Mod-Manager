@@ -9,7 +9,6 @@ import type {
   IndexStatus,
   IndexSyncReport,
   InstallOutcome,
-  LoginTarget,
   TitleJobStatus,
   ModTag,
   NetworkSettingsView,
@@ -48,18 +47,14 @@ export function uiLog(level: "info" | "warn" | "error", message: string): Promis
   return invoke<void>("ui_log", { level, message });
 }
 
-export function openLogin(platform: string): Promise<void> {
-  return invoke<void>("online_open_login", { platform });
+/** 打开登录窗口（v3.3 起只保留微软 / Xbox 一条入口） */
+export function openLogin(): Promise<void> {
+  return invoke<void>("online_open_login");
 }
 
 /** 后台静默登录：隐藏窗口走一遍 SSO，用于启动时自动恢复会话（不清缓存） */
-export function openLoginSilent(platform: string): Promise<void> {
-  return invoke<void>("online_open_login_silent", { platform });
-}
-
-/** 登录入口清单（Steam / 微软 Xbox / PSN），URL 由 Rust 侧维护 */
-export function loginTargets(): Promise<LoginTarget[]> {
-  return invoke<LoginTarget[]>("online_login_targets");
+export function openLoginSilent(): Promise<void> {
+  return invoke<void>("online_open_login_silent");
 }
 
 /** 高级网络设置：自动跟随系统 / 手动代理 / 记住登录 */

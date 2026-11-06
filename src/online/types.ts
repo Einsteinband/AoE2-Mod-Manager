@@ -274,14 +274,6 @@ export interface SessionStatus {
   error: string | null;
 }
 
-/** 登录入口（由 Rust 侧提供，前端不自己拼 URL） */
-export interface LoginTarget {
-  key: string;
-  label: string;
-  url: string;
-  hint: string;
-}
-
 /** 高级网络设置视图：同时返回"实际生效的链路"，避免用户不知道自己在走什么 */
 export interface NetworkSettingsView {
   auto: boolean;

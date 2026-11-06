@@ -7,7 +7,7 @@
  * - **单一刷新信号**：每次确认登录态有效就 `sessionEpoch += 1`，
  *   在线页 watch 它做静默刷新，不需要登录成功回调层层往上抛。
  */
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { clearLoginCache, sessionStatus, startupSession } from "./online/service";
 import { noteRequestSuccess } from "./online/networkError";
@@ -32,8 +32,24 @@ export const sessionEpoch = ref(0);
 export const sessionGeneration = ref(0);
 /** 用户明确要求重刷列表时 +1（底栏「立即重新校验」成功后推一次） */
 export const manualRefreshNonce = ref(0);
-/** 底栏中间那行动态提示（“已从缓存加载” / “正在请求网络数据…” 等） */
-export const statusMessage = ref("");
+/**
+ * 底栏中间那行动态提示（“已从缓存加载” / “正在请求网络数据…” 等）。
+ *
+ * **存 key 不存译文**：之前直接存 `translate(...)` 的结果，启动时这条赋值比
+ * `applyLocale()` 更早执行，拿到的是系统语言（中文）译文，之后切到英文界面它就永远停在中文。
+ * 改成存「key + 参数」、渲染时再 `translate()`，切语言即时跟随。
+ */
+type StatusMessageSpec =
+  | { kind: "key"; key: string; params?: Record<string, unknown> }
+  | { kind: "text"; text: string };
+
+const statusMessageSpec = ref<StatusMessageSpec | null>(null);
+
+export const statusMessage = computed(() => {
+  const spec = statusMessageSpec.value;
+  if (!spec) return "";
+  return spec.kind === "key" ? translate(spec.key, spec.params) : spec.text;
+});
 export const lastCheckedMs = ref(0);
 
 /** 单次探测上限：超过就当作离线，绝不让界面挂在「检查中」 */
@@ -72,7 +88,17 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 export function setStatusMessage(text: string): void {
-  statusMessage.value = text;
+  statusMessageSpec.value = text ? { kind: "text", text } : null;
+}
+
+/** 需要跟随语言切换的提示：传 key（可选 {n} 之类参数） */
+export function setStatusMessageKey(key: string, params?: Record<string, unknown>): void {
+  statusMessageSpec.value = { kind: "key", key, params };
+}
+
+/** 清空底标提示（退出登录等场景） */
+export function clearStatusMessage(): void {
+  statusMessageSpec.value = null;
 }
 
 /** 用户明确意图：要求在线页重刷（不受自动刷新的 30 秒闸门限制） */
@@ -138,11 +164,11 @@ export function markUnauthenticated(reason: string | null = null): void {
 function runSessionCheck(
   task: () => Promise<SessionStatus>,
   timeoutMs: number,
-  waitingMessage: string,
+  waitingKey: string,
 ): Promise<boolean> {
   const generation = sessionGeneration.value;
   sessionPhase.value = "checking";
-  statusMessage.value = waitingMessage;
+  setStatusMessageKey(waitingKey);
 
   inflight = (async () => {
     try {
@@ -154,16 +180,16 @@ function runSessionCheck(
       lastCheckedMs.value = Date.now();
       if (status.loggedIn) {
         markOnline(status);
-        statusMessage.value = translate("statusbar.onlineReady");
+        setStatusMessageKey("statusbar.onlineReady");
         return true;
       }
       markOffline(errorText(status.error));
-      statusMessage.value = translate("statusbar.offlineHint");
+      setStatusMessageKey("statusbar.offlineHint");
       return false;
     } catch (e) {
       if (generation !== sessionGeneration.value) return false;
       markOffline(describe(e));
-      statusMessage.value = translate("statusbar.offlineHint");
+      setStatusMessageKey("statusbar.offlineHint");
       return false;
     } finally {
       if (generation === sessionGeneration.value) inflight = null;
@@ -186,7 +212,7 @@ export function markLoggedOut(reason: string | null = null): void {
   sessionPhase.value = "offline";
   sessionError.value = reason;
   lastCheckedMs.value = Date.now();
-  statusMessage.value = "";
+  clearStatusMessage();
 }
 
 /**
@@ -230,7 +256,7 @@ export function ensureStartupSession(): Promise<boolean> {
   return runSessionCheck(
     () => startupSession(),
     STARTUP_TIMEOUT_MS,
-    translate("statusbar.restoring"),
+    "statusbar.restoring",
   );
 }
 
@@ -246,6 +272,6 @@ export function ensureSession(force = false): Promise<boolean> {
   return runSessionCheck(
     () => sessionStatus(),
     CHECK_TIMEOUT_MS,
-    translate("statusbar.checking"),
+    "statusbar.checking",
   );
 }

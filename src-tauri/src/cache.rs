@@ -249,6 +249,16 @@ fn unique_tmp(path: &Path) -> PathBuf {
 /// 2. 失败 → `fs::copy` 直接覆盖（非原子但不会丢旧缓存）
 /// 3. 都失败 → 只记日志，**绝不删除已有的旧缓存文件**
 fn write_store(path: &Path, store: &Store) -> Result<(), String> {
+    // v1.x：数据目录迁移进行中，绝不落盘——否则后台索引线程会把 online_cache.json
+    // 重新写回旧目录，迁移完看起来像「文件凭空多出来一份」。内存态不受影响。
+    if crate::data_dir::is_migrating() {
+        log::warn!(
+            target: "cache",
+            "数据目录迁移中，本次缓存落盘已跳过：{}",
+            path.display()
+        );
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;

@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::Manager;
 
 use crate::scan::{detect_data_mod, now_ms, normalize_key};
 
@@ -100,17 +99,12 @@ pub struct ApplyReport {
 // ---------------- 路径 ----------------
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v1.x：跟随「数据与缓存总目录」（未自定义时即 %APPDATA%\<bundleId>）
+    crate::data_root(app).map(|dir| dir.join(FILE_NAME))
 }
 
 pub fn backups_dir_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(BACKUP_DIR))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    crate::data_root(app).map(|dir| dir.join(BACKUP_DIR))
 }
 
 // ---------------- 预设读写 ----------------

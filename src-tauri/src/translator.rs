@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tauri::Manager;
 
 use crate::net;
 use crate::online::ApiFailure;
@@ -840,10 +839,8 @@ pub fn put(app: &tauri::AppHandle, mod_id: i64, lang: &str, entry: Entry) -> Res
 // ---------------- 配置 ----------------
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(CONFIG_FILE))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v1.x：translate_config.json 也跟随「数据与缓存总目录」，否则总目录里会出现“缺一个文件”
+    crate::data_root(app).map(|dir| dir.join(CONFIG_FILE))
 }
 
 fn load_config(app: &tauri::AppHandle) -> Config {

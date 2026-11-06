@@ -20,7 +20,7 @@ import {
   requestOpenSettings,
   sessionEpoch,
   sessionPhase,
-  setStatusMessage,
+  setStatusMessageKey,
 } from "../sessionState";
 import { ensureUserData, favoriteCount } from "../userData";
 import { useToast } from "../composables/useToast";
@@ -34,6 +34,7 @@ import { useOnlineInstall } from "../composables/online/useOnlineInstall";
 import { useOnlineSession } from "../composables/online/useOnlineSession";
 import { useIndexSync } from "../composables/online/useIndexSync";
 import { useLocalSearch } from "../composables/online/useLocalSearch";
+import { openExternalUrl } from "../api";
 
 /**
  * 在线页入口：只做**组件协调 + 状态连接 + 生命周期**。
@@ -223,8 +224,6 @@ const {
   waitingLogin,
   probing,
   probeResult,
-  platforms,
-  platform,
   netClearing,
   netError,
   netMessage,
@@ -232,17 +231,28 @@ const {
   tagsError,
   silentAuth,
   silentAuthNote,
-  loginLabel,
-  loginHint,
   refreshSession,
   runProbe,
   startLogin,
   doLogout,
   stopWaiting,
   loadTags,
-  loadPlatforms,
   dispose: disposeSession,
 } = sessionCtl;
+
+/**
+ * 帝国时代官网账号中心（v3.3）：微软 / Xbox 账号在这里登录，也是 Steam 版用户
+ * 绑定 Steam 账号的唯一入口。域名已加入 Rust `open_external` 白名单。
+ */
+const ACCOUNT_CENTER_URL = "https://auth.ageofempires.com/";
+
+async function openAccountCenter(): Promise<void> {
+  try {
+    await openExternalUrl(ACCOUNT_CENTER_URL);
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e), "error");
+  }
+}
 
 const {
   indexStatus,
@@ -521,10 +531,7 @@ async function boot(): Promise<void> {
   // ①b 订阅「封面已落地」事件：后台下完一批就把本地 asset URL 补进映射
   unlistenImages = await onImagesReady(thumbs.applyImages);
 
-  // ② 平台清单（后端本地常量，不走网络）
-  await loadPlatforms();
-
-  // ③ 静默校验登录态：App.vue 启动时已发起，这里复用同一个 Promise（并发去重）
+  // ② 静默校验登录态：App.vue 启动时已发起，这里复用同一个 Promise（并发去重）
   const online = await ensureSession();
   if (online) {
     await handleSessionEpoch();
@@ -533,7 +540,7 @@ async function boot(): Promise<void> {
 
   // ④ 离线：分类字典用内置兜底，并后台静默尝试一次 SSO（隐藏窗口，不阻塞）
   await loadTags();
-  setStatusMessage(t("statusbar.offlineHint"));
+  setStatusMessageKey("statusbar.offlineHint");
   void sessionCtl.silentReauth(t("online.reasonNoSession"));
 }
 
@@ -725,20 +732,15 @@ onUnmounted(() => {
             <span class="spinner"></span>{{ silentAuthNote }}
           </p>
           <p v-else-if="silentAuthNote" class="online-silent note">{{ silentAuthNote }}</p>
-          <div class="login-targets">
-            <button
-              v-for="target in platforms"
-              :key="target.key"
-              type="button"
-              class="login-target"
-              :class="{ active: platform === target.key }"
-              :disabled="waitingLogin"
-              @click="platform = target.key"
-            >
-              <span class="lt-label">{{ loginLabel(target) }}</span>
-              <span class="lt-hint">{{ loginHint(target) }}</span>
-            </button>
+          <!-- v3.3：登录途径只剩微软 / Xbox 一条（Steam 与 PSN 入口已移除）。 -->
+          <div class="login-target-single">
+            <span class="lt-label">{{ t("online.loginMicrosoftLabel") }}</span>
+            <span class="lt-hint">{{ t("online.loginMicrosoftHint") }}</span>
           </div>
+          <p class="login-bind-note">
+            {{ t("online.loginSteamBindNote") }}
+            <button type="button" class="lt-link" @click="openAccountCenter">{{ t("online.loginAccountCenter") }}</button>
+          </p>
           <div class="login-actions">
             <button type="button" :disabled="waitingLogin" @click="startLogin()">
               {{ waitingLogin ? t("online.waitingLogin") : t("online.openLogin") }}
@@ -1005,36 +1007,44 @@ onUnmounted(() => {
   padding: 3px 10px;
   font-size: 11px;
 }
-.login-targets {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 8px;
-  margin: 12px 0 4px;
-}
-.login-target {
+.login-target-single {
   display: flex;
   flex-direction: column;
   gap: 4px;
   align-items: flex-start;
+  margin: 12px 0 4px;
   padding: 9px 11px;
-  text-align: left;
   line-height: 1.5;
-}
-.login-target.active {
-  border-color: var(--gold);
-  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-radius: 4px;
   background: linear-gradient(180deg, var(--item-active-top), var(--bg-hover));
 }
 .lt-label {
   font-size: 12.5px;
-  color: var(--parch);
-}
-.login-target.active .lt-label {
   color: var(--gold-bright);
 }
 .lt-hint {
   font-size: 10.5px;
   color: var(--muted);
+}
+/* v3.3：Steam 版用户绑定微软账号的提示（金色描边、可点击跳官网账号中心） */
+.login-bind-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.lt-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--gold-bright);
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.lt-link:hover {
+  color: var(--gold);
 }
 .login-actions {
   display: flex;

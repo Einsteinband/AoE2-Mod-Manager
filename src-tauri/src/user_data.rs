@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 use crate::scan::now_ms;
 
@@ -60,10 +59,8 @@ pub struct SaveReport {
 }
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+    // v1.x：跟随「数据与缓存总目录」（未自定义时即 %APPDATA%\<bundleId>）
+    crate::data_root(app).map(|dir| dir.join(FILE_NAME))
 }
 
 /// 读：文件不存在 / 损坏 / 带 BOM 都退回空表，绝不让界面因为一个坏文件打不开。

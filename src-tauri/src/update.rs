@@ -17,7 +17,7 @@
 //! 这段时间里自动检查被静默跳过，界面完全不提示——这正是被报上来的 bug。
 //! 现在只在 2 小时内已查过时省一次请求（匿名接口 60 req/h，正常使用绰绰有余）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// 仓库首页（Release 地址兜底用）
@@ -49,7 +49,9 @@ const USER_AGENT: &str = concat!("AoE2ModManager/", env!("CARGO_PKG_VERSION"), "
 /// 也远低于匿名接口 60 req/h 的配额（最坑也才 1 req/2h，单日 ≈ 12 次）。
 pub const AUTO_CHECK_MIN_INTERVAL_MS: i64 = 2 * 60 * 60 * 1000;
 
-#[derive(Serialize, Clone, Debug)]
+/// v3.2：加 `Deserialize` 只为一件事——把上一次的检查结论落盘缓存，
+/// 防抖跳过时原样交还前端（见 [`AutoCheckState`]）。序列化字段不变，IPC 契约不受影响。
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     /// 当前运行版本（编译期 CARGO_PKG_VERSION，唯一来源 tauri.conf.json / Cargo.toml）
@@ -114,20 +116,21 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 fn log_all_headers(response: &ureq::Response) {
     let mut names = response.headers_names();
     names.sort();
-    println!("[update] ---- response headers: {} ----", names.len());
+    log::info!(target: "update", "---- response headers: {} ----", names.len());
     for name in names {
         for value in response.all(&name) {
-            println!("[update]   {name}: {value}");
+            log::info!(target: "update", "  {name}: {value}");
         }
     }
-    println!("[update] ---- end headers ----");
+    log::info!(target: "update", "---- end headers ----");
 }
 
 /// 限流关键字段单独强调：remaining / reset / retry-after
 fn log_rate_limit(response: &ureq::Response) {
     let head = |key: &str| response.header(key).unwrap_or("-").to_string();
-    println!(
-        "[update] rate-limit: status={} limit={} remaining={} used={} reset={} retry-after={}",
+    log::info!(
+        target: "update",
+        "rate-limit: status={} limit={} remaining={} used={} reset={} retry-after={}",
         response.status(),
         head("x-ratelimit-limit"),
         head("x-ratelimit-remaining"),
@@ -144,17 +147,19 @@ fn log_rate_limit(response: &ureq::Response) {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         if reset > now {
-            println!(
-                "[update] rate-limit window resets in {}s (epoch {reset})",
+            log::info!(
+                target: "update",
+                "rate-limit window resets in {}s (epoch {reset})",
                 reset - now
             );
         } else {
-            println!("[update] rate-limit window already reset (epoch {reset})");
+            log::info!(target: "update", "rate-limit window already reset (epoch {reset})");
         }
     }
     if response.header("x-ratelimit-remaining").map(|v| v.trim()) == Some("0") {
-        println!(
-            "[update] WARNING: remaining=0, anonymous GitHub API allows only 60 req/h per IP"
+        log::warn!(
+            target: "update",
+            "WARNING: remaining=0, anonymous GitHub API allows only 60 req/h per IP"
         );
     }
 }
@@ -182,8 +187,8 @@ enum Attempt {
 /// 镜像失败只打一行摘要，避免 4 个镜像把终端刷满。
 fn request_url(agent: &ureq::Agent, url: &str, verbose: bool) -> Attempt {
     if verbose {
-        println!("[update] GET {url}");
-        println!("[update] User-Agent: {USER_AGENT}");
+        log::info!(target: "update", "GET {url}");
+        log::info!(target: "update", "User-Agent: {USER_AGENT}");
     }
     match agent
         .get(url)
@@ -202,30 +207,33 @@ fn request_url(agent: &ureq::Agent, url: &str, verbose: bool) -> Attempt {
         }
         Err(ureq::Error::Status(code, response)) => {
             if verbose {
-                println!("[update] request failed: HTTP {code}");
+                log::warn!(target: "update", "request failed: HTTP {code}");
                 log_all_headers(&response);
                 log_rate_limit(&response);
                 match response.into_string() {
                     Ok(body) => {
                         let body = body.trim();
                         if body.is_empty() {
-                            println!("[update] response body: <empty>");
+                            log::warn!(target: "update", "response body: <empty>");
                         } else {
-                            println!(
-                                "[update] response body: {}",
+                            log::warn!(
+                                target: "update",
+                                "response body: {}",
                                 body.chars().take(1200).collect::<String>()
                             );
                         }
                     }
-                    Err(e) => println!("[update] response body unreadable: {e}"),
+                    Err(e) => log::warn!(target: "update", "response body unreadable: {e}"),
                 }
             }
             Attempt::HttpError { code, message: translate_status(code) }
         }
         Err(ureq::Error::Transport(t)) => {
             if verbose {
-                println!("[update] transport error: {t}");
-                println!("[update] transport error debug: {t:?}");
+                // TLS / 代理 / DNS 类错误的原文（含底层 io 错误）只在这里落盘：
+                // 这是「登录无反应 / 检查更新失败」最常见的真因。
+                log::warn!(target: "update", "transport error (TLS / proxy / DNS): {t}");
+                log::warn!(target: "update", "transport error debug: {t:?}");
             }
             Attempt::Transport(format!("网络请求失败：{t}"))
         }
@@ -261,33 +269,35 @@ pub fn fetch_with_mirrors(proxy: Option<ureq::Proxy>, url: &str) -> (bool, Resul
         match request_url(&agent, &full, false) {
             Attempt::Body(body) => {
                 if looks_like_json(&body) {
-                    println!("[update] mirror ok: {full} ({} bytes)", body.len());
+                    log::info!(target: "update", "mirror ok: {full} ({} bytes)", body.len());
                     return (true, Ok(body));
                 }
-                println!(
-                    "[update] mirror failed: not JSON, {} bytes (possibly an error page) ({full})",
+                log::warn!(
+                    target: "update",
+                    "mirror failed: not JSON, {} bytes (possibly an error page) ({full})",
                     body.len()
                 );
                 last_error = format!("镜像返回的不是 JSON（{} 字节）", body.len());
             }
             Attempt::HttpError { code, message } => {
                 reached = true;
-                println!("[update] mirror failed: HTTP {code} {full}");
+                log::warn!(target: "update", "mirror failed: HTTP {code} {full}");
                 last_error = message;
             }
             Attempt::Transport(message) => {
-                println!("[update] mirror failed: {message} ({full})");
+                log::warn!(target: "update", "mirror failed: {message} ({full})");
                 last_error = message;
             }
         }
     }
 
-    println!(
-        "[update] all {} mirrors failed, falling back to direct GET",
+    log::warn!(
+        target: "update",
+        "all {} mirrors failed, falling back to direct GET",
         API_MIRROR_PREFIXES.len()
     );
     let (agent, route) = build_agent(proxy, DIRECT_CONNECT_TIMEOUT, DIRECT_READ_TIMEOUT);
-    println!("[update] route: {route}");
+    log::info!(target: "update", "route: {route}");
     match request_url(&agent, url, true) {
         Attempt::Body(body) => (true, Ok(body)),
         Attempt::HttpError { message, .. } => (true, Err(message)),
@@ -353,7 +363,7 @@ fn parse_info(body: &str) -> Result<UpdateInfo, String> {
     // 诊断日志：下次「发了新版却不提示」时，这一行能直接看出是比对结论错、
     // 还是拿到的 tag 不对（例如 Release 被勾成 pre-release，/releases/latest 不会返回它）
     let has_update = is_newer(&latest, &current);
-    println!("[update] compare: current={current} latest={latest} tag={tag} has_update={has_update}");
+    log::info!(target: "update", "compare: current={current} latest={latest} tag={tag} has_update={has_update}");
     let release_url = value
         .get("html_url")
         .and_then(|v| v.as_str())
@@ -408,29 +418,119 @@ pub fn auto_check_due(last_ms: i64) -> bool {
     now - last_ms >= AUTO_CHECK_MIN_INTERVAL_MS
 }
 
-/// 启动静默检查：2 小时内已检查过就直接返回 `Ok(None)`——不发请求，只打一条 ASCII 诊断日志。
-/// 请求真的发出去过（含 403）就把时间戳写回 settings.json。
+/// 自动检查的「上次结论」缓存，落盘到 app_local_data_dir/update_auto_state.json。
+///
+/// 为什么不放进 `Settings`：`Settings` 属于全局配置，而这里只是更新检查的内部状态；
+/// 独立文件可以单独损坏/删除，也不污染 settings.json 的语义。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+struct AutoCheckState {
+    /// 拿到结论的时间戳（毫秒），仅用于诊断日志
+    checked_ms: i64,
+    /// 上一次成功解析出的结论（不含任何凭证，纯公开 Release 信息）
+    last: Option<UpdateInfo>,
+}
+
+fn auto_state_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path()
+        .app_local_data_dir()
+        .ok()
+        .map(|base| base.join("update_auto_state.json"))
+}
+
+fn load_auto_state(app: &tauri::AppHandle) -> Option<AutoCheckState> {
+    let path = auto_state_path(app)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<AutoCheckState>(&text).ok()
+}
+
+fn save_auto_state(app: &tauri::AppHandle, state: &AutoCheckState) {
+    let Some(path) = auto_state_path(app) else {
+        return;
+    };
+    let Ok(text) = serde_json::to_string_pretty(state) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, text) {
+        log::warn!(target: "update", "写回自动检查结论失败：{e}");
+    }
+}
+
+/// 启动静默检查：2 小时内已检查过就不发请求，只打一条 ASCII 诊断日志。
+///
+/// **v3.2 修复（更新弹窗回归）**：旧实现命中防抖时直接 `Ok(None)`，前端
+/// `if (!info?.hasUpdate) return` 静默退出，于是 2 小时内每次重启都看不到提示，
+/// 相对 0.3.0（每次启动都查）就是「更新弹窗彻底失效」。现在改为把上一次的
+/// 结论原样交还，前端行为回到 0.3.0，同时仍然省下这一次请求。
+///
+/// 时间戳只在**真正拿到 2xx + 合法 JSON** 后才写：403 限流、镜像错误页、
+/// 网络不通一律不锁窗口，否则一次失败就会把提示静默吞掉 2 小时。
 pub fn fetch_latest_auto(
     app: &tauri::AppHandle,
     proxy: Option<ureq::Proxy>,
 ) -> Result<Option<UpdateInfo>, String> {
     let settings = crate::settings::load_for_app(app);
     if !auto_check_due(settings.last_auto_update_check_ms) {
-        let elapsed = now_ms() - settings.last_auto_update_check_ms;
-        println!(
-            "[update] auto check skipped: last check {}s ago (< {}s), current={}",
-            elapsed / 1000,
-            AUTO_CHECK_MIN_INTERVAL_MS / 1000,
-            current_version()
+        let elapsed = now_ms().saturating_sub(settings.last_auto_update_check_ms);
+        // 有缓存就回放：这是「2 小时内重启也要弹窗」的关键
+        if let Some(state) = load_auto_state(app) {
+            if let Some(mut info) = state.last {
+                // 缓存的 current_version 是上次检查时的运行版本；用户可能已经升级。
+                // 直接回放 has_update 会误报「有新版本」（例：刚升到 latest 又重启），
+                // 所以用当前编译期版本重新比对一次。
+                info.current_version = current_version();
+                info.has_update = is_newer(&info.latest_version, &info.current_version);
+                log::info!(
+                    target: "update",
+                    "auto check skipped: last check {}s ago (< {}s), current={}, replay cached result (latest={}, has_update={})",
+                    elapsed / 1000,
+                    AUTO_CHECK_MIN_INTERVAL_MS / 1000,
+                    current_version(),
+                    info.latest_version,
+                    info.has_update
+                );
+                return Ok(Some(info));
+            }
+        }
+        // 防抖命中但没有缓存（老版本升级上来、state 文件被删）→ 宁可查一次，
+        // 也不要让用户升级后第一次启动依然看不到任何提示。
+        log::warn!(
+            target: "update",
+            "auto check skipped but no cached result, checking anyway (last {}s ago)",
+            elapsed / 1000
         );
-        return Ok(None);
     }
 
     let (reached, result) = run_once(proxy);
-    if reached {
-        mark_auto_checked(app);
+    match result {
+        Ok(info) => {
+            // 只有 2xx + 合法 JSON 才算「检查成功」→ 写时间戳 + 写缓存
+            mark_auto_checked(app);
+            save_auto_state(
+                app,
+                &AutoCheckState {
+                    checked_ms: now_ms(),
+                    last: Some(info.clone()),
+                },
+            );
+            Ok(Some(info))
+        }
+        Err(message) => {
+            if reached {
+                // 拿到了 HTTP 响应但解析不了（403 限流页 / 镜像错误页）：
+                // **故意不写时间戳**，下次启动立刻重试。配额真烧掉了，GitHub 自己会拒绝，
+                // 不需要我们替它节流——让用户看到提示比省一次请求重要。
+                log::warn!(target: "update", "auto check reachable but failed, window NOT locked: {message}");
+            } else {
+                log::warn!(target: "update", "auto check unreachable, window NOT locked: {message}");
+            }
+            Err(message)
+        }
     }
-    result.map(Some)
 }
 
 /// 写回自动检查时间戳；写盘失败只告警，不影响本次检查结果

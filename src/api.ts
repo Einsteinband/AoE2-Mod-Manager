@@ -33,6 +33,30 @@ export function appVersion(): Promise<string> {
   return invoke<string>("app_version");
 }
 
+// ---- v0.4.5：本地日志与「复制诊断信息给 AI」 ----
+
+/** 诊断数据包：后端只回事实（版本 / 系统 / 日志路径 / 最近 100 行），Prompt 由前端拼 */
+export interface DiagnosticsInfo {
+  version: string;
+  os: string;
+  /** 日志目录（Windows: %LOCALAPPDATA%\com.aoe2.modmanager\logs） */
+  logDir: string;
+  /** 本次读取的日志文件全路径；没有任何日志文件时为空串 */
+  logFile: string;
+  /** 最后 100 行；文件为空或不存在时为空数组 */
+  logLines: string[];
+}
+
+/** 打开日志所在文件夹（不存在时后端会先创建），返回真实路径 */
+export function openLogsDir(): Promise<string> {
+  return invoke<string>("open_logs_dir");
+}
+
+/** 读取诊断信息（不联网、只读本地文件） */
+export function diagnosticsInfo(): Promise<DiagnosticsInfo> {
+  return invoke<DiagnosticsInfo>("diagnostics_info");
+}
+
 /**
  * 检查 GitHub 最新 Release。
  * 走 Rust（ureq）而不是前端 fetch：这样能复用用户设置的手动代理。

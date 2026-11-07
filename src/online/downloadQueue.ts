@@ -21,6 +21,8 @@
 import { ref, watch } from "vue";
 import { cancelInstall, installMod, loadDownloadQueue, onDownloadProgress, saveDownloadQueue } from "./service";
 import { messageOf } from "./errors";
+import { classifyNetworkFailure } from "./networkError";
+import { translate } from "../i18n";
 import { sessionPhase } from "../sessionState";
 import {
   isApiFailure,
@@ -38,6 +40,17 @@ const PERSIST_DEBOUNCE_MS = 400;
 
 /** 队列 / 历史最多保留条数（超出后丢弃最旧的已结束任务） */
 const HISTORY_LIMIT = 20;
+
+/**
+ * F1：单任务看门狗。后端 spawn_blocking 里的 ureq 下载理论上有 60s 空闲超时 +
+ * 900s 整体超时兜底，不会无限挂起；但万一 Tauri invoke 在极端环境下不返回，
+ * 前端这里再压一个 20 分钟上限，保证串行泵一定被放行。
+ */
+const WATCHDOG_TIMEOUT_MS = 1_200_000;
+/** F2：downloading 状态超过 5s 没有任何进度事件，判定为「无响应」，允许用户放弃 */
+const STALLED_AFTER_MS = 5_000;
+/** stalledTick 的刷新间隔：驱动 UI 对「90s 无进度」的响应式判定 */
+const STALLED_TICK_MS = 5_000;
 
 export type TaskStatus =
   | "queued"
@@ -101,6 +114,12 @@ export interface DownloadTask {
     thumbnail: string | null;
     force: boolean;
   };
+  /**
+   * F2：最近一次收到 Rust 进度事件（connecting/downloading）的时间戳。
+   * 用于判定「下载无响应」：downloading 超过 90s 没有新进度 = 疑似断网卡死。
+   * 不落盘，重启后为 null。
+   */
+  lastProgressAt: number | null;
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
@@ -116,6 +135,25 @@ export const runningTaskIds = ref<string[]>([]);
 
 /** 右下角面板是否展开 */
 export const managerOpen = ref(false);
+
+/**
+ * F2：每 5s 自增一次的 tick，仅用于驱动 UI 对「90s 无进度」的响应式判定。
+ * isTaskStalled() 内部读 Date.now()，普通 computed 不会随时间触发重算，
+ * 依赖这个 tick 就能在面板打开时自动刷新 stalled 状态。
+ */
+export const stalledTick = ref(0);
+let stalledTimer: number | null = null;
+
+/**
+ * 判定任务是否「下载无响应」：处于 downloading 且距上次进度事件超过 STALLED_AFTER_MS。
+ * - lastProgressAt 为 null（刚启动还没收到任何进度事件）不算 stalled，避免误判连接阶段；
+ * - installing 阶段不判（解压/写盘本来就不发进度事件）。
+ */
+export function isTaskStalled(task: DownloadTask): boolean {
+  if (task.status !== "downloading") return false;
+  if (task.lastProgressAt === null) return false;
+  return Date.now() - task.lastProgressAt > STALLED_AFTER_MS;
+}
 
 let seq = 0;
 
@@ -224,7 +262,16 @@ export interface EnqueueResult {
 /** 入队：同一 mod 已有未结束任务时拒绝（避免重复下载同一个模组） */
 export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
   const running = activeTaskOfMod(input.modId);
-  if (running) return { accepted: false, task: running, reason: "duplicate" };
+  if (running) {
+    // F4：若旧任务已「下载无响应」（断网卡死），前端直接把它标记为放弃，
+    // 释放 runningTaskIds 与队列坑位，让新任务能入队。后端线程最终返回时由
+    // runTask 的幂等保护兜底（task 已非 downloading/installing 则跳过状态写入）。
+    if (isTaskStalled(running)) {
+      forceAbandon(running, "downloader.abandoned");
+    } else {
+      return { accepted: false, task: running, reason: "duplicate" };
+    }
+  }
 
   seq += 1;
   const task: DownloadTask = {
@@ -253,6 +300,7 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
     createdAt: Date.now(),
     startedAt: null,
     finishedAt: null,
+    lastProgressAt: null,
   };
   downloadTasks.value = [...downloadTasks.value, task];
   trimHistory();
@@ -262,9 +310,38 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
 }
 
 /**
+ * F3：前端强制放弃一个「下载无响应」的任务。
+ *
+ * 后端 spawn_blocking 线程可能仍在阻塞 read() 中，这里不假装能停掉它——
+ * 只做三件事：
+ *   1. 把任务在前端状态机里标记为已结束（failed + abandoned 文案）；
+ *   2. 从 runningTaskIds 移除，让串行泵继续跑下一个；
+ *   3. best-effort 调 cancelInstall()（后端循环顶部会在下一次 read 返回后检查到）。
+ *
+ * 后端线程最终返回时，runTask 的 await 会落地；那里有幂等保护：
+ * 看到 task 已不是 downloading/installing 就不再改状态、不再 emitSettled。
+ * 磁盘清理与模组是否真装上，以后端实际结果 + 本地 scan_mods 重载为准。
+ */
+function forceAbandon(task: DownloadTask, messageKey: string): void {
+  task.status = "failed";
+  task.error = null;
+  task.message = { key: messageKey };
+  task.progress = null;
+  task.finishedAt = Date.now();
+  runningTaskIds.value = runningTaskIds.value.filter((id) => id !== task.id);
+  touch();
+  trimHistory();
+  emitSettled(task);
+  // 通知后端尽量中断（read 阻塞中不一定立刻生效，但 best effort）
+  void cancelInstall().catch(() => undefined);
+  void pump();
+}
+
+/**
  * 请求取消：
  * - 排队中 → 直接出队（零 Rust 调用）；
- * - 下载中 → 置标记 + 调后端取消，泵会在它落地后继续下一个；
+ * - 下载中且「无响应」→ 前端直接放弃（forceAbandon），不等后端；
+ * - 下载中且正常 → 置标记 + 调后端取消，泵会在它落地后继续下一个；
  * - 安装中 → 只置标记（后端此阶段无取消点），UI 显示「正在停止…」，结果以后端返回为准。
  */
 export function requestCancelTask(taskId: string): void {
@@ -279,6 +356,12 @@ export function requestCancelTask(taskId: string): void {
     return;
   }
   if (!isActive(task) || task.cancelRequested) return;
+  // F3：下载中但已 90s 无进度 = 后端大概率卡死在 read，点取消直接前端放弃，
+  // 不再只置 cancelRequested 然后干等。
+  if (task.status === "downloading" && isTaskStalled(task)) {
+    forceAbandon(task, "downloader.abandoned");
+    return;
+  }
   task.cancelRequested = true;
   touch();
   // 只有「正在真正下载」时后端才可能中断；安装阶段调用也无害（标记会被下次 install 重置）
@@ -295,6 +378,31 @@ export function removeTask(taskId: string): void {
   if (isActive(task)) return;
   downloadTasks.value = downloadTasks.value.filter((item) => item.id !== taskId);
   persistSoon();
+}
+
+/**
+ * 重试一条已结束（failed / cancelled）的任务：从旧任务快照重建入参，先移除旧记录再入队。
+ * 旧任务必须已结束（removeTask 的约束），正在跑的任务不能重试。
+ */
+export function retryTask(taskId: string): EnqueueResult {
+  const old = downloadTasks.value.find((item) => item.id === taskId);
+  // old 找不到（已被清理/重启后不存在）时 task 必须是 null，不能用 undefined；
+  // 正在跑的任务不允许重试（removeTask 约束）。
+  if (!old || isActive(old)) return { accepted: false, task: old ?? null };
+  removeTask(taskId);
+  return enqueueDownload({
+    modId: old.modId,
+    title: old.title,
+    kind: old.kind,
+    tagIds: old.payload.tagIds,
+    tagNames: old.payload.tagNames,
+    creator: old.payload.creator,
+    description: old.payload.description,
+    thumbnail: old.payload.thumbnail,
+    // 旧任务的 null（订阅状态未知）还原成「不传」，enqueue 内部会再归一成 null
+    wasSubscribed: old.wasSubscribed ?? undefined,
+    force: old.payload.force,
+  });
 }
 
 /** 清掉所有已结束（完成 / 失败 / 取消）的任务 */
@@ -357,6 +465,9 @@ async function pump(): Promise<void> {
       next.outcome = null;
       next.message = null;
       next.needForce = false;
+      // F2：以启动时刻为基准计时，避免 connecting 阶段还没收到第一个进度事件时
+      // 就被误判为 stalled。handleProgress 收到事件后会刷新这个时间戳。
+      next.lastProgressAt = Date.now();
       runningTaskIds.value = [...runningTaskIds.value, next.id];
       touch();
       // 不 await：由 MAX_CONCURRENT 决定是否继续取下一个
@@ -368,27 +479,68 @@ async function pump(): Promise<void> {
 }
 
 async function runTask(task: DownloadTask): Promise<void> {
+  // F1：看门狗。正常情况下 Rust 侧 60s 空闲超时 + 900s 整体超时必然返回；
+  // 这里再压 20 分钟前端上限，保证即使 invoke 永不 settle，串行泵也不会永久堵死。
+  let watchdog: number | undefined;
+  const watchdogPromise = new Promise<never>((_, reject) => {
+    watchdog = window.setTimeout(() => {
+      // 直接带友好文案：translateBackendMessage 找不到 key 时原样返回，
+      // 这样用户在 20 分钟看门狗兜底触发时看到的是中文提示而非英文错误码。
+      const err = new Error("下载超时，网络可能已断开") as Error & { kind?: string };
+      err.kind = "network";
+      reject(err);
+    }, WATCHDOG_TIMEOUT_MS);
+  });
+
+  // 幂等标志：只有「本次 runTask 自己把任务落地」时才 emitSettled。
+  // forceAbandon 在外部抢跑（改 status / 写 finishedAt / emitSettled / pump）后，
+  // 这里 await 才落地，看到 task 已非 active 就直接 return，不重复通知 UI。
+  let settledByUs = false;
   try {
-    const outcome = await installMod(
-      task.modId,
-      task.title,
-      task.payload.force,
-      task.payload.tagIds,
-      task.payload.tagNames,
-      task.payload.creator,
-      task.payload.description,
-      task.payload.thumbnail,
-    );
+    const outcome = await Promise.race([
+      installMod(
+        task.modId,
+        task.title,
+        task.payload.force,
+        task.payload.tagIds,
+        task.payload.tagNames,
+        task.payload.creator,
+        task.payload.description,
+        task.payload.thumbnail,
+      ),
+      watchdogPromise,
+    ]);
+    if (!isActive(task)) return; // 被 forceAbandon 抢跑，丢弃后端结果
     task.outcome = outcome;
     task.localized = outcome.localized;
     task.status = "done";
     // 安装阶段点的取消：文件已经装上了，按真实结果记为已完成
     task.message = { key: outcome.localized ? "online.installDone" : "online.installKeepSubscribed" };
+    settledByUs = true;
   } catch (e) {
+    if (!isActive(task)) return; // 同上
     const kind = isApiFailure(e) ? e.kind : null;
     if (kind === "cancelled") {
       task.status = "cancelled";
       task.message = { key: "online.downloadCancelled" };
+    } else if (kind === "network") {
+      // 底层 ureq/rustls 错误（os error 10060 / TLS close_notify / URL 等）全是技术串，
+      // 且 Rust 侧 ApiFailure::network 写死了「网络请求失败：」中文前缀，英文界面下会
+      // 中英混杂。这里统一替换成 i18n 友好文案，不把底层 msg 透传给 UI。
+      //
+      // 但「网络连接失败」这个笼统说法会把人带偏：实测日志里 CDN 失败是
+      // `tls connection init failed`（代理节点把握手掐断），而 API 同时是 200。
+      // 所以按失败形态给出可操作提示：tls → 换节点；timeout → 查网络。
+      const shape = classifyNetworkFailure(e);
+      task.status = "failed";
+      task.error =
+        shape === "tls"
+          ? translate("downloader.networkProxyError")
+          : shape === "timeout"
+            ? translate("downloader.networkTimeout")
+            : translate("downloader.networkError");
+      task.needForce = false;
+      task.message = { key: "online.installFailed" };
     } else {
       const message = messageOf(e);
       task.status = "failed";
@@ -396,13 +548,15 @@ async function runTask(task: DownloadTask): Promise<void> {
       task.needForce = kind === "install" && message.includes("允许覆盖");
       task.message = { key: "online.installFailed" };
     }
+    settledByUs = true;
   } finally {
+    if (watchdog !== undefined) window.clearTimeout(watchdog);
     task.progress = null;
     task.finishedAt = Date.now();
     runningTaskIds.value = runningTaskIds.value.filter((id) => id !== task.id);
     touch();
     trimHistory();
-    emitSettled(task);
+    if (settledByUs) emitSettled(task);
     // ★ 关键：必须在上一条 installMod() 完全落地之后才启动下一条（见文件头注释）
     void pump();
   }
@@ -419,6 +573,10 @@ function handleProgress(payload: DownloadProgress): void {
   );
   if (!task) return;
   task.progress = payload;
+  // F2：每次收到进度事件都刷新「最近活跃时间」，stalled 判定以此为基准。
+  // connecting / downloading 阶段的事件都会刷新；installing 阶段后端不发事件，
+  // isTaskStalled 也只看 downloading 状态，所以不受影响。
+  task.lastProgressAt = Date.now();
   // phase = downloaded：Rust 已下完，进入解压 / 补文件 / 写 mod-status.json 阶段
   if (payload.phase === "downloaded" && task.status === "downloading") {
     task.status = "installing";
@@ -470,6 +628,7 @@ function coerceTask(raw: Record<string, unknown>): DownloadTask | null {
     createdAt: Number(raw.createdAt) || Date.now(),
     startedAt: typeof raw.startedAt === "number" ? raw.startedAt : null,
     finishedAt: typeof raw.finishedAt === "number" ? raw.finishedAt : null,
+    lastProgressAt: null, // 运行时字段，不落盘
   };
 }
 
@@ -520,6 +679,13 @@ export async function initDownloadQueue(): Promise<void> {
   await restorePersisted();
   watch(sessionPhase, () => resumeIfOnline(), { immediate: true });
   if (downloadTasks.value.length) persistSoon();
+  // F2：启动 stalledTick，每 5s 自增一次，驱动 UI 对「90s 无进度」的响应式判定。
+  // 模块级常驻，不需要清理（应用生命周期内只 init 一次）。
+  if (stalledTimer === null) {
+    stalledTimer = window.setInterval(() => {
+      stalledTick.value += 1;
+    }, STALLED_TICK_MS);
+  }
 }
 
 /** 强制把当前队列写盘（退出前 / 手动清理后可用） */

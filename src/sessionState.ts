@@ -9,8 +9,8 @@
  */
 import { computed, ref } from "vue";
 import { listen } from "@tauri-apps/api/event";
-import { clearLoginCache, sessionStatus, startupSession } from "./online/service";
-import { noteRequestSuccess } from "./online/networkError";
+import { clearLoginCache, modTags, sessionStatus, startupSession } from "./online/service";
+import { isNetworkError } from "./online/networkError";
 import { translate } from "./i18n";
 import { translateBackendMessage } from "./format";
 import type { SessionStatus } from "./online/types";
@@ -120,6 +120,52 @@ export function requestOpenSettings(): void {
  */
 export const localSearchEnabled = ref(false);
 
+/** 断网自愈探测的节流窗口：30s 内最多一次，避免登录轮询期间反复发请求 */
+const AUTO_PROBE_INTERVAL_MS = 30000;
+let lastAutoProbeAt = 0;
+/** 正在飞的真实网络探针：同一时刻只允许一个，避免一次点击打出两个 GET */
+let probeInflight: Promise<boolean> | null = null;
+
+/**
+ * 真实网络探针（共享去重）。
+ *
+ * 自动自愈、左下角「测网」、「立即重新校验」都走这里：
+ * `recheck()` 里 `ensureSession → markOnline` 可能已经启动一次自动探测，
+ * 随后显式探测若再发一次，日志里就会出现同秒两个 `GET /mods/Tags`。
+ * 用同一个在飞 Promise 去重后，一次操作最多只有一个请求。
+ *
+ * 返回值只表示成功/失败；失败的具体形态由 `networkError.ts` 记录。
+ */
+export function probeNetwork(): Promise<boolean> {
+  if (probeInflight) return probeInflight;
+  // 用局部常量承接：闭包里会把 probeInflight 置空，直接 return 该变量会被收窄成可空类型
+  const task = modTags()
+    .then(
+      () => true,
+      () => false,
+    )
+    .finally(() => {
+      probeInflight = null;
+    });
+  probeInflight = task;
+  return task;
+}
+
+/**
+ * 断网标志为 true 时，补一次真实请求帮助它自动归零。
+ *
+ * 只在这里发请求：登录态探测本身不联网，不能替真实网络背书。
+ * 成功 → `service` 的 `tracked()` 自动清零；失败 → 保持断网态，等下一个节流窗口
+ * 或用户点左下角「测网」。
+ */
+function probeNetworkIfNeeded(): void {
+  if (!isNetworkError.value) return;
+  const now = Date.now();
+  if (now - lastAutoProbeAt < AUTO_PROBE_INTERVAL_MS) return;
+  lastAutoProbeAt = now;
+  void probeNetwork();
+}
+
 /**
  * 登录态有效：点亮绿灯。
  *
@@ -134,10 +180,14 @@ export function markOnline(status?: SessionStatus | null): void {
   }
   const wasOnline = sessionPhase.value === "online";
   sessionPhase.value = "online";
-  // 会话探测能成功返回 = 网络确实通了：顺手清掉全局断网标志，
-  // 否则断网期间点过模组后，这个标志会一直把详情请求挡在门外
-  noteRequestSuccess();
+  // 注意：这里**不能**清全局断网标志。
+  // 会话探测（online_session_status）只读本地 Cookie / DPAPI 缓存，不发 HTTP，
+  // 「探测成功」不等于「网络通了」。断网标志只能由真实请求成功清除
+  // （见 online/networkError.ts 的 noteRequestSuccess 调用点），
+  // 否则「立即重新校验」会在网络仍然不通时把底栏刷成绿灯。
   if (!wasOnline) sessionEpoch.value += 1;
+  // 网络恢复后底栏不能一直红：补一次轻量真实探测（30s 节流，避免登录轮询狂发请求）
+  probeNetworkIfNeeded();
   lastCheckedMs.value = Date.now();
 }
 

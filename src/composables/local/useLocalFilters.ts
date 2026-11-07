@@ -122,6 +122,17 @@ export function useLocalFilters(deps: {
           const bv = b.lastUpdateMs ?? -1;
           return bv - av;
         }
+        case "download": {
+          // 最近下载/重装的排最前；无 metadata 记录的（老模组 / 手动放入）排最后，
+          // 次级按名字，保证同批无记录模组顺序稳定。
+          const av = a.installedAtMs ?? -1;
+          const bv = b.installedAtMs ?? -1;
+          if (av !== bv) return bv - av;
+          return collator.compare(
+            displayTitle(a.workshopId, a.displayName),
+            displayTitle(b.workshopId, b.displayName),
+          );
+        }
         case "priority": {
           const av = a.priority ?? Number.MAX_SAFE_INTEGER;
           const bv = b.priority ?? Number.MAX_SAFE_INTEGER;

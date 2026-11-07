@@ -770,6 +770,7 @@ const sortModel = computed<string>({
 const localSortOptions = computed(() => [
   { value: "name", label: t("toolbar.sortName") },
   { value: "updated", label: t("toolbar.sortUpdated") },
+  { value: "download", label: t("toolbar.sortDownload") },
   { value: "priority", label: t("toolbar.sortPriority") },
   { value: "folder", label: t("toolbar.sortFolder") },
 ]);

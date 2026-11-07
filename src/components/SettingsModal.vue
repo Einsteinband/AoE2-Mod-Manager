@@ -233,7 +233,8 @@ function resetTypography() {
 }
 
 const REPO_URL = "https://github.com/Einsteinband/AoE2-Mod-Manager";
-const AUTHOR_URL = "https://github.com/Einsteinband";
+/** 反馈入口：GitHub Issues（原「作者主页」链接按用户要求下线，替换为反馈入口） */
+const ISSUES_URL = "https://github.com/Einsteinband/AoE2-Mod-Manager/issues";
 /** 蓝奏云网盘（备用下载 / 资源）：界面上不显示明文链接，只能点按钮走系统浏览器 */
 const LANZOU_URL = "https://wwblm.lanzouv.com/b01i5yfj5e";
 
@@ -432,9 +433,9 @@ async function openRepo() {
   }
 }
 
-async function openAuthor() {
+async function openIssues() {
   try {
-    await openExternalUrl(AUTHOR_URL);
+    await openExternalUrl(ISSUES_URL);
   } catch (e) {
     checkError.value = describe(e);
   }
@@ -1966,8 +1967,10 @@ onBeforeUnmount(() => {
               <button type="button" class="about-link" @click="openRepo">{{ REPO_URL }}</button>
             </div>
             <div class="about-line">
-              <span class="row-title">{{ t("settings.author") }}</span>
-              <button type="button" class="about-link" @click="openAuthor">{{ AUTHOR_URL }}</button>
+              <span class="row-title">{{ t("settings.feedback") }}</span>
+              <button type="button" class="about-link" @click="openIssues">
+                {{ t("settings.feedbackButton") }}
+              </button>
             </div>
 
             <div class="about-line about-cloud">

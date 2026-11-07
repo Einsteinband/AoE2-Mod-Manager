@@ -2611,6 +2611,80 @@ async fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
 
 // ---------------- v0.4.5：本地日志与「复制诊断信息给 AI」 ----------------
 
+/// 本次运行的日志文件名（不含 `.log` 后缀），形如 `aoe2mm-20261107-175230`。
+///
+/// 用 `OnceLock` 固定：插件初始化时求值一次，之后清理旧文件、诊断导出都读同一个值，
+/// 保证「本次运行」这个语义在整个进程里不会漂移。
+static SESSION_LOG_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// 生成本次运行的日志文件名。取本地时区，取不到就退回 UTC（不让它挡住启动）。
+fn session_log_name() -> String {
+    SESSION_LOG_NAME
+        .get_or_init(|| {
+            let now = time::OffsetDateTime::now_local()
+                .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+            format!(
+                "aoe2mm-{:04}{:02}{:02}-{:02}{:02}{:02}",
+                now.year(),
+                now.month() as u8,
+                now.day(),
+                now.hour(),
+                now.minute(),
+                now.second()
+            )
+        })
+        .clone()
+}
+
+/// 每次运行都新建一个日志文件，旧文件不清会无限堆积。
+///
+/// 只保留最近 19 份历史文件 + 本次运行的文件（共 20 份）；
+/// 本次正在写的文件永远不参与删除判定，避免把自己删掉。
+fn prune_old_logs(dir: &std::path::Path) {
+    const KEEP_OLD: usize = 19;
+    let current = format!("{}.log", session_log_name());
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("aoe2mm") || !name.ends_with(".log") {
+            continue;
+        }
+        if name == current {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        files.push((mtime, path));
+    }
+    if files.len() <= KEEP_OLD {
+        return;
+    }
+    // 新的在前，把超出保留数的部分删掉
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut removed = 0usize;
+    for (_, path) in files.into_iter().skip(KEEP_OLD) {
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        log::info!(
+            target: "diagnostics",
+            "清理旧日志：删除 {removed} 份，保留最近 {} 份（含本次运行）",
+            KEEP_OLD + 1
+        );
+    }
+}
+
 /// 日志目录：与 tauri-plugin-log 的 `LogDir` 目标完全一致
 /// （Windows 下 = `%LOCALAPPDATA%\com.aoe2.modmanager\logs`）。
 /// 前端不再让用户自己翻文件夹，统一走这个入口。
@@ -2972,19 +3046,24 @@ pub fn run() {
         }))
         // 日志插件紧随其后：Stdout + 落盘双路输出。
         // v3.2：release 构建的 GUI 没有终端可看，只写 Stdout 等于没有日志；
-        // 现在同时写 %LOCALAPPDATA%\<bundleId>\logs\ 下的 aoe2mm.*.log，
+        // 现在同时写 %LOCALAPPDATA%\<bundleId>\logs\ 下的 aoe2mm-<启动时间>.log，
         // 用户报障时直接要这个文件即可（本次回归排查就是被这一点卡住的）。
+        //
+        // v0.4.7：改成**每次运行一个独立文件**（文件名带启动时的本地时间）。
+        // 单一文件滚动会把几次运行混在一起，贴日志时很难区分哪段属于哪次复现；
+        // 分开后「本次运行」=「本次启动的那个文件」，定位问题不会有歧义。
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
                     tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                        file_name: Some("aoe2mm".into()),
+                        file_name: Some(session_log_name()),
                     }),
                 ])
-                // v0.4.5：按大小滚动。单个文件上限 5MB，写满即改名成
-                // aoe2mm_<时间戳>.log，最多保留 5 份旧文件（含当前文件约 30MB 封顶），
-                // 用户长期挂机也不会把硬盘写满。
+                // 单个文件仍保留 5MB 上限并按大小滚动（改名成
+                // aoe2mm-<启动时间>.<时间戳>.log），长期挂机不会把硬盘写满。
+                // 注意：该策略只约束**单个运行文件**，跨运行的文件清理由
+                // prune_old_logs() 负责（见 setup）。
                 .max_file_size(5 * 1024 * 1024)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
                 // 时间戳用本地时区（默认 UTC，用户对照“几点点的登录按钮”时会差 8 小时）
@@ -3000,6 +3079,12 @@ pub fn run() {
         // 否则前端 asset: URL 读本地 jpg 会被拒绝。
         .setup(|app| {
             images::allow_scope(app.handle());
+            // v0.4.7：每次运行一个日志文件，这里清理超出的历史文件（保留 20 份）。
+            // 放在 setup 而不是插件构建期：那时 AppHandle 可用，能拿到准确的日志目录。
+            match logs_dir_for(app.handle()) {
+                Ok(dir) => prune_old_logs(&dir),
+                Err(e) => log::warn!(target: "diagnostics", "清理旧日志跳过：{e}"),
+            }
             // ★ 关闭即退出：右上角 X 必须真正结束进程。
             // 病灶：会话探测 / 静默重登会在后台常驻一个**隐藏**的账号 WebView2 窗口
             // （session::ensure_account_window(…, visible=false)，见 online/session.rs:492），

@@ -606,6 +606,7 @@ fn collect_entry(
         enabled: status.enabled,
         priority: status.priority,
         last_update_ms: status.last_update,
+        installed_at_ms: recorded.map(|m| m.installed_at_ms),
         checksum: status.checksum,
         content_tags,
         categories,

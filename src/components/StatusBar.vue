@@ -12,12 +12,13 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { getNetworkSettings, openLogin } from "../online/service";
-import { isNetworkError } from "../online/networkError";
+import { isNetworkError, networkFailureKind, noteRequestFailure } from "../online/networkError";
 import { openExternalUrl } from "../api";
 import { translateBackendMessage } from "../format";
 import {
   ensureSession,
   lastCheckedMs,
+  probeNetwork,
   requestManualRefresh,
   sessionError,
   sessionInfo,
@@ -34,6 +35,12 @@ const root = ref<HTMLElement | null>(null);
 const menuOpen = ref(false);
 const loggingIn = ref(false);
 const proxySourceKey = ref<string | null>(null);
+/** 代理来源原始值（manual / system / env / direct）：决定断网提示该怪网络还是怪代理 */
+const proxySource = ref<string | null>(null);
+/** 测网中（防连点） */
+const networkProbing = ref(false);
+/** 最近一次测网是否成功；null = 还没测过 */
+const networkProbeOk = ref<boolean | null>(null);
 /**
  * 代理胶囊：只存「来源的 i18n key」，渲染时才拼文案。
  * 之前是一枚 ref("") 快照，切换语言后仍停在旧语言（英文界面出现「代理：直连」），
@@ -54,8 +61,40 @@ const dot = computed(() => {
   return "⚪";
 });
 
+/** 当前是否真的配了代理（direct = 没配） */
+const usingProxy = computed(
+  () =>
+    proxySource.value === "manual" ||
+    proxySource.value === "system" ||
+    proxySource.value === "env",
+);
+
+/**
+ * 断网提示分级（v0.4.7）：以前一律说「网络已断开」，但三种情况该修的东西完全不同。
+ * - TLS 握手被中途掐断 + 已配代理 → 代理节点/规则的问题
+ * - TLS 握手被中途掐断 + 直连   → 直连被拦截，需要开代理
+ * - 超时 / DNS / 其他           → 网络本身不可用
+ */
+const networkDownLabel = computed(() => {
+  if (!isNetworkError.value) return "";
+  if (networkFailureKind.value === "tls") {
+    return usingProxy.value ? t("statusbar.proxyDown") : t("statusbar.tlsDown");
+  }
+  if (networkFailureKind.value === "timeout") return t("statusbar.timeoutDown");
+  return t("statusbar.networkDown");
+});
+
+const networkDownHint = computed(() => {
+  if (!isNetworkError.value) return "";
+  if (networkFailureKind.value === "tls") {
+    return usingProxy.value ? t("statusbar.proxyDownHint") : t("statusbar.tlsDownHint");
+  }
+  if (networkFailureKind.value === "timeout") return t("statusbar.timeoutDownHint");
+  return t("statusbar.networkDownHint");
+});
+
 const accountText = computed(() => {
-  if (isNetworkError.value) return t("statusbar.networkDown");
+  if (isNetworkError.value) return networkDownLabel.value;
   if (sessionPhase.value === "online") return t("statusbar.onlineShort");
   if (sessionPhase.value === "checking") return t("statusbar.checkingShort");
   return t("statusbar.offline");
@@ -63,7 +102,7 @@ const accountText = computed(() => {
 
 /** 悬停显示来源 + Cookie 数（按需求不抓 Xbox 名字，避免官网改版失效） */
 const accountTitle = computed(() => {
-  if (isNetworkError.value) return t("statusbar.networkDownTitle");
+  if (isNetworkError.value) return networkDownHint.value || t("statusbar.networkDownTitle");
   const info = sessionInfo.value;
   if (sessionPhase.value !== "online" || !info) return t("statusbar.loginHint");
   return t("statusbar.source", {
@@ -74,7 +113,7 @@ const accountTitle = computed(() => {
 
 const middleText = computed(() => {
   // 断网时这条信息比“已从缓存加载 / 数据已刷新”更重要
-  if (isNetworkError.value) return t("statusbar.networkDownHint");
+  if (isNetworkError.value) return networkDownHint.value || t("statusbar.networkDownHint");
   if (statusMessage.value) return statusMessage.value;
   if (sessionPhase.value === "checking") return t("statusbar.checking");
   const ms = lastCheckedMs.value;
@@ -107,6 +146,7 @@ async function openAccountCenter(): Promise<void> {
 async function loadProxy() {
   try {
     const view = await getNetworkSettings();
+    proxySource.value = view.source;
     proxySourceKey.value =
       view.source === "manual"
         ? "statusbar.proxyManual"
@@ -116,6 +156,7 @@ async function loadProxy() {
             ? "statusbar.proxyEnv"
             : "statusbar.proxyDirect";
   } catch {
+    proxySource.value = null;
     proxySourceKey.value = null;
   }
 }
@@ -124,11 +165,70 @@ async function toggleMenu() {
   menuOpen.value = !menuOpen.value;
 }
 
-/** 用户点击「立即重新校验」：强制再探一次，成功后推一次手工刷新信号 */
+/** 测网请求的超时上限：超过这个时间还没回包，按超时处理并点亮断网标志 */
+const PROBE_TIMEOUT_MS = 12000;
+
+/**
+ * 测网：发一次真实请求（Tags 字典，最小的 GET）验证「本机 → 代理 → 目标站点」整条链路。
+ *
+ * 为什么必须联网：`isNetworkError` 是粘滞标志，只有真实请求成功才会清零。
+ * 会话探测（读本地 Cookie）永远不会清它，这正是旧版「立即重新校验」失效的原因。
+ *
+ * 请求本身走 `sessionState.probeNetwork()` 共享去重：
+ * `recheck()` 里 `markOnline` 可能已顺带启动一次自动探测，这里直接复用它，
+ * 保证一次点击最多只打一个 `GET /mods/Tags`。
+ */
+async function probeNetworkNow(): Promise<boolean> {
+  if (networkProbing.value) return networkProbeOk.value === true;
+  networkProbing.value = true;
+  // 代理链路可能在挂载后变化（例如用户中途才打开 Clash）：
+  // 测网前刷新一次来源，否则分级会拿旧的「直连」去解释新的失败
+  await loadProxy();
+  try {
+    let timer: number | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error("__probe_timeout__")), PROBE_TIMEOUT_MS);
+    });
+    try {
+      const ok = await Promise.race([probeNetwork(), timeout]);
+      networkProbeOk.value = ok;
+      return ok;
+    } finally {
+      if (timer !== undefined) window.clearTimeout(timer);
+    }
+  } catch (e) {
+    // 失败已由 service 的 tracked() 记进全局标志；这里只补记超时（tracked 收不到 race 的超时）
+    if (e instanceof Error && e.message === "__probe_timeout__") {
+      noteRequestFailure({ kind: "timeout", message: `测网请求超时（${PROBE_TIMEOUT_MS / 1000}s）` });
+    }
+    networkProbeOk.value = false;
+    return false;
+  } finally {
+    networkProbing.value = false;
+  }
+}
+
+/** 左下角「测网」按钮：只测网络，不碰登录态 */
+async function testNetwork(): Promise<void> {
+  const ok = await probeNetworkNow();
+  if (ok) {
+    setStatusMessageKey("statusbar.netOk");
+    return;
+  }
+  // 非网络类失败（HTTP 状态 / 鉴权）：网络其实是通的，不能借断网文案误导用户
+  if (!isNetworkError.value) setStatusMessageKey("statusbar.netFailOther");
+}
+
+/**
+ * 用户点击「立即重新校验」：
+ * 1) 验登录态（读本地 Cookie，不联网）
+ * 2) 再验真实网络 —— 否则按钮名不副实，断网标志永远清不掉
+ */
 async function recheck() {
   menuOpen.value = false;
-  const ok = await ensureSession(true);
-  if (ok) {
+  const loggedIn = await ensureSession(true);
+  const reachable = await probeNetworkNow();
+  if (loggedIn && reachable) {
     setStatusMessageKey("statusbar.loginDone");
     requestManualRefresh();
   }
@@ -199,6 +299,23 @@ onBeforeUnmount(() => {
       <span class="sb-dot">{{ dot }}</span>
       <span class="sb-label">{{ accountText }}</span>
       <span v-if="loggingIn" class="spinner sb-spin"></span>
+    </button>
+
+    <!-- 左下角测网：发一次真实请求，直接回答「现在是网络断了还是代理不通」 -->
+    <button
+      type="button"
+      class="sb-netcheck"
+      :class="{
+        probing: networkProbing,
+        ok: networkProbeOk === true && !isNetworkError,
+        fail: networkProbeOk === false || isNetworkError,
+      }"
+      :title="t('statusbar.netcheckTitle')"
+      :disabled="networkProbing"
+      @click="testNetwork"
+    >
+      <span v-if="networkProbing" class="spinner sb-spin"></span>
+      <span v-else>{{ t("statusbar.netcheck") }}</span>
     </button>
 
     <div v-if="menuOpen" class="sb-menu">
@@ -292,6 +409,47 @@ onBeforeUnmount(() => {
   width: 9px;
   height: 9px;
   border-width: 1.5px;
+}
+
+/* 左下角「测网」：常驻的独立入口，不复用账号灯，避免测网时把登录态灯光打乱 */
+.sb-netcheck {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  min-width: 34px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.sb-netcheck:hover:not(:disabled) {
+  color: var(--gold-bright);
+  border-color: var(--gold-dim);
+  background: rgba(var(--accent-rgb), 0.1);
+}
+.sb-netcheck.probing {
+  cursor: progress;
+  color: var(--gold-dim);
+  border-color: var(--gold-dim);
+}
+.sb-netcheck.ok {
+  color: var(--gold);
+  border-color: var(--gold-dim);
+}
+.sb-netcheck.fail {
+  color: var(--danger-text);
+  border-color: var(--danger-text);
+}
+.sb-netcheck:disabled {
+  cursor: progress;
 }
 
 .sb-mid {

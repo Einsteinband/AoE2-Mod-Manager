@@ -237,7 +237,8 @@ watch(
 
       <div v-if="installError" class="online-error">{{ installError }}</div>
 
-      <pre v-if="installNote" class="online-note-box">{{ installNote }}</pre>
+      <!-- 安装成功后的详细报告（Final location / mod-status.json backup / 解压字节数等）
+           对用户无价值，已隐藏；installNote prop 保留不渲染，避免改父组件传参。 -->
     </section>
 
     <!-- ③ 描述区（v2.1）：夹在主操作与其他操作之间，长文本折叠 -->

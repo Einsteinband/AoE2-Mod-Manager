@@ -211,6 +211,14 @@ pub struct Settings {
     /// v2.4：卡片列表字号（px，10..=16，默认 12）—— 对应 CSS 变量 --card-font-size。
     #[serde(default = "default_card_font_size")]
     pub card_font_size: u32,
+    /// v3.3：卡片列表字重（400 常规 / 700 加粗，默认 400）—— 对应 CSS 变量 --card-font-weight。
+    /// 与字号分开，让「卡片字变大」和「卡片字变粗」互不牵连。
+    #[serde(default = "default_card_font_weight")]
+    pub card_font_weight: u32,
+    /// v3.5：英文界面是否使用「西文专用字体栈」（Segoe UI 打头，再接用户选的中文字体做中文 fallback）。
+    /// 只在英文界面生效，中文界面一律忽略此值；默认 true —— 英文用中文字体的西文字形会明显偏宽。
+    #[serde(default = "default_latin_font")]
+    pub latin_font: bool,
     /// v3.2：三类本地缓存的自定义存放目录（**None = 用默认 AppData 位置**）。
     /// 只存用户明确选过的路径；目录不存在 / 空串一律回退默认，判定统一在
     /// [`crate::get_cache_dir`] 里做，本结构不碰文件系统。
@@ -312,12 +320,22 @@ fn default_card_font_size() -> u32 {
     CARD_FONT_SIZE_DEFAULT
 }
 
+fn default_card_font_weight() -> u32 {
+    CARD_FONT_WEIGHT_DEFAULT
+}
+
+fn default_latin_font() -> bool {
+    LATIN_FONT_DEFAULT
+}
+
 /// 界面字体种类：黑体
 pub const UI_FONT_FAMILY_HEI: &str = "hei";
 /// 界面字体种类：幼圆
 pub const UI_FONT_FAMILY_YOUYUAN: &str = "youyuan";
 /// 界面字体种类：跟随系统
 pub const UI_FONT_FAMILY_SYSTEM: &str = "system";
+/// v3.3：界面字体种类：衬线（宋体系）。与黑体正好构成「衬线 / 无衬线」的一对。
+pub const UI_FONT_FAMILY_SERIF: &str = "serif";
 pub const UI_FONT_FAMILY_DEFAULT: &str = UI_FONT_FAMILY_HEI;
 
 /// 界面字重两档：常规 / 加粗（对应 CSS 变量 --ui-font-weight）
@@ -325,12 +343,15 @@ pub const UI_FONT_WEIGHT_NORMAL: u32 = 400;
 pub const UI_FONT_WEIGHT_BOLD: u32 = 700;
 pub const UI_FONT_WEIGHT_DEFAULT: u32 = UI_FONT_WEIGHT_NORMAL;
 
-/// 字体种类归一化：只认 hei / youyuan / system，其余一律回黑体。
-/// v2.4 旧值静默改写："sans-serif" / "serif" → hei；"system-ui" → system（语义不变）。
+/// 字体种类归一化：只认 hei / youyuan / system / serif，其余一律回黑体。
+/// v2.4 旧值静默改写："sans-serif" → hei；"system-ui" → system。
+/// v3.3 起 "serif" 成为独立合法档位（衬线），不再改写成 hei。
 pub fn normalize_ui_font_family(family: &str) -> String {
     let trimmed = family.trim();
     if trimmed.eq_ignore_ascii_case(UI_FONT_FAMILY_YOUYUAN) {
         UI_FONT_FAMILY_YOUYUAN.to_string()
+    } else if trimmed.eq_ignore_ascii_case(UI_FONT_FAMILY_SERIF) {
+        UI_FONT_FAMILY_SERIF.to_string()
     } else if trimmed.eq_ignore_ascii_case(UI_FONT_FAMILY_SYSTEM)
         || trimmed.eq_ignore_ascii_case("system-ui")
     {
@@ -415,6 +436,24 @@ pub fn normalize_reader_font_weight(weight: u32) -> u32 {
 pub const CARD_FONT_SIZE_MIN: u32 = 10;
 pub const CARD_FONT_SIZE_MAX: u32 = 16;
 pub const CARD_FONT_SIZE_DEFAULT: u32 = 12;
+
+/// v3.3：卡片列表字重（400 常规 / 700 加粗，默认 400）—— 对应 CSS 变量 --card-font-weight。
+pub const CARD_FONT_WEIGHT_NORMAL: u32 = 400;
+pub const CARD_FONT_WEIGHT_BOLD: u32 = 700;
+pub const CARD_FONT_WEIGHT_DEFAULT: u32 = CARD_FONT_WEIGHT_NORMAL;
+
+/// v3.5：英文界面「西文专用字体栈」开关的出厂默认值。
+/// true = 英文界面用 Segoe UI 等西文字体打头（更紧凑、更接近原生 Windows 应用）。
+pub const LATIN_FONT_DEFAULT: bool = true;
+
+/// 卡片字重归一化：只保留 400 / 700，阈值 600（与前端 normalizeCardFontWeight 一致）。
+pub fn normalize_card_font_weight(weight: u32) -> u32 {
+    if weight >= 600 {
+        CARD_FONT_WEIGHT_BOLD
+    } else {
+        CARD_FONT_WEIGHT_NORMAL
+    }
+}
 
 /// 把任意字号夹进 10..=16（卡片标题 / 元信息共用这一档）。
 pub fn clamp_card_font_size(size: u32) -> u32 {
@@ -505,6 +544,8 @@ impl Default for Settings {
             reader_line_height: default_reader_line_height(),
             reader_font_weight: default_reader_font_weight(),
             card_font_size: default_card_font_size(),
+            card_font_weight: default_card_font_weight(),
+            latin_font: default_latin_font(),
             // v3.2：三类缓存默认都放在 AppData 里（用户改过才写入具体路径）
             image_cache_dir: None,
             mod_info_cache_dir: None,

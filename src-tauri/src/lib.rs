@@ -1246,6 +1246,8 @@ async fn save_typography_prefs(
     reader_line_height: f32,
     reader_font_weight: u32,
     card_font_size: u32,
+    card_font_weight: u32,
+    latin_font: bool,
 ) -> Result<models::Settings, String> {
     let path = settings_path(&app)?;
     let mut current = settings::load(&path);
@@ -1258,6 +1260,9 @@ async fn save_typography_prefs(
     current.reader_line_height = models::normalize_reader_line_height(reader_line_height);
     current.reader_font_weight = models::normalize_reader_font_weight(reader_font_weight);
     current.card_font_size = models::clamp_card_font_size(card_font_size);
+    current.card_font_weight = models::normalize_card_font_weight(card_font_weight);
+    // v3.5：纯布尔开关，无非法值需要归一化
+    current.latin_font = latin_font;
     settings::save(&path, &current)?;
     Ok(current)
 }

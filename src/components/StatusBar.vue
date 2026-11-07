@@ -18,6 +18,7 @@ import { translateBackendMessage } from "../format";
 import {
   ensureSession,
   lastCheckedMs,
+  logoutAndClearSession,
   probeNetwork,
   requestManualRefresh,
   sessionError,
@@ -28,7 +29,12 @@ import {
   statusMessage,
 } from "../sessionState";
 
-const props = defineProps<{ localCount: number; mode: "local" | "online" }>();
+/**
+ * v0.4.7：右侧的「本地 N 个」与「本地/在线」两枚标签已移除 —— 当前页面本身已经说明
+ * 自己在哪个模式，模组总数在顶栏也有，这里属于重复信息。
+ * 仍保留声明：不改 App.vue 的调用签名，多余 prop 无害。
+ */
+defineProps<{ localCount: number; mode: "local" | "online" }>();
 const { t } = useI18n();
 
 const root = ref<HTMLElement | null>(null);
@@ -37,10 +43,13 @@ const loggingIn = ref(false);
 const proxySourceKey = ref<string | null>(null);
 /** 代理来源原始值（manual / system / env / direct）：决定断网提示该怪网络还是怪代理 */
 const proxySource = ref<string | null>(null);
-/** 测网中（防连点） */
+/** 校验连接进行中（防连点） */
 const networkProbing = ref(false);
-/** 最近一次测网是否成功；null = 还没测过 */
-const networkProbeOk = ref<boolean | null>(null);
+/** 最近一次探测结果；并发调用时复用它，避免连点第二次误报「不通」 */
+const lastProbeOk = ref<boolean | null>(null);
+/** 退出登录进行中 / 上一次失败原因（失败必须如实显示，不能假装成功） */
+const loggingOut = ref(false);
+const logoutError = ref<string | null>(null);
 /**
  * 代理胶囊：只存「来源的 i18n key」，渲染时才拼文案。
  * 之前是一枚 ref("") 快照，切换语言后仍停在旧语言（英文界面出现「代理：直连」），
@@ -106,6 +115,16 @@ const accountTitle = computed(() => {
   const info = sessionInfo.value;
   if (sessionPhase.value !== "online" || !info) return t("statusbar.loginHint");
   return t("statusbar.source", {
+    src: info.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview"),
+    n: info.cookieCount,
+  });
+});
+
+/** 二级菜单里的账号行（原来在线页侧栏那段已迁到这里，全应用只留这一处） */
+const sessionLine = computed(() => {
+  const info = sessionInfo.value;
+  if (sessionPhase.value !== "online" || !info) return t("statusbar.offline");
+  return t("statusbar.sessionLine", {
     src: info.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview"),
     n: info.cookieCount,
   });
@@ -179,7 +198,7 @@ const PROBE_TIMEOUT_MS = 12000;
  * 保证一次点击最多只打一个 `GET /mods/Tags`。
  */
 async function probeNetworkNow(): Promise<boolean> {
-  if (networkProbing.value) return networkProbeOk.value === true;
+  if (networkProbing.value) return lastProbeOk.value === true;
   networkProbing.value = true;
   // 代理链路可能在挂载后变化（例如用户中途才打开 Clash）：
   // 测网前刷新一次来源，否则分级会拿旧的「直连」去解释新的失败
@@ -190,8 +209,9 @@ async function probeNetworkNow(): Promise<boolean> {
       timer = window.setTimeout(() => reject(new Error("__probe_timeout__")), PROBE_TIMEOUT_MS);
     });
     try {
+      // 成功 / 失败都会写进全局断网标志（由 service 的 tracked() 负责），这里只回传结果
       const ok = await Promise.race([probeNetwork(), timeout]);
-      networkProbeOk.value = ok;
+      lastProbeOk.value = ok;
       return ok;
     } finally {
       if (timer !== undefined) window.clearTimeout(timer);
@@ -199,38 +219,64 @@ async function probeNetworkNow(): Promise<boolean> {
   } catch (e) {
     // 失败已由 service 的 tracked() 记进全局标志；这里只补记超时（tracked 收不到 race 的超时）
     if (e instanceof Error && e.message === "__probe_timeout__") {
-      noteRequestFailure({ kind: "timeout", message: `测网请求超时（${PROBE_TIMEOUT_MS / 1000}s）` });
+      noteRequestFailure({ kind: "timeout", message: `校验连接超时（${PROBE_TIMEOUT_MS / 1000}s）` });
     }
-    networkProbeOk.value = false;
+    lastProbeOk.value = false;
     return false;
   } finally {
     networkProbing.value = false;
   }
 }
 
-/** 左下角「测网」按钮：只测网络，不碰登录态 */
-async function testNetwork(): Promise<void> {
-  const ok = await probeNetworkNow();
-  if (ok) {
-    setStatusMessageKey("statusbar.netOk");
-    return;
-  }
-  // 非网络类失败（HTTP 状态 / 鉴权）：网络其实是通的，不能借断网文案误导用户
-  if (!isNetworkError.value) setStatusMessageKey("statusbar.netFailOther");
-}
-
 /**
- * 用户点击「立即重新校验」：
+ * 二级菜单里的「校验连接」：原来的「测网」与「立即重新校验」已合并到这里。
+ *
+ * 两步都做（只做网络那一步等于半个功能）：
  * 1) 验登录态（读本地 Cookie，不联网）
- * 2) 再验真实网络 —— 否则按钮名不副实，断网标志永远清不掉
+ * 2) 向官方接口发一次真实请求验网络 —— 断网标志只有真实请求成功才会清零
+ *
+ * 四种组合都要给提示：旧实现只在「登录✓且网络✓」时说话，另外三种全静默，
+ * 用户点了没反应，反而会以为是按钮坏了。
  */
-async function recheck() {
+async function recheck(): Promise<void> {
   menuOpen.value = false;
+  logoutError.value = null;
   const loggedIn = await ensureSession(true);
   const reachable = await probeNetworkNow();
   if (loggedIn && reachable) {
     setStatusMessageKey("statusbar.loginDone");
     requestManualRefresh();
+    return;
+  }
+  if (loggedIn) {
+    // 网络不通：具体原因（代理失败 / 超时 / 连接被中断）由 networkDownLabel 显示
+    setStatusMessageKey("statusbar.checkNetworkFailed");
+    return;
+  }
+  setStatusMessageKey(reachable ? "statusbar.checkLoginFailed" : "statusbar.checkAllFailed");
+}
+
+/**
+ * 二级菜单里的「退出登录 / 清缓存」。
+ * 失败必须如实显示原因（后端可能是「文件被占用，请重启软件」），
+ * 绝不能在失败时也提示「已退出登录」。
+ */
+async function doLogout(): Promise<void> {
+  if (loggingOut.value) return;
+  loggingOut.value = true;
+  logoutError.value = null;
+  try {
+    await logoutAndClearSession();
+    menuOpen.value = false;
+    setStatusMessageKey("statusbar.logoutDone");
+  } catch (e) {
+    const raw = e instanceof Error ? e.message : String(e);
+    // 后端「退出登录失败：文件被占用…」走独立键，避免把中文原因原样带到英文界面
+    logoutError.value = /退出登录失败|退出登录未完成/.test(raw)
+      ? t("online.logoutFailed")
+      : translateBackendMessage(raw);
+  } finally {
+    loggingOut.value = false;
   }
 }
 
@@ -297,29 +343,25 @@ onBeforeUnmount(() => {
       @click="toggleMenu"
     >
       <span class="sb-dot">{{ dot }}</span>
-      <span class="sb-label">{{ accountText }}</span>
-      <span v-if="loggingIn" class="spinner sb-spin"></span>
+      <span class="sb-label">{{ t("statusbar.accountMenu") }}</span>
+      <span v-if="loggingIn || networkProbing || loggingOut" class="spinner sb-spin"></span>
     </button>
 
-    <!-- 左下角测网：发一次真实请求，直接回答「现在是网络断了还是代理不通」 -->
-    <button
-      type="button"
-      class="sb-netcheck"
-      :class="{
-        probing: networkProbing,
-        ok: networkProbeOk === true && !isNetworkError,
-        fail: networkProbeOk === false || isNetworkError,
-      }"
-      :title="t('statusbar.netcheckTitle')"
-      :disabled="networkProbing"
-      @click="testNetwork"
-    >
-      <span v-if="networkProbing" class="spinner sb-spin"></span>
-      <span v-else>{{ t("statusbar.netcheck") }}</span>
-    </button>
+    <!--
+      状态文字从按钮内移到按钮右侧：
+      按钮固定叫「账号与网络」，不再随「代理连接失败 / 未登录 / 已登录」变宽，
+      底栏中间那条提示的起始位置也就不会被状态长短推着左右跳。
+    -->
+    <span
+      class="sb-state"
+      :class="{ error: isNetworkError, online: sessionPhase === 'online' && !isNetworkError }"
+      :title="accountTitle"
+    >{{ accountText }}</span>
 
     <div v-if="menuOpen" class="sb-menu">
-      <div class="sb-menu-title">{{ t("statusbar.loginTitle") }}</div>
+      <div class="sb-menu-title">{{ t("statusbar.accountMenu") }}</div>
+      <!-- 账号信息：原来在线页左侧栏底部那段已迁到这里，全应用只保留这一处 -->
+      <div class="sb-menu-session" :title="accountTitle">{{ sessionLine }}</div>
       <div class="sb-menu-platform">
         <span class="sb-menu-label">{{ t("online.loginMicrosoftLabel") }}</span>
         <span class="sb-menu-hint">{{ t("online.loginMicrosoftHint") }}</span>
@@ -329,22 +371,29 @@ onBeforeUnmount(() => {
         <button type="button" class="sb-menu-link" @click="openAccountCenter">{{ t("online.loginAccountCenter") }}</button>
       </p>
       <div class="sb-menu-actions">
-        <button type="button" :disabled="loggingIn" @click="startLogin">
+        <button type="button" :disabled="loggingIn || loggingOut" @click="startLogin">
           {{ loggingIn ? t("statusbar.loginWait") : t("statusbar.loginOpen") }}
         </button>
-        <button type="button" :disabled="loggingIn" @click="recheck">
-          {{ t("statusbar.recheck") }}
+      </div>
+      <!-- 校验连接 + 退出登录：二级菜单里的操作项 -->
+      <div class="sb-menu-actions">
+        <button type="button" :disabled="networkProbing" :title="t('statusbar.checkHint')" @click="recheck">
+          <span v-if="networkProbing" class="spinner sb-spin"></span>
+          <span v-else>{{ t("statusbar.checkTitle") }}</span>
+        </button>
+        <button type="button" :disabled="loggingOut" :title="t('online.clearCache')" @click="doLogout">
+          {{ loggingOut ? t("statusbar.loggingOut") : t("statusbar.logout") }}
         </button>
       </div>
       <div v-if="sessionError" class="sb-menu-note err">{{ sessionError }}</div>
+      <div v-if="logoutError" class="sb-menu-note err">{{ logoutError }}</div>
     </div>
 
     <span class="sb-mid" :title="middleText">{{ middleText }}</span>
 
     <span class="sb-right">
+      <!-- v0.4.7：只保留代理链路；「本地 N 个」与「本地/在线」两枚标签已移除 -->
       <span v-if="proxyText" class="sb-pill">{{ proxyText }}</span>
-      <span class="sb-pill">{{ t("statusbar.localCount", { n: props.localCount }) }}</span>
-      <span class="sb-pill sb-mode">{{ props.mode === "online" ? t("nav.online") : t("nav.local") }}</span>
     </span>
   </footer>
 </template>
@@ -357,9 +406,9 @@ onBeforeUnmount(() => {
   gap: 10px;
   height: 24px;
   padding: 0 12px;
-  font-size: 11px;
+  font-size: calc(11px * var(--global-scale));
   line-height: 1;
-  letter-spacing: 0.3px;
+  letter-spacing: calc(0.3px * var(--ui-tracking));
   color: var(--muted);
   background: linear-gradient(180deg, var(--statusbar-top), var(--statusbar-bottom));
   border-top: 1px solid var(--line-soft);
@@ -378,8 +427,9 @@ onBeforeUnmount(() => {
   border-radius: 0;
   background: transparent;
   color: var(--parch-dim);
-  font-size: 11px;
-  letter-spacing: 0.4px;
+  font-size: calc(11.5px * var(--global-scale));
+  font-weight: var(--ui-font-weight-strong);
+  letter-spacing: normal;
   cursor: pointer;
 }
 .sb-account:hover {
@@ -399,7 +449,7 @@ onBeforeUnmount(() => {
   color: var(--danger-text);
 }
 .sb-dot {
-  font-size: 9px;
+  font-size: calc(9px * var(--global-scale));
   line-height: 1;
 }
 .sb-label {
@@ -411,45 +461,22 @@ onBeforeUnmount(() => {
   border-width: 1.5px;
 }
 
-/* 左下角「测网」：常驻的独立入口，不复用账号灯，避免测网时把登录态灯光打乱 */
-.sb-netcheck {
+/* 状态文字：从按钮内搬到按钮右侧的独立元素（代理连接失败 / 网络错误 / 未登录 …） */
+.sb-state {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 18px;
-  min-width: 34px;
-  padding: 0 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 10px;
-  letter-spacing: 0.3px;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  color: var(--parch-dim);
+  font-size: calc(10.5px * var(--global-scale));
+  letter-spacing: calc(0.3px * var(--ui-tracking));
 }
-.sb-netcheck:hover:not(:disabled) {
-  color: var(--gold-bright);
-  border-color: var(--gold-dim);
-  background: rgba(var(--accent-rgb), 0.1);
-}
-.sb-netcheck.probing {
-  cursor: progress;
+.sb-state.online {
   color: var(--gold-dim);
-  border-color: var(--gold-dim);
 }
-.sb-netcheck.ok {
-  color: var(--gold);
-  border-color: var(--gold-dim);
-}
-.sb-netcheck.fail {
+.sb-state.error {
   color: var(--danger-text);
-  border-color: var(--danger-text);
-}
-.sb-netcheck:disabled {
-  cursor: progress;
 }
 
 .sb-mid {
@@ -459,8 +486,8 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--parch-dim);
-  font-size: 10.5px;
-  letter-spacing: 0.2px;
+  font-size: calc(10.5px * var(--global-scale));
+  letter-spacing: calc(0.2px * var(--ui-tracking));
 }
 
 .sb-right {
@@ -476,7 +503,7 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   background: var(--bg-panel);
   color: var(--muted);
-  font-size: 10px;
+  font-size: calc(10px * var(--global-scale));
   white-space: nowrap;
   /* 英文比中文长（Proxy: direct / Environment proxy）：窄窗口下只省略，不换行不撑破底栏 */
   flex: 0 1 auto;
@@ -507,9 +534,19 @@ onBeforeUnmount(() => {
 .sb-menu-title {
   padding: 2px 2px 8px;
   color: var(--gold-bright);
-  font-size: 11.5px;
-  letter-spacing: 1.2px;
+  font-size: calc(11.5px * var(--global-scale));
+  letter-spacing: calc(1.2px * var(--ui-tracking));
   text-transform: uppercase;
+}
+/* 二级菜单顶部的账号行：已登录 · 来源 · Cookie 数（原在线页左侧栏那段） */
+.sb-menu-session {
+  padding: 0 2px 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--parch-dim);
+  font-size: calc(10.5px * var(--global-scale));
+  line-height: 1.5;
+  word-break: break-word;
 }
 /* v3.3：平台选项已收敛为单一微软 / Xbox 入口，所以不再需要 hover / active 态 */
 .sb-menu-platform {
@@ -525,11 +562,11 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 .sb-menu-label {
-  font-size: 12px;
+  font-size: calc(12px * var(--global-scale));
   color: var(--gold-bright);
 }
 .sb-menu-hint {
-  font-size: 10px;
+  font-size: calc(10px * var(--global-scale));
   line-height: 1.5;
   color: var(--muted);
 }
@@ -537,7 +574,7 @@ onBeforeUnmount(() => {
    注意不能用 `.sb-menu-note`：那一类是状态/错误提示（金色），复用会把报错样式冲掉。 */
 .sb-menu-bind {
   margin: 0 0 6px;
-  font-size: 10px;
+  font-size: calc(10px * var(--global-scale));
   line-height: 1.6;
   color: var(--muted);
 }
@@ -546,7 +583,7 @@ onBeforeUnmount(() => {
   border: 0;
   background: none;
   color: var(--gold-bright);
-  font-size: 10px;
+  font-size: calc(10px * var(--global-scale));
   text-decoration: underline;
   cursor: pointer;
 }
@@ -561,11 +598,11 @@ onBeforeUnmount(() => {
 .sb-menu-actions button {
   flex: 1 1 0;
   padding: 6px 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--global-scale));
 }
 .sb-menu-note {
   margin-top: 8px;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--global-scale));
   line-height: 1.6;
   color: var(--gold);
   word-break: break-all;

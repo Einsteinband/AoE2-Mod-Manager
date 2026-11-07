@@ -7,7 +7,7 @@ export const label = "English";
 export default {
   app: {
     name: "Age of Empires II · Mod Manager",
-    taglinePrefix: "v0.4.7 · by ",
+    taglinePrefix: "v0.4.8 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -580,6 +580,16 @@ export default {
     netcheckTitle: "Send one real request to test whether the network and current proxy work",
     netOk: "Network OK",
     netFailOther: "Network reachable, but the API returned an error (your sign-in may have expired)",
+    accountMenu: "Account & network",
+    checkTitle: "Check connection",
+    checkHint: "Verify your sign-in and send one real request to confirm the server is reachable",
+    checkNetworkFailed: "Signed in, but the network is unreachable — see the network status below",
+    checkLoginFailed: "Network OK, but your sign-in has expired — please sign in again",
+    checkAllFailed: "Not signed in, and the network is unreachable",
+    sessionLine: "Signed in · {src} · {n} cookies",
+    logout: "Sign out / clear cache",
+    loggingOut: "Signing out…",
+    logoutDone: "Signed out and cleared local credentials",
     cacheLoaded: "Loaded from cache",
     refreshing: "Showing cached data, refreshing silently…",
     fetching: "Requesting network data…",
@@ -799,7 +809,7 @@ export default {
     installDoneShort: "Install finished",
     timeout: "{what} timed out ({sec}s without a response). If this keeps happening, the backend command is blocked on the main thread.",
     tagsEmpty: "The official category API returned an empty list; built-in categories are used",
-    tagsFailed: "Could not read categories; built-in categories are used: {msg}",
+    tagsFailed: "Could not read categories; built-in categories are used — check your connection or proxy and retry",
     probeFailed: "Failed: {msg}",
     netSaved: "Saved: {proxy} (the sign-in window is rebuilt with the new settings next time)",
     networkInterrupted:
@@ -939,6 +949,12 @@ export default {
     fontFamilyHei: "Hei (SimHei)",
     fontFamilyYouyuan: "YouYuan",
     fontFamilySystem: "Follow system",
+    fontFamilySerif: "Serif (Songti)",
+    latinFontTitle: "Latin font for English UI",
+    latinFontNote: "Typeset English with Segoe UI instead of the Chinese stack's Latin glyphs — noticeably tighter. English UI only",
+    moreTypography: "More typography options",
+    cardFontWeightTitle: "Card weight",
+    cardFontWeightNote: "Stroke weight of card titles and subtitles, independent of card font size",
     uiFontWeightTitle: "Interface weight",
     uiFontWeightNote: "Stroke weight of navigation, buttons and settings",
     globalScaleTitle: "Global scale",
@@ -969,5 +985,46 @@ export default {
     rootEmpty: "No root folder set yet",
     rootPath:
       "The mod scan root is now managed by \"Change root folder\" in the General tab.",
+  },
+
+  /* ---------- Backend error text (the only lookup table used by src/format.ts) ----------
+     pattern: keyword fallback for the old Chinese strings Rust still returns (non-Chinese UI only).
+     code: text for the `aoe2mm:err:<code>:<json>` protocol; keys mirror the Rust code path. */
+  backendErrors: {
+    protocolUnknown: "Unhandled backend error ({code}). Please report this code.",
+    pattern: {
+      pathNotExist: "Path does not exist: {detail}",
+      notFolder: "Not a folder: {detail}",
+      noLocalSub: "No local/ or subscribed/ subfolder here — not an AoE2DE mod root folder: {detail}",
+      noRoot: "No mod root folder configured yet.",
+      gameRunning: "The game is running — please close it first.",
+      noModRecord: "No record of this mod in mod-status.json (launch the game once so it registers).",
+      emptyFolder: "The mod folder is empty.",
+      extractFailed: "Could not extract the archive: {detail}",
+      writeFailed: "Write failed: {detail}",
+      backupFailed: "Backup failed.",
+      verifyFailed: "Verification after writing failed: {detail}",
+      accessDenied: "Access denied.",
+      outsideRoot: "Refused: the target path is outside the mod root folder.",
+      readFailed: "Read failed: {detail}",
+      createFailed: "Could not create the folder: {detail}",
+      deleteFailed: "Delete failed: {detail}",
+      downloadFailed: "Download failed: {detail}",
+      connectionInterrupted: "The connection was interrupted — check your proxy node.",
+      network: "Network problem: {detail}",
+      timeout: "Timed out.",
+      unknown: "Unknown error.",
+    },
+    /* Sample entries (only used once Rust migrates to the error-code protocol):
+       Rust returns aoe2mm:err:install.extractFailed:{"modId":45427}
+       → backendErrors.code.install.extractFailed with {modId} filled from the JSON payload */
+    code: {
+      install: {
+        extractFailed: "Could not extract the archive (mod {modId}).",
+      },
+      net: {
+        timeout: "The network request timed out.",
+      },
+    },
   },
 } as const;

@@ -38,15 +38,12 @@ import {
   titleTranslateStart,
   titleTranslateStatus,
   titleTranslateStop,
-  translationCacheClear,
   translationCacheStat,
 } from "../online/service";
 import {
   applyTranslateSettings,
   languageName,
-  resetTranslations,
 } from "../online/translation";
-import { clearOnlineCache, onlineCacheStat } from "../online/cache";
 import { localSearchEnabled } from "../sessionState";
 import {
   canCheck as modCanCheck,
@@ -57,12 +54,13 @@ import {
   resumeCooldown as resumeModCooldown,
   runModUpdateCheck,
 } from "../modUpdates";
-import type { CacheOverview, NetworkSettingsView, TitleJobStatus, TranslateSettingsView, TranslationCacheStat } from "../online/types";
+import type { NetworkSettingsView, TitleJobStatus, TranslateSettingsView, TranslationCacheStat } from "../online/types";
 import type { DataDirView, UpdateInfo } from "../types";
 import { CARD_SIZE_MAX, CARD_SIZE_MIN, CARD_SIZE_STEP, clampCardSize } from "../composables/useViewPrefs";
 import {
   CARD_FONT_SIZE_MAX,
   CARD_FONT_SIZE_MIN,
+  CARD_FONT_WEIGHT_OPTIONS,
   GLOBAL_SCALE_MAX,
   GLOBAL_SCALE_MIN,
   GLOBAL_SCALE_STEP,
@@ -78,6 +76,7 @@ import {
   clampReaderFontSize,
   normalizeReaderFontWeight,
   normalizeReaderLineHeight,
+  normalizeCardFontWeight,
   normalizeUiFontWeight,
   type UiFontFamily,
 } from "../api";
@@ -138,8 +137,18 @@ const readerFontSize = defineModel<number>("readerFontSize", { default: 14 });
 const readerLineHeight = defineModel<number>("readerLineHeight", { default: 1.6 });
 const readerFontWeight = defineModel<number>("readerFontWeight", { default: 400 });
 
-// 【卡片列表】字号
+// 【卡片列表】字号 + 字重（v3.3 新增字重）
 const cardFontSize = defineModel<number>("cardFontSize", { default: 12 });
+const cardFontWeight = defineModel<number>("cardFontWeight", { default: 400 });
+
+/**
+ * v3.5：英文界面专用西文字体栈开关。
+ * 只对英文界面有意义（中文界面由中文字体优先），所以设置项在中文界面下不渲染，
+ * 值本身照常保存，切回英文后仍是用户上次的选择。
+ */
+const latinFont = defineModel<boolean>("latinFont", { default: true });
+/** 当前是否英文界面（决定「西文字体」这一行是否出现） */
+const isEnglishUi = computed(() => String(locale.value) === "en");
 
 /** 字体种类下拉项（文案跟随界面语言） */
 const FONT_FAMILY_OPTIONS_LABELED = computed(() =>
@@ -150,38 +159,55 @@ const FONT_FAMILY_OPTIONS_LABELED = computed(() =>
         ? t("settingsUi.fontFamilyYouyuan")
         : value === "system"
           ? t("settingsUi.fontFamilySystem")
-          : t("settingsUi.fontFamilyHei"),
+          : value === "serif"
+            ? t("settingsUi.fontFamilySerif")
+            : t("settingsUi.fontFamilyHei"),
   })),
 );
 
-/** 行距下拉项（文案跟随界面语言） */
-const LINE_HEIGHT_OPTIONS_LABELED = computed(() =>
-  READER_LINE_HEIGHT_OPTIONS.map((value) => ({
-    value,
-    label:
-      value === 1.4
-        ? t("settingsUi.lineHeightCompact")
-        : value === 1.8
-          ? t("settingsUi.lineHeightLoose")
-          : t("settingsUi.lineHeightStandard"),
-  })),
-);
+/** 字重档位的文案（400 常规 / 700 加粗） */
+function weightLabel(value: number): string {
+  return value >= 700 ? t("settingsUi.weightBold") : t("settingsUi.weightNormal");
+}
 
-/** 字重下拉项（400 常规 / 700 加粗） */
-const FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
-  READER_FONT_WEIGHT_OPTIONS.map((value) => ({
-    value,
-    label: value >= 700 ? t("settingsUi.weightBold") : t("settingsUi.weightNormal"),
-  })),
-);
+/** 行距档位的文案（1.4 紧凑 / 1.6 标准 / 1.8 宽松） */
+function lineHeightLabel(value: number): string {
+  return value === 1.4
+    ? t("settingsUi.lineHeightCompact")
+    : value === 1.8
+      ? t("settingsUi.lineHeightLoose")
+      : t("settingsUi.lineHeightStandard");
+}
 
-/** 界面字重下拉项（同上文案，但作用于 --ui-font-weight） */
-const UI_FONT_WEIGHT_OPTIONS_LABELED = computed(() =>
-  UI_FONT_WEIGHT_OPTIONS.map((value) => ({
-    value,
-    label: value >= 700 ? t("settingsUi.weightBold") : t("settingsUi.weightNormal"),
-  })),
-);
+/** 在固定档位序列里左 / 右挪一格；到头就停住（按钮同时 disabled） */
+function stepBy(current: number, options: readonly number[], dir: -1 | 1): number {
+  const idx = options.indexOf(current);
+  const base = idx < 0 ? 0 : idx;
+  const next = Math.min(options.length - 1, Math.max(0, base + dir));
+  return options[next] ?? current;
+}
+
+function stepUiFontWeight(dir: -1 | 1) {
+  uiFontWeight.value = normalizeUiFontWeight(stepBy(uiFontWeight.value, UI_FONT_WEIGHT_OPTIONS, dir));
+}
+function stepLineHeight(dir: -1 | 1) {
+  readerLineHeight.value = normalizeReaderLineHeight(
+    stepBy(readerLineHeight.value, READER_LINE_HEIGHT_OPTIONS, dir),
+  );
+}
+function stepReaderFontWeight(dir: -1 | 1) {
+  readerFontWeight.value = normalizeReaderFontWeight(
+    stepBy(readerFontWeight.value, READER_FONT_WEIGHT_OPTIONS, dir),
+  );
+}
+function stepCardFontWeight(dir: -1 | 1) {
+  cardFontWeight.value = normalizeCardFontWeight(
+    stepBy(cardFontWeight.value, CARD_FONT_WEIGHT_OPTIONS, dir),
+  );
+}
+
+/** 「高级排版」是否展开：默认收起，外观页首屏只留字体种类 + 界面字重 */
+const showAdvancedTypography = ref(false);
 
 /** 滑块松手时夹回合法档位（拖动过程中已经是合法值，这里只是兑底） */
 function snapGlobalScale() {
@@ -203,23 +229,14 @@ function applyFontFamily(event: Event) {
     ? (raw as UiFontFamily)
     : "hei";
 }
-function applyLineHeight(event: Event) {
-  readerLineHeight.value = normalizeReaderLineHeight(Number((event.target as HTMLSelectElement).value));
-}
-function applyFontWeight(event: Event) {
-  readerFontWeight.value = normalizeReaderFontWeight(Number((event.target as HTMLSelectElement).value));
-}
-function applyUiFontWeight(event: Event) {
-  uiFontWeight.value = normalizeUiFontWeight(Number((event.target as HTMLSelectElement).value));
-}
 
 /** 恢复默认排版的二次确认开关 */
 const showResetConfirm = ref(false);
 
 /**
- * 恢复默认排版：只重置「字体种类 / 界面字重 / 缩放 / 正文字号·行距·字重 / 卡片字号」
- * 七个排版变量；卡片大小（cardSize）与主题模式（theme）不在其中，绝不会被误伤。
- * 七个值一次性同步赋值 → App.vue 的 watch 会合并成一次 300ms 防抖写盘。
+ * 恢复默认排版：只重置「字体种类 / 界面字重 / 缩放 / 正文字号·行距·字重 / 卡片字号·字重 /
+ * 英文西文栈开关」九个排版变量；卡片大小（cardSize）与主题模式（theme）不在其中，绝不会被误伤。
+ * 九个值一次性同步赋值 → App.vue 的 watch 会合并成一次 300ms 防抖写盘。
  */
 function resetTypography() {
   uiFontFamily.value = TYPOGRAPHY_DEFAULTS.fontFamily;
@@ -229,6 +246,8 @@ function resetTypography() {
   readerLineHeight.value = TYPOGRAPHY_DEFAULTS.readerLineHeight;
   readerFontWeight.value = TYPOGRAPHY_DEFAULTS.readerFontWeight;
   cardFontSize.value = TYPOGRAPHY_DEFAULTS.cardFontSize;
+  cardFontWeight.value = TYPOGRAPHY_DEFAULTS.cardFontWeight;
+  latinFont.value = TYPOGRAPHY_DEFAULTS.latinFont;
   showResetConfirm.value = false;
 }
 
@@ -616,12 +635,7 @@ const netError = ref<string | null>(null);
 const netMessage = ref<string | null>(null);
 const netLoading = ref(false);
 
-// ---------------- 网络：在线数据缓存（v0.6） ----------------
-
-const cacheStat = ref<CacheOverview | null>(null);
-const cacheBusy = ref(false);
-const cacheMessage = ref<string | null>(null);
-const cacheError = ref<string | null>(null);
+// ---------------- 通用：字节数格式化（数据目录体积等共用） ----------------
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -633,47 +647,6 @@ function formatBytes(bytes: number): string {
     index += 1;
   }
   return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-/** 缓存概览文案：JSON 记录 + 封面图分开报，0 条时明确说“暂无缓存” */
-const cacheStatusText = computed(() => {
-  const stat = cacheStat.value;
-  if (!stat) return t("cache.reading");
-  if (stat.entries <= 0 && stat.imageEntries <= 0) return t("cache.empty");
-  const json = t("cache.stat", { n: stat.entries, size: formatBytes(stat.bytes) });
-  const images = t("cache.imageLine", {
-    n: stat.imageEntries,
-    size: formatBytes(stat.imageBytes),
-  });
-  return `${json} · ${images}`;
-});
-
-async function loadCacheStat() {
-  try {
-    cacheStat.value = await onlineCacheStat();
-  } catch {
-    cacheStat.value = null;
-  }
-}
-
-/** 清理：Rust 同时删 online_cache.json 与 image_cache，完成后重读概览 */
-async function doClearCache() {
-  if (cacheBusy.value) return;
-  cacheBusy.value = true;
-  cacheError.value = null;
-  cacheMessage.value = null;
-  try {
-    const report = await clearOnlineCache();
-    const removed = report.entriesRemoved > 0 || report.imagesRemoved > 0 || report.removed;
-    cacheMessage.value = removed
-      ? t("cache.cleared", { n: report.entriesRemoved, images: report.imagesRemoved })
-      : t("cache.clearedEmpty");
-    await loadCacheStat();
-  } catch (e) {
-    cacheError.value = t("cache.error", { msg: describe(e) });
-  } finally {
-    cacheBusy.value = false;
-  }
 }
 
 // ---------------- v1.x：数据与缓存总目录（设置 → 缓存与存储） ----------------
@@ -978,10 +951,9 @@ const translateMessage = ref<string | null>(null);
 const targetChoice = ref("");
 const engineChoice = ref("auto");
 
+// ---------------- 翻译缓存（只读统计：不再提供前端清空入口） ----------------
+
 const translationCache = ref<TranslationCacheStat | null>(null);
-const translationCacheBusy = ref(false);
-const translationCacheMessage = ref<string | null>(null);
-const translationCacheError = ref<string | null>(null);
 
 const supportedLangs = computed<string[]>(
   () => translateView.value?.supportedLanguages ?? ["zh-cn", "zh-tw", "en", "ja", "ko", "ru", "fr", "de", "es"],
@@ -1131,26 +1103,6 @@ async function loadTranslationCache() {
   }
 }
 
-async function doClearTranslationCache() {
-  if (translationCacheBusy.value) return;
-  translationCacheBusy.value = true;
-  translationCacheError.value = null;
-  translationCacheMessage.value = null;
-  try {
-    const report = await translationCacheClear();
-    translationCacheMessage.value = report.removed
-      ? t("translateCache.cleared", { n: report.entriesRemoved })
-      : t("translateCache.clearedEmpty");
-    // 内存里的译文也要清，否则卡片还显示已删除的译文
-    resetTranslations();
-    await loadTranslationCache();
-  } catch (e) {
-    translationCacheError.value = t("translateCache.error", { msg: describe(e) });
-  } finally {
-    translationCacheBusy.value = false;
-  }
-}
-
 // ---------------- 生命周期 ----------------
 
 function onKeydown(event: KeyboardEvent) {
@@ -1233,12 +1185,101 @@ const titleJobText = computed(() => {
   return job.failed > 0 ? `${base} · ${t("titleTranslate.failed", { n: job.failed })}` : base;
 });
 
+// ---------------- v3.4：设置改为可拖动浮动面板（去掉全屏遮罩，主界面可继续操作） ----------------
+//
+// 面板不再铺满遮罩：只把 .modal 本体固定在视口上，标题栏可拖，
+// 位置写进 localStorage，下次打开回到原处；拖出屏幕时按视口夹紧。
+
+const PANEL_POS_KEY = "aoe2mm:settings-panel-pos";
+/** 面板左上角（px）。null = 没拖过，走 CSS 的居中定位 */
+const panelPos = ref<{ x: number; y: number } | null>(null);
+const dragging = ref(false);
+const panelRef = ref<HTMLElement | null>(null);
+
+const panelStyle = computed<Record<string, string>>((): Record<string, string> => {
+  const pos = panelPos.value;
+  if (!pos) return {};
+  return { left: `${pos.x}px`, top: `${pos.y}px`, transform: "none" };
+});
+
+const PANEL_MARGIN = 8;
+
+/** 夹在视口内，四边各留 8px，避免拖到屏幕外面找不回来 */
+function clampPanelPos(x: number, y: number): { x: number; y: number } {
+  const rect = panelRef.value?.getBoundingClientRect();
+  const width = rect?.width ?? 0;
+  const height = rect?.height ?? 0;
+  const maxX = Math.max(PANEL_MARGIN, window.innerWidth - width - PANEL_MARGIN);
+  const maxY = Math.max(PANEL_MARGIN, window.innerHeight - height - PANEL_MARGIN);
+  return {
+    x: Math.min(Math.max(x, PANEL_MARGIN), maxX),
+    y: Math.min(Math.max(y, PANEL_MARGIN), maxY),
+  };
+}
+
+let dragOrigin = { pointerX: 0, pointerY: 0, panelX: 0, panelY: 0 };
+
+function onDragStart(event: PointerEvent) {
+  if (event.button !== 0) return;
+  // 标题栏上的关闭按钮不该把面板拖起来
+  if ((event.target as HTMLElement).closest("button")) return;
+  const rect = panelRef.value?.getBoundingClientRect();
+  if (!rect) return;
+  dragOrigin = {
+    pointerX: event.clientX,
+    pointerY: event.clientY,
+    panelX: rect.left,
+    panelY: rect.top,
+  };
+  dragging.value = true;
+  window.addEventListener("pointermove", onDragMove);
+  window.addEventListener("pointerup", onDragEnd, { once: true });
+  event.preventDefault();
+}
+
+function onDragMove(event: PointerEvent) {
+  panelPos.value = clampPanelPos(
+    dragOrigin.panelX + (event.clientX - dragOrigin.pointerX),
+    dragOrigin.panelY + (event.clientY - dragOrigin.pointerY),
+  );
+}
+
+function onDragEnd() {
+  dragging.value = false;
+  window.removeEventListener("pointermove", onDragMove);
+  if (!panelPos.value) return;
+  try {
+    localStorage.setItem(PANEL_POS_KEY, JSON.stringify(panelPos.value));
+  } catch {
+    /* 存储不可用就只保留本次会话的位置 */
+  }
+}
+
+/** 打开时恢复上次位置（脏数据直接忽略，不影响打开） */
+function restorePanelPos() {
+  try {
+    const raw = localStorage.getItem(PANEL_POS_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw) as { x?: unknown; y?: unknown };
+    if (typeof saved.x !== "number" || typeof saved.y !== "number") return;
+    panelPos.value = clampPanelPos(saved.x, saved.y);
+  } catch {
+    /* 位置记忆损坏不阻塞设置面板 */
+  }
+}
+
+/** 窗口尺寸变小后，原来记的位置可能越界，重新夹紧 */
+function onWindowResize() {
+  if (panelPos.value) panelPos.value = clampPanelPos(panelPos.value.x, panelPos.value.y);
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", onKeydown);
+  window.addEventListener("resize", onWindowResize);
+  restorePanelPos();
   void loadIndexing();
   void loadLocalSearch();
   void loadNetwork();
-  void loadCacheStat();
   void loadDataDir();
   void loadGameRoot();
   void loadTranslate();
@@ -1260,6 +1301,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   clearGameRootFlash();
   window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("resize", onWindowResize);
+  window.removeEventListener("pointermove", onDragMove);
   stopTitleJobPoll();
   if (cooldownTimer !== null) {
     window.clearInterval(cooldownTimer);
@@ -1269,15 +1312,19 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="modal-backdrop" @click.self="emit('close')">
-    <div class="modal settings-modal">
-      <header class="modal-head">
-        <h2>{{ t("settings.title") }}</h2>
-        <span class="modal-sub">{{ t("settings.subtitle") }}</span>
-        <button type="button" class="modal-x" :title="t('settings.close')" @click="emit('close')">
-          ✕
-        </button>
-      </header>
+  <div
+    ref="panelRef"
+    class="modal settings-modal settings-floating"
+    :class="{ 'is-dragging': dragging }"
+    :style="panelStyle"
+  >
+    <header class="modal-head settings-drag-handle" @pointerdown="onDragStart">
+      <h2>{{ t("settings.title") }}</h2>
+      <span class="modal-sub">{{ t("settings.subtitle") }}</span>
+      <button type="button" class="modal-x" :title="t('settings.close')" @click="emit('close')">
+        ✕
+      </button>
+    </header>
 
       <div class="settings-layout">
         <nav class="settings-tabs">
@@ -1452,7 +1499,7 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
-            <!-- 【界面】：字体种类 + 全局缩放（卡片大小仍归这一层） -->
+            <!-- 【外观】：首屏只留「字体种类 + 界面字重」，其余 6 项收进「更多排版选项」 -->
             <h3 class="settings-group-title">{{ t("settingsUi.groupUi") }}</h3>
 
             <div class="settings-row">
@@ -1472,162 +1519,247 @@ onBeforeUnmount(() => {
               </select>
             </div>
 
+            <!-- v3.5：英文界面专用的西文字体栈（只在英文界面出现；中文界面由中文字体优先，开关没有意义） -->
+            <div v-if="isEnglishUi" class="settings-row">
+              <div class="row-label">
+                <span class="row-title">{{ t("settingsUi.latinFontTitle") }}</span>
+                <span class="row-note">{{ t("settingsUi.latinFontNote") }}</span>
+              </div>
+              <input
+                v-model="latinFont"
+                type="checkbox"
+                class="latin-font-check"
+                :aria-label="t('settingsUi.latinFontTitle')"
+              />
+            </div>
+
+            <!-- 界面字重：左右切换（400 常规 ↔ 700 加粗） -->
             <div class="settings-row">
               <div class="row-label">
                 <span class="row-title">{{ t("settingsUi.uiFontWeightTitle") }}</span>
                 <span class="row-note">{{ t("settingsUi.uiFontWeightNote") }}</span>
               </div>
-              <select
-                class="settings-select typography-select"
-                :value="uiFontWeight"
-                :aria-label="t('settingsUi.uiFontWeightTitle')"
-                @change="applyUiFontWeight"
-              >
-                <option v-for="opt in UI_FONT_WEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
-                  {{ opt.label }}
-                </option>
-              </select>
-            </div>
-
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settingsUi.globalScaleTitle") }}</span>
-                <span class="row-note">{{ t("settingsUi.globalScaleNote") }}</span>
-              </div>
-              <div class="settings-range-wrap">
-                <input
-                  v-model.number="globalFontScale"
-                  class="settings-range"
-                  type="range"
-                  :min="GLOBAL_SCALE_MIN"
-                  :max="GLOBAL_SCALE_MAX"
-                  :step="GLOBAL_SCALE_STEP"
-                  :aria-label="t('settingsUi.globalScaleTitle')"
-                  :title="globalFontScale + '%'"
-                  @change="snapGlobalScale"
-                />
-                <span class="settings-range-value">{{ globalFontScale }}%</span>
+              <div class="seg-stepper" role="group" :aria-label="t('settingsUi.uiFontWeightTitle')">
+                <button
+                  type="button"
+                  class="seg-stepper-btn"
+                  :disabled="uiFontWeight <= 400"
+                  :aria-label="`${t('settingsUi.uiFontWeightTitle')} −`"
+                  @click="stepUiFontWeight(-1)"
+                >
+                  ‹
+                </button>
+                <span class="seg-stepper-value">{{ weightLabel(uiFontWeight) }}</span>
+                <button
+                  type="button"
+                  class="seg-stepper-btn"
+                  :disabled="uiFontWeight >= 700"
+                  :aria-label="`${t('settingsUi.uiFontWeightTitle')} +`"
+                  @click="stepUiFontWeight(1)"
+                >
+                  ›
+                </button>
               </div>
             </div>
 
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settingsUi.cardSize") }}</span>
-                <span class="row-note">{{ t("settingsUi.cardSizeNote") }}</span>
+            <button
+              type="button"
+              class="typography-more"
+              :aria-expanded="showAdvancedTypography"
+              @click="showAdvancedTypography = !showAdvancedTypography"
+            >
+              <span>{{ t("settingsUi.moreTypography") }}</span>
+              <span class="typography-more-arrow" :class="{ 'is-open': showAdvancedTypography }">▾</span>
+            </button>
+
+            <div v-show="showAdvancedTypography" class="typography-advanced">
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.globalScaleTitle") }}</span>
+                  <span class="row-note">{{ t("settingsUi.globalScaleNote") }}</span>
+                </div>
+                <div class="settings-range-wrap">
+                  <input
+                    v-model.number="globalFontScale"
+                    class="settings-range"
+                    type="range"
+                    :min="GLOBAL_SCALE_MIN"
+                    :max="GLOBAL_SCALE_MAX"
+                    :step="GLOBAL_SCALE_STEP"
+                    :aria-label="t('settingsUi.globalScaleTitle')"
+                    :title="globalFontScale + '%'"
+                    @change="snapGlobalScale"
+                  />
+                  <span class="settings-range-value">{{ globalFontScale }}%</span>
+                </div>
               </div>
-              <div class="settings-range-wrap">
-                <input
-                  v-model.number="cardSize"
-                  class="settings-range"
-                  type="range"
-                  :min="CARD_SIZE_MIN"
-                  :max="CARD_SIZE_MAX"
-                  :step="CARD_SIZE_STEP"
-                  :title="t('toolbar.cardSize', { n: cardSize })"
-                  :aria-label="t('toolbar.cardSize', { n: cardSize })"
-                  @change="snapCardSize"
-                />
-                <span class="settings-range-value">{{ cardSize }}px</span>
+
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.cardSize") }}</span>
+                  <span class="row-note">{{ t("settingsUi.cardSizeNote") }}</span>
+                </div>
+                <div class="settings-range-wrap">
+                  <input
+                    v-model.number="cardSize"
+                    class="settings-range"
+                    type="range"
+                    :min="CARD_SIZE_MIN"
+                    :max="CARD_SIZE_MAX"
+                    :step="CARD_SIZE_STEP"
+                    :title="t('toolbar.cardSize', { n: cardSize })"
+                    :aria-label="t('toolbar.cardSize', { n: cardSize })"
+                    @change="snapCardSize"
+                  />
+                  <span class="settings-range-value">{{ cardSize }}px</span>
+                </div>
               </div>
-            </div>
 
-            <p class="settings-hint">{{ t("settingsUi.cardSizeHint") }}</p>
+              <p class="settings-hint">{{ t("settingsUi.cardSizeHint") }}</p>
 
-            <div class="settings-sep"></div>
+              <div class="settings-sep"></div>
 
-            <!-- 【正文阅读】：字号 12–24px / 行距 / 字重 -->
-            <h3 class="settings-group-title">{{ t("settingsUi.groupReader") }}</h3>
+              <!-- 【正文阅读】：字号 12–24px / 行距 / 字重 -->
+              <h3 class="settings-group-title">{{ t("settingsUi.groupReader") }}</h3>
 
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settingsUi.readerFontSizeTitle") }}</span>
-                <span class="row-note">{{ t("settingsUi.readerFontSizeNote") }}</span>
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.readerFontSizeTitle") }}</span>
+                  <span class="row-note">{{ t("settingsUi.readerFontSizeNote") }}</span>
+                </div>
+                <div class="settings-range-wrap">
+                  <input
+                    v-model.number="readerFontSize"
+                    class="settings-range"
+                    type="range"
+                    :min="READER_FONT_SIZE_MIN"
+                    :max="READER_FONT_SIZE_MAX"
+                    step="1"
+                    :aria-label="t('settingsUi.readerFontSizeTitle')"
+                    :title="readerFontSize + 'px'"
+                    @change="snapReaderFontSize"
+                  />
+                  <span class="settings-range-value">{{ readerFontSize }}px</span>
+                </div>
               </div>
-              <div class="settings-range-wrap">
-                <input
-                  v-model.number="readerFontSize"
-                  class="settings-range"
-                  type="range"
-                  :min="READER_FONT_SIZE_MIN"
-                  :max="READER_FONT_SIZE_MAX"
-                  step="1"
-                  :aria-label="t('settingsUi.readerFontSizeTitle')"
-                  :title="readerFontSize + 'px'"
-                  @change="snapReaderFontSize"
-                />
-                <span class="settings-range-value">{{ readerFontSize }}px</span>
+
+              <!-- 行距：左右切换（1.4 紧凑 ↔ 1.6 标准 ↔ 1.8 宽松） -->
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.lineHeightTitle") }}</span>
+                  <span class="row-note">{{ t("settingsUi.lineHeightNote") }}</span>
+                </div>
+                <div class="seg-stepper" role="group" :aria-label="t('settingsUi.lineHeightTitle')">
+                  <button
+                    type="button"
+                    class="seg-stepper-btn"
+                    :disabled="readerLineHeight <= 1.4"
+                    :aria-label="`${t('settingsUi.lineHeightTitle')} −`"
+                    @click="stepLineHeight(-1)"
+                  >
+                    ‹
+                  </button>
+                  <span class="seg-stepper-value">{{ lineHeightLabel(readerLineHeight) }}</span>
+                  <button
+                    type="button"
+                    class="seg-stepper-btn"
+                    :disabled="readerLineHeight >= 1.8"
+                    :aria-label="`${t('settingsUi.lineHeightTitle')} +`"
+                    @click="stepLineHeight(1)"
+                  >
+                    ›
+                  </button>
+                </div>
               </div>
-            </div>
 
-            <div class="settings-sep"></div>
-
-            <!-- 行距（1.4 / 1.6 / 1.8） -->
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settingsUi.lineHeightTitle") }}</span>
-                <span class="row-note">{{ t("settingsUi.lineHeightNote") }}</span>
+              <!-- 正文字重：左右切换（400 常规 ↔ 700 加粗） -->
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.fontWeightTitle") }}</span>
+                  <span class="row-note">{{ t("settingsUi.fontWeightNote") }}</span>
+                </div>
+                <div class="seg-stepper" role="group" :aria-label="t('settingsUi.fontWeightTitle')">
+                  <button
+                    type="button"
+                    class="seg-stepper-btn"
+                    :disabled="readerFontWeight <= 400"
+                    :aria-label="`${t('settingsUi.fontWeightTitle')} −`"
+                    @click="stepReaderFontWeight(-1)"
+                  >
+                    ‹
+                  </button>
+                  <span class="seg-stepper-value">{{ weightLabel(readerFontWeight) }}</span>
+                  <button
+                    type="button"
+                    class="seg-stepper-btn"
+                    :disabled="readerFontWeight >= 700"
+                    :aria-label="`${t('settingsUi.fontWeightTitle')} +`"
+                    @click="stepReaderFontWeight(1)"
+                  >
+                    ›
+                  </button>
+                </div>
               </div>
-              <select
-                class="settings-select typography-select"
-                :value="readerLineHeight"
-                :aria-label="t('settingsUi.lineHeightTitle')"
-                @change="applyLineHeight"
-              >
-                <option v-for="opt in LINE_HEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
-                  {{ opt.label }}
-                </option>
-              </select>
-            </div>
 
-            <div class="settings-sep"></div>
+              <div class="settings-sep"></div>
 
-            <!-- 字重（400 / 500） -->
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settingsUi.fontWeightTitle") }}</span>
-                <span class="row-note">{{ t("settingsUi.fontWeightNote") }}</span>
+              <!-- 【卡片列表】：字号 10–16px + 字重（v3.3 新增） -->
+              <h3 class="settings-group-title">{{ t("settingsUi.groupCard") }}</h3>
+
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.cardFontSizeTitle") }}</span>
+                  <span class="row-note">{{ t("settingsUi.cardFontSizeNote") }}</span>
+                </div>
+                <div class="settings-range-wrap">
+                  <input
+                    v-model.number="cardFontSize"
+                    class="settings-range"
+                    type="range"
+                    :min="CARD_FONT_SIZE_MIN"
+                    :max="CARD_FONT_SIZE_MAX"
+                    step="1"
+                    :aria-label="t('settingsUi.cardFontSizeTitle')"
+                    :title="cardFontSize + 'px'"
+                    @change="snapCardFontSize"
+                  />
+                  <span class="settings-range-value">{{ cardFontSize }}px</span>
+                </div>
               </div>
-              <select
-                class="settings-select typography-select"
-                :value="readerFontWeight"
-                :aria-label="t('settingsUi.fontWeightTitle')"
-                @change="applyFontWeight"
-              >
-                <option v-for="opt in FONT_WEIGHT_OPTIONS_LABELED" :key="opt.value" :value="opt.value">
-                  {{ opt.label }}
-                </option>
-              </select>
-            </div>
 
-            <div class="settings-sep"></div>
-
-            <!-- 【卡片列表】：字号 10–16px -->
-            <h3 class="settings-group-title">{{ t("settingsUi.groupCard") }}</h3>
-
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("settingsUi.cardFontSizeTitle") }}</span>
-                <span class="row-note">{{ t("settingsUi.cardFontSizeNote") }}</span>
-              </div>
-              <div class="settings-range-wrap">
-                <input
-                  v-model.number="cardFontSize"
-                  class="settings-range"
-                  type="range"
-                  :min="CARD_FONT_SIZE_MIN"
-                  :max="CARD_FONT_SIZE_MAX"
-                  step="1"
-                  :aria-label="t('settingsUi.cardFontSizeTitle')"
-                  :title="cardFontSize + 'px'"
-                  @change="snapCardFontSize"
-                />
-                <span class="settings-range-value">{{ cardFontSize }}px</span>
+              <!-- 卡片字重：左右切换（400 常规 ↔ 700 加粗） -->
+              <div class="settings-row">
+                <div class="row-label">
+                  <span class="row-title">{{ t("settingsUi.cardFontWeightTitle") }}</span>
+                  <span class="row-note">{{ t("settingsUi.cardFontWeightNote") }}</span>
+                </div>
+                <div class="seg-stepper" role="group" :aria-label="t('settingsUi.cardFontWeightTitle')">
+                  <button
+                    type="button"
+                    class="seg-stepper-btn"
+                    :disabled="cardFontWeight <= 400"
+                    :aria-label="`${t('settingsUi.cardFontWeightTitle')} −`"
+                    @click="stepCardFontWeight(-1)"
+                  >
+                    ‹
+                  </button>
+                  <span class="seg-stepper-value">{{ weightLabel(cardFontWeight) }}</span>
+                  <button
+                    type="button"
+                    class="seg-stepper-btn"
+                    :disabled="cardFontWeight >= 700"
+                    :aria-label="`${t('settingsUi.cardFontWeightTitle')} +`"
+                    @click="stepCardFontWeight(1)"
+                  >
+                    ›
+                  </button>
+                </div>
               </div>
             </div>
 
             <p class="settings-hint">{{ t("settingsUi.typographyHint") }}</p>
 
-            <!-- v3.0：恢复默认排版（只盖排版七项，不动卡片大小与主题） -->
+            <!-- v3.0：恢复默认排版（只盖排版八项，不动卡片大小与主题） -->
             <div class="typography-reset-row">
               <button type="button" class="typography-reset" @click="showResetConfirm = true">
                 {{ t("settingsUi.resetTypography") }}
@@ -1753,7 +1885,7 @@ onBeforeUnmount(() => {
             <p class="settings-hint">{{ t("settingsUi.rootPath") }}</p>
           </section>
 
-          <!-- 模组翻译：翻译 / 翻译缓存 / 批量标题翻译 / 在线数据缓存 -->
+          <!-- 模组翻译：目标语言 / 翻译引擎 / 批量标题翻译 / 翻译缓存统计（只读） -->
           <section v-else-if="tab === 'online'" class="settings-card">
             <div class="settings-row">
               <div class="row-label">
@@ -1804,28 +1936,6 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
-            <div class="settings-row">
-              <div class="row-label">
-                <span class="row-title">{{ t("translateCache.sectionTitle") }}</span>
-                <span class="row-note">{{ translationCacheText }}</span>
-              </div>
-              <button
-                type="button"
-                class="settings-check"
-                :disabled="translationCacheBusy"
-                :title="t('translateCache.clearButton')"
-                @click="doClearTranslationCache"
-              >
-                <span v-if="translationCacheBusy" class="spinner"></span>
-                {{ translationCacheBusy ? t("translateCache.clearing") : t("translateCache.clearButton") }}
-              </button>
-            </div>
-
-            <div v-if="translationCacheError" class="settings-msg error">{{ translationCacheError }}</div>
-            <div v-else-if="translationCacheMessage" class="settings-msg">{{ translationCacheMessage }}</div>
-
-            <div class="settings-sep"></div>
-
             <!-- 批量翻译标题：默认关闭、手动开始（与「一键翻译不自动触发」保持同一套铁律） -->
             <div class="settings-row">
               <div class="row-label">
@@ -1849,26 +1959,13 @@ onBeforeUnmount(() => {
 
             <div class="settings-sep"></div>
 
-            <!-- v0.6：在线数据缓存（SWR）清理入口 -->
+            <!-- 翻译缓存：只做只读统计展示，不再提供一键清空（容量很小，删了没意义） -->
             <div class="settings-row">
               <div class="row-label">
-                <span class="row-title">{{ t("cache.sectionTitle") }}</span>
-                <span class="row-note">{{ cacheStatusText }}</span>
+                <span class="row-title">{{ t("translateCache.sectionTitle") }}</span>
+                <span class="row-note">{{ translationCacheText }}</span>
               </div>
-              <button
-                type="button"
-                class="settings-check"
-                :disabled="cacheBusy"
-                :title="t('cache.clearButton')"
-                @click="doClearCache"
-              >
-                <span v-if="cacheBusy" class="spinner"></span>
-                {{ cacheBusy ? t("cache.clearing") : t("cache.clearButton") }}
-              </button>
             </div>
-
-            <div v-if="cacheError" class="settings-msg error">{{ cacheError }}</div>
-            <div v-else-if="cacheMessage" class="settings-msg">{{ cacheMessage }}</div>
           </section>
 
           <!-- 数据与缓存（v1.x）：单目录 + 二次确认迁移 -->
@@ -2057,7 +2154,6 @@ onBeforeUnmount(() => {
           </section>
         </div>
       </div>
-    </div>
 
     <!-- v0.4.5：「已复制」引导（告诉玩家粘贴给 AI 就行，不用懂日志） -->
     <div v-if="diagCopied" class="modal-backdrop" @click.self="diagCopied = false">
@@ -2110,6 +2206,34 @@ onBeforeUnmount(() => {
   width: min(720px, 100%);
 }
 
+/* v3.4：设置改成可拖动浮动面板 —— 去掉全屏遮罩，主界面照常可点可滚。
+   位置由 panelPos（left/top）驱动，没拖过时退回这里的居中定位。
+   层级 32：高于主界面内容，低于 .modal-backdrop(40)，其它模态弹窗仍能盖住它。 */
+.settings-floating {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 32;
+  max-height: calc(100vh - 16px);
+  box-shadow:
+    0 18px 46px rgba(0, 0, 0, 0.55),
+    var(--shadow),
+    inset 0 0 0 1px rgba(var(--accent-rgb), 0.12);
+}
+/* 标题栏即拖动把手；关闭按钮在 onDragStart 里已被排除 */
+.settings-drag-handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.settings-floating.is-dragging .settings-drag-handle {
+  cursor: grabbing;
+}
+.settings-floating.is-dragging {
+  user-select: none;
+}
+
 /* 固定尺寸：左侧导航 + 右侧内容区都锁死在同一个高度里，
    切换标签时弹窗不再跟着内容长短抽动（本次要把 max-height / min-height 全部拿掉）。 */
 .settings-layout {
@@ -2145,7 +2269,7 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   background: transparent;
   font-size: calc(12px * var(--global-scale));
-  letter-spacing: 0.8px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
   color: var(--muted);
 }
 .settings-tab:hover {
@@ -2157,7 +2281,7 @@ onBeforeUnmount(() => {
   color: var(--text-on-accent);
   background: linear-gradient(180deg, var(--gold-bright), var(--gold));
   border-color: var(--gold-dim);
-  font-weight: 600;
+  font-weight: var(--ui-font-weight-strong);
 }
 
 /* 右栏：吃掉剩余宽度，横向不溢出，纵向自己滚；
@@ -2196,8 +2320,8 @@ onBeforeUnmount(() => {
   margin: 2px 0 0;
   min-width: 0;
   font-size: calc(11px * var(--global-scale));
-  font-weight: 500;
-  letter-spacing: 2px;
+  font-weight: var(--ui-font-weight-strong);
+  letter-spacing: calc(2px * var(--ui-tracking));
   text-transform: uppercase;
   color: var(--gold-dim);
   white-space: nowrap;
@@ -2219,7 +2343,7 @@ onBeforeUnmount(() => {
 }
 .row-title {
   font-size: calc(12.5px * var(--global-scale));
-  letter-spacing: 0.8px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
   color: var(--parch);
 }
 .row-note {
@@ -2256,7 +2380,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 7px;
   padding: 7px 14px;
-  letter-spacing: 0.8px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
 }
 .settings-check:disabled {
   opacity: 0.6;
@@ -2279,7 +2403,7 @@ onBeforeUnmount(() => {
   border-radius: 3px;
   background: transparent;
   color: var(--parch-dim);
-  letter-spacing: 0.8px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
 }
 .settings-segment-btn:hover:not(.active) {
   color: var(--parch);
@@ -2289,7 +2413,7 @@ onBeforeUnmount(() => {
   color: var(--text-on-accent);
   background: linear-gradient(180deg, var(--gold-bright), var(--gold));
   border-color: var(--gold-dim);
-  font-weight: 600;
+  font-weight: var(--ui-font-weight-strong);
 }
 
 /* v2.0 外观 Tab：卡片大小滑块（从主界面顶栏搬过来，尺寸口径与 useViewPrefs 一致） */
@@ -2332,11 +2456,11 @@ onBeforeUnmount(() => {
   text-align: right;
   font-size: calc(11.5px * var(--global-scale));
   color: var(--gold-text);
-  letter-spacing: 0.6px;
+  letter-spacing: calc(0.6px * var(--ui-tracking));
 }
 /* 根目录路径回显：等宽字体 + 允许折行，长路径不会把右侧按钮顶出去 */
 .row-note.mono {
-  font-family: Consolas, "Cascadia Mono", monospace;
+  font-family: var(--font-mono);
   font-size: calc(10.5px * var(--global-scale));
   word-break: break-all;
   color: var(--parch-dim);
@@ -2347,7 +2471,7 @@ onBeforeUnmount(() => {
   font-size: calc(11.5px * var(--global-scale));
   line-height: 1.7;
   color: var(--muted);
-  letter-spacing: 0.4px;
+  letter-spacing: calc(0.4px * var(--ui-tracking));
 }
 .settings-status.ok {
   color: var(--ok-text);
@@ -2374,7 +2498,7 @@ onBeforeUnmount(() => {
 }
 .settings-release {
   padding: 6px 12px;
-  letter-spacing: 0.8px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
 }
 
 .settings-summary {
@@ -2392,6 +2516,15 @@ onBeforeUnmount(() => {
   color: var(--parch-dim);
 }
 
+/* v3.5：英文界面「西文字体栈」开关（单独占 .settings-row 的右列） */
+.latin-font-check {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
 .settings-actions {
   display: flex;
   gap: 8px;
@@ -2402,6 +2535,80 @@ onBeforeUnmount(() => {
   font-size: calc(11px * var(--global-scale));
   line-height: 1.7;
   color: var(--muted);
+}
+
+/* v3.3：字重 / 行距的左右切换控件（‹ 值 ›，替代原来的下拉框） */
+.seg-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-panel-deep);
+}
+.seg-stepper-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--parch-dim);
+  font-family: inherit;
+  font-size: calc(14px * var(--global-scale));
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.16s ease, background-color 0.16s ease;
+}
+.seg-stepper-btn:hover:not(:disabled) {
+  color: var(--gold-bright);
+  background: rgba(var(--accent-rgb), 0.1);
+}
+.seg-stepper-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.seg-stepper-value {
+  min-width: 56px;
+  text-align: center;
+  font-size: calc(12px * var(--global-scale));
+  color: var(--parch);
+  white-space: nowrap;
+}
+
+/* v3.3：「更多排版选项」折叠开关 —— 外观页首屏只留两项，其余按需展开 */
+.typography-more {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 2px;
+  padding: 6px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--gold-dim);
+  font-family: inherit;
+  font-size: calc(11px * var(--global-scale));
+  font-weight: var(--ui-font-weight-strong);
+  letter-spacing: calc(1px * var(--ui-tracking));
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+.typography-more:hover {
+  color: var(--gold-bright);
+  border-color: var(--gold-dim);
+}
+.typography-more-arrow {
+  font-size: calc(11px * var(--global-scale));
+  transition: transform 0.16s ease;
+}
+.typography-more-arrow.is-open {
+  transform: rotate(180deg);
 }
 
 /* v3.0：恢复默认排版按钮（排版区块右下角，Ghot 风格，hover 点亮金色） */
@@ -2447,7 +2654,7 @@ onBeforeUnmount(() => {
 .about-value {
   font-size: calc(13px * var(--global-scale));
   color: var(--gold-text);
-  letter-spacing: 1px;
+  letter-spacing: calc(1px * var(--ui-tracking));
 }
 .about-link {
   justify-self: start;
@@ -2477,7 +2684,7 @@ onBeforeUnmount(() => {
 }
 .about-cloud-password {
   font-size: calc(11px * var(--global-scale));
-  letter-spacing: 0.6px;
+  letter-spacing: calc(0.6px * var(--ui-tracking));
   color: var(--muted);
   white-space: nowrap;
 }
@@ -2551,7 +2758,7 @@ onBeforeUnmount(() => {
 }
 .about-history-version {
   font-size: calc(12.5px * var(--global-scale));
-  letter-spacing: 1px;
+  letter-spacing: calc(1px * var(--ui-tracking));
   color: var(--gold-text);
 }
 .about-history-name {
@@ -2594,9 +2801,9 @@ onBeforeUnmount(() => {
 /* v3.2：缓存与存储 —— 一行一类缓存，路径单行省略、悬浮看全路径 */
 .cache-dir-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
   padding: 10px 0;
 }
 .cache-dir-row + .cache-dir-row {
@@ -2615,7 +2822,7 @@ onBeforeUnmount(() => {
 .cache-dir-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 6px;
   flex-wrap: wrap;
 }
@@ -2625,7 +2832,7 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(var(--accent-rgb), 0.5);
   border-radius: 3px;
   font-size: calc(10px * var(--global-scale));
-  letter-spacing: 0.5px;
+  letter-spacing: calc(0.5px * var(--ui-tracking));
   color: var(--gold-text);
 }
 .cache-dir-warn {
@@ -2637,7 +2844,7 @@ onBeforeUnmount(() => {
   border: none;
   background: none;
   font-size: calc(11px * var(--global-scale));
-  letter-spacing: 0.5px;
+  letter-spacing: calc(0.5px * var(--ui-tracking));
   color: var(--muted);
   cursor: pointer;
 }
@@ -2657,6 +2864,9 @@ onBeforeUnmount(() => {
 /* v3.3：游戏根目录一行 —— 复用 .settings-row 的两列布局，
    只补「长路径单行省略」与「从顶栏跳过来时的金色高亮」。 */
 .settings-row.game-root-row {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  row-gap: 10px;
   scroll-margin-block: 28px;
   border-radius: 4px;
   transition: background 0.25s ease, box-shadow 0.25s ease;
@@ -2678,7 +2888,7 @@ onBeforeUnmount(() => {
 .game-root-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 6px;
   flex-wrap: wrap;
 }

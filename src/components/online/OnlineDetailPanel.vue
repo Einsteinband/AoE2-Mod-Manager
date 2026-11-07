@@ -399,7 +399,7 @@ watch(
   font-size: calc(11px * var(--global-scale));
   line-height: 1.7;
   white-space: pre-wrap;
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .online-progress {
   margin-top: 10px;

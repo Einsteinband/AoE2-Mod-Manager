@@ -111,11 +111,11 @@ export interface DeleteReport {
 }
 
 /**
- * v3.0 界面字体种类：黑体（出厂默认）/ 幼圆 / 跟随系统。
+ * v3.0 界面字体种类：黑体（出厂默认）/ 幼圆 / 跟随系统 / 衬线（v3.3 新增）。
  * 对应 CSS 变量 --app-font-family（真字体栈写在 style.css 的 --font-* 里）。
- * v2.4 的旧值 "sans-serif" / "serif" / "system-ui" 一律静默归一化为这里的值。
+ * v2.4 的旧值 "sans-serif" / "system-ui" 静默归一化为这里；"serif" 自 v3.3 起是独立档位。
  */
-export type UiFontFamily = "hei" | "youyuan" | "system";
+export type UiFontFamily = "hei" | "youyuan" | "system" | "serif";
 
 export interface AppSettings {
   modRoot: string | null;
@@ -135,7 +135,7 @@ export interface AppSettings {
   /** v2.2 界面主题："dark" 深色羊皮纸（默认）| "light" 明亮米白 */
   theme: string;
   /**
-   * v3.0 三层排版 —— 界面层：字体种类（"hei" | "youyuan" | "system"）
+   * v3.0 三层排版 —— 界面层：字体种类（"hei" | "youyuan" | "system" | "serif"，v3.3 加衬线）
    * 对应 CSS 变量 --app-font-family
    */
   uiFontFamily: UiFontFamily;
@@ -151,6 +151,13 @@ export interface AppSettings {
   readerFontWeight: number;
   /** v2.4 卡片列表层：字号（px，10..=16，默认 12）—— 对应 --card-font-size */
   cardFontSize: number;
+  /** v3.3 卡片列表层：字重（400 常规 / 700 加粗，默认 400）—— 对应 --card-font-weight */
+  cardFontWeight: number;
+  /**
+   * v3.5：英文界面是否使用「西文专用字体栈」（Segoe UI 打头，再接用户选的中文字体做 fallback）。
+   * 只在英文界面生效，中文界面忽略；默认 true。
+   */
+  latinFont: boolean;
   /** v3.2：图片缓存目录（null / 缺省 = 默认 AppData 位置） */
   imageCacheDir?: string | null;
   /** v3.2：在线模组信息缓存（online_cache.json）目录；null = 应用配置目录 */

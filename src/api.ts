@@ -250,7 +250,7 @@ export function setTheme(theme: UiTheme): Promise<AppSettings> {
    三个层级各自的取值范围与 Rust 侧 models.rs 的常量一一对应；
    前端只负责把归一化后的值写到 <html> 的 CSS 变量上，settings.json 是唯一真源。 */
 
-/** 界面字体种类：黑体（默认）/ 幼圆 / 跟随系统（v3.0 起不再提供微软雅黑与宋体） */
+/** 界面字体种类：黑体（默认）/ 幼圆 / 跟随系统 / 衬线（v3.3 新增） */
 export type { UiFontFamily };
 
 /** 字体种类可选项（顺序即下拉框顺序） */
@@ -258,6 +258,7 @@ export const UI_FONT_FAMILY_OPTIONS: readonly UiFontFamily[] = [
   "hei",
   "youyuan",
   "system",
+  "serif",
 ] as const;
 export const UI_FONT_FAMILY_DEFAULT: UiFontFamily = "hei";
 
@@ -269,6 +270,7 @@ export const FONT_FAMILY_VARS: Record<UiFontFamily, string> = {
   hei: "var(--font-hei)",
   youyuan: "var(--font-youyuan)",
   system: "var(--font-system)",
+  serif: "var(--font-serif)",
 };
 
 /** 全局缩放（百分比，80..=150，默认 100）—— 对应 CSS 变量 --global-scale */
@@ -299,9 +301,33 @@ export const CARD_FONT_SIZE_MIN = 10;
 export const CARD_FONT_SIZE_MAX = 16;
 export const CARD_FONT_SIZE_DEFAULT = 12;
 
+/** v3.3：卡片列表字重两档（400 / 700）—— 对应 CSS 变量 --card-font-weight */
+export const CARD_FONT_WEIGHT_NORMAL = 400;
+export const CARD_FONT_WEIGHT_BOLD = 700;
+export const CARD_FONT_WEIGHT_DEFAULT = CARD_FONT_WEIGHT_NORMAL;
+
 /**
- * 字体种类归一化：只认 hei / youyuan / system。
- * v2.4 旧值静默改写："sans-serif" / "serif" → hei；"system-ui" → system（语义不变）。
+ * v3.5：英文界面「西文专用字体栈」开关（默认开）。
+ * true 时 --app-font-family 变成 "Segoe UI" 打头、再接用户选的中文字体做 fallback；
+ * 中文界面忽略此值（中文字体优先）。
+ */
+export const LATIN_FONT_DEFAULT = true;
+
+/** 卡片字重归一化：只保留 400 / 700，阈值 600（与 Rust 侧 normalize_card_font_weight 一致） */
+export function normalizeCardFontWeight(value: number): number {
+  return Number(value) >= 600 ? CARD_FONT_WEIGHT_BOLD : CARD_FONT_WEIGHT_NORMAL;
+}
+
+/** 卡片字重可选项（左 / 右切换的档位序列） */
+export const CARD_FONT_WEIGHT_OPTIONS: readonly number[] = [
+  CARD_FONT_WEIGHT_NORMAL,
+  CARD_FONT_WEIGHT_BOLD,
+] as const;
+
+/**
+ * 字体种类归一化：只认 hei / youyuan / system / serif。
+ * v2.4 旧值 "sans-serif" → hei；"system-ui" → system。
+ * v3.3 起 "serif" 是独立合法档位（衬线），不再改写为黑体。
  * 其余（含空串 / null）一律回黑体（默认）。
  */
 export function normalizeUiFontFamily(value: unknown): UiFontFamily {
@@ -309,6 +335,7 @@ export function normalizeUiFontFamily(value: unknown): UiFontFamily {
     .trim()
     .toLowerCase();
   if (raw === "youyuan") return "youyuan";
+  if (raw === "serif") return "serif";
   if (raw === "system" || raw === "system-ui") return "system";
   return UI_FONT_FAMILY_DEFAULT;
 }
@@ -368,6 +395,10 @@ export interface TypographyPrefs {
   readerLineHeight: number;
   readerFontWeight: number;
   cardFontSize: number;
+  /** v3.3：卡片列表字重（400 / 700） */
+  cardFontWeight: number;
+  /** v3.5：英文界面用西文专用字体栈（默认 true，中文界面忽略） */
+  latinFont: boolean;
 }
 
 /** 出厂默认值（与 Rust 侧 Settings::default()、style.css :root 完全一致） */
@@ -379,6 +410,8 @@ export const TYPOGRAPHY_DEFAULTS: TypographyPrefs = {
   readerLineHeight: READER_LINE_HEIGHT_DEFAULT,
   readerFontWeight: READER_FONT_WEIGHT_DEFAULT,
   cardFontSize: CARD_FONT_SIZE_DEFAULT,
+  cardFontWeight: CARD_FONT_WEIGHT_DEFAULT,
+  latinFont: LATIN_FONT_DEFAULT,
 };
 
 /** 把任意来源（settings.json / localStorage / 局部对象）归一化成合法快照 */
@@ -393,6 +426,8 @@ export function normalizeTypography(
     readerLineHeight: normalizeReaderLineHeight(Number(input?.readerLineHeight)),
     readerFontWeight: normalizeReaderFontWeight(Number(input?.readerFontWeight)),
     cardFontSize: clampCardFontSize(Number(input?.cardFontSize)),
+    cardFontWeight: normalizeCardFontWeight(Number(input?.cardFontWeight)),
+    latinFont: typeof input?.latinFont === "boolean" ? input.latinFont : LATIN_FONT_DEFAULT,
   };
 }
 
@@ -410,6 +445,8 @@ export function saveTypographyPrefs(prefs: TypographyPrefs): Promise<AppSettings
     readerLineHeight: prefs.readerLineHeight,
     readerFontWeight: prefs.readerFontWeight,
     cardFontSize: prefs.cardFontSize,
+    cardFontWeight: prefs.cardFontWeight,
+    latinFont: prefs.latinFont,
   });
 }
 

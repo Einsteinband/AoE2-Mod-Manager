@@ -262,8 +262,8 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   padding: 1px 6px;
   /* v2.4：角标字号跟卡片层同比例缩放（0.8 ≈ 旧 9.5 / 12） */
   font-size: calc(var(--card-font-size) * 0.8);
-  font-weight: 600;
-  letter-spacing: 0.5px;
+  font-weight: var(--card-font-weight);
+  letter-spacing: calc(0.5px * var(--ui-tracking));
   line-height: 1.5;
   border-radius: 3px;
   border: 1px solid var(--danger-text-strong);
@@ -297,7 +297,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   padding: 1px 6px;
   /* v2.4：来源角标同上，卡片字号变大时角标不会反而变小 */
   font-size: calc(var(--card-font-size) * 0.75);
-  letter-spacing: 0.4px;
+  letter-spacing: calc(0.4px * var(--ui-tracking));
   line-height: 1.5;
   border-radius: 999px;
   border: 1px solid var(--line);
@@ -335,7 +335,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   align-items: center;
   padding: 1px 6px;
   font-size: calc(var(--card-font-size) * 0.75);
-  letter-spacing: 0.4px;
+  letter-spacing: calc(0.4px * var(--ui-tracking));
   line-height: 1.5;
   border-radius: 999px;
   border: 1px solid rgba(var(--accent-rgb), 0.75);
@@ -382,8 +382,11 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
 .no-cover {
   font-family: var(--app-font-family);
 }
+/* v3.3：卡片标题 / 副标题改为跟随独立的「卡片字重」变量（默认 400，与旧观感一致）。
+   旧版无条件钉死 400 是为了避免幼圆被界面加粗的合成描边写成方硬笔画；
+   现在由 --card-font-weight 单独承担，用户想加粗卡片才加粗。 */
 .card-title,
 .card-sub {
-  font-weight: 400;
+  font-weight: var(--card-font-weight);
 }
 </style>

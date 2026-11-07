@@ -13,6 +13,7 @@ import { onTaskSettled, type DownloadTask } from "../online/downloadQueue";
 import { onImagesReady } from "../online/images";
 import { hydrateTranslations, translationLangEpoch } from "../online/translation";
 import { tagLabel, type OnlineMod } from "../online/types";
+import { normalizeBackendError } from "../format";
 import {
   ensureSession,
   localSearchEnabled,
@@ -234,7 +235,6 @@ const {
   refreshSession,
   runProbe,
   startLogin,
-  doLogout,
   stopWaiting,
   loadTags,
   dispose: disposeSession,
@@ -250,7 +250,7 @@ async function openAccountCenter(): Promise<void> {
   try {
     await openExternalUrl(ACCOUNT_CENTER_URL);
   } catch (e) {
-    showToast(e instanceof Error ? e.message : String(e), "error");
+    showToast(normalizeBackendError(e), "error");
   }
 }
 
@@ -593,7 +593,6 @@ onUnmounted(() => {
         @toggle-favorites="toggleFavorites"
         @pick-tag="pickTag"
         @refresh-session="refreshSession"
-        @logout="doLogout"
       />
     </template>
 
@@ -992,7 +991,7 @@ onUnmounted(() => {
   padding: 18px 0 8px;
   font-size: 11.5px;
   color: var(--muted);
-  letter-spacing: 0.4px;
+  letter-spacing: calc(0.4px * var(--ui-tracking));
 }
 .scroll-foot .err {
   color: var(--danger-text);
@@ -1086,7 +1085,7 @@ onUnmounted(() => {
   font-size: 11px;
   line-height: 1.7;
   white-space: pre-wrap;
-  font-family: Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 /* 右下角轻提示（固定定位，不参与三栏布局） */
@@ -1103,7 +1102,7 @@ onUnmounted(() => {
   background: linear-gradient(180deg, var(--toast-top), var(--toast-bottom));
   color: var(--parch);
   font-size: 12px;
-  letter-spacing: 0.6px;
+  letter-spacing: calc(0.6px * var(--ui-tracking));
   line-height: 1.6;
   box-shadow: 0 10px 24px rgba(var(--shadow-rgb), 0.55);
   animation: toast-in 0.18s ease-out;

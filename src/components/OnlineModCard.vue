@@ -105,15 +105,15 @@ function formatCount(n: number | null): string {
   font-style: italic;
 }
 
-/* v3.2：在线卡片标题显式跟随全局字体，并固定 400 字重
-   （避免幼圆被“界面加粗”的合成描边写成方硬笔画）。 */
+/* v3.2：卡片标题显式跟随全局字体栈（避免中间层 font-family 截断继承） */
 .card-title,
 .card-sub,
 .card-meta {
   font-family: var(--app-font-family);
 }
+/* v3.3：字重改由独立的「卡片字重」变量承担（默认 400，与旧观感一致） */
 .card-title,
 .card-sub {
-  font-weight: 400;
+  font-weight: var(--card-font-weight);
 }
 </style>

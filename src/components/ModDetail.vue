@@ -742,7 +742,7 @@ watch(
   color: var(--parch);
   font-size: calc(12px * var(--global-scale));
   line-height: 1.55;
-  letter-spacing: 0.3px;
+  letter-spacing: calc(0.3px * var(--ui-tracking));
 }
 .dv-datamod-warn .dv-warn-icon {
   flex: 0 0 auto;
@@ -753,7 +753,7 @@ watch(
 /* v0.6：未安装收藏条目的「下载安装」主按钮（与更新按钮同一金色主按钮风格） */
 .install-btn {
   padding: 6px 14px;
-  letter-spacing: 0.6px;
+  letter-spacing: calc(0.6px * var(--ui-tracking));
   white-space: nowrap;
 }
 </style>

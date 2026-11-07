@@ -52,6 +52,7 @@ function buildGhost(modId: number, cover: string | null): ModEntry {
     enabled: null,
     priority: null,
     lastUpdateMs: null,
+    installedAtMs: null,
     checksum: null,
     contentTags: meta?.tagNames ?? [],
     // 占位条目不参与分类索引（侧栏只索引真实扫描结果），这里给空数组

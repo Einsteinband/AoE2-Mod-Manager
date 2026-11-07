@@ -5,10 +5,13 @@ import {
   clearFinishedTasks,
   downloadSummary,
   downloadTasks,
+  isTaskStalled,
   managerOpen,
   queuePositionOf,
   removeTask,
   requestCancelTask,
+  retryTask,
+  stalledTick,
   type DownloadTask,
 } from "../online/downloadQueue";
 
@@ -49,8 +52,19 @@ function isStopping(task: DownloadTask): boolean {
   return task.cancelRequested && (task.status === "downloading" || task.status === "installing");
 }
 
+/**
+ * F2：读取 stalledTick 建立响应式依赖。stalledTick 每 5s 自增一次，
+ * 触发本组件重算，进而让 isTaskStalled(task) 的结果随时间刷新。
+ * 不读这个 tick，「90s 无进度」不会自动变成可见状态。
+ */
+function touchStalledTick(): void {
+  void stalledTick.value;
+}
+
 function statusText(task: DownloadTask): string {
+  touchStalledTick();
   if (isStopping(task)) return t("downloader.stopping");
+  if (task.status === "downloading" && isTaskStalled(task)) return t("downloader.stalled");
   switch (task.status) {
     case "queued": {
       const pos = queuePositionOf(task.id);
@@ -90,6 +104,10 @@ function noteText(task: DownloadTask): string {
     return "";
   }
   if (task.status === "downloading" || task.status === "installing") {
+    // F2：下载无响应时优先给「点取消放弃」的提示，而不是干巴巴的 MB 数。
+    if (task.status === "downloading" && isTaskStalled(task)) {
+      return t("downloader.stalledHint");
+    }
     const progress = task.progress;
     if (!progress) return t("downloader.waiting");
     const received = (progress.received / 1024 / 1024).toFixed(1);
@@ -154,7 +172,24 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
 
           <div class="dlmgr-row-bottom">
             <span class="dlmgr-note">{{ noteText(task) }}</span>
+            <template v-if="task.status === 'failed' || task.status === 'cancelled'">
+              <button
+                type="button"
+                class="dlmgr-act"
+                @click="retryTask(task.id)"
+              >
+                {{ t("downloader.retry") }}
+              </button>
+              <button
+                type="button"
+                class="dlmgr-act"
+                @click="removeTask(task.id)"
+              >
+                {{ t("downloader.remove") }}
+              </button>
+            </template>
             <button
+              v-else
               type="button"
               class="dlmgr-act"
               :class="{ danger: task.status === 'downloading' || task.status === 'installing' }"

@@ -56,6 +56,9 @@ pub struct ModEntry {
     pub enabled: Option<bool>,
     pub priority: Option<i64>,
     pub last_update_ms: Option<i64>,
+    /// 软件通过 mod_metadata.json 记录的安装时间（ms epoch）；
+    /// 老模组 / 手动丢进 local 目录的模组无记录为 None。前端「按下载顺序」排序用。
+    pub installed_at_ms: Option<i64>,
     pub checksum: Option<String>,
     /// 详情页展示的内容类型：有官方标签时是官方中文名，否则是本地特征名
     pub content_tags: Vec<String>,

@@ -26,6 +26,8 @@ export interface ModEntry {
   enabled: boolean | null;
   priority: number | null;
   lastUpdateMs: number | null;
+  /** 软件记录的安装时间（ms epoch）；老模组 / 手动放入的模组为 null */
+  installedAtMs: number | null;
   checksum: string | null;
   /** 详情页内容类型：有官方标签时是官方中文名 */
   contentTags: string[];
@@ -304,7 +306,7 @@ export interface PriorityOutcome {
 }
 
 export type StatusFilter = "all" | "enabled" | "disabled" | "unknown";
-export type SortKey = "name" | "updated" | "priority" | "folder";
+export type SortKey = "name" | "updated" | "priority" | "folder" | "download";
 
 /** v0.4：GitHub 最新 Release 的检测结果（Rust 侧已比对好版本号） */
 export interface UpdateInfo {

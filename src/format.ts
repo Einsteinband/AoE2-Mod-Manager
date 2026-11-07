@@ -23,6 +23,7 @@ const BACKEND_PATTERNS: [RegExp, string][] = [
   [/无法创建|创建目录失败/, "Could not create the folder."],
   [/无法删除|删除失败/, "Delete failed."],
   [/下载失败|下载中断/, "Download failed."],
+  [/网络连接被意外中断/, "The connection was interrupted — check your proxy node."],
   [/网络|连接失败|代理/, "Network problem."],
   [/超时/, "Timed out."],
   [/未知错误/, "Unknown error."],

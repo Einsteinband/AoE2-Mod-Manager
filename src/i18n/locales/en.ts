@@ -783,6 +783,8 @@ export default {
     tagsFailed: "Could not read categories; built-in categories are used: {msg}",
     probeFailed: "Failed: {msg}",
     netSaved: "Saved: {proxy} (the sign-in window is rebuilt with the new settings next time)",
+    networkInterrupted:
+      "The connection was interrupted — check your proxy node or switch networks (showing cached content).",
     silentNote: "Trying silent sign-in in the background ({reason})…",
     silentFailedStart: "Background silent sign-in could not start: {msg}",
     silentFailed: "Background silent sign-in did not succeed; please sign in once manually (after that it usually recovers automatically)",

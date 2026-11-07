@@ -109,6 +109,11 @@ export function useOnlineList(deps: {
   syncImages: (list: OnlineMod[]) => void;
   /** 接口明确返回 401：交给登录层处理（清会话 + 尝试静默重登） */
   onUnauthorized: (message: string) => void;
+  /**
+   * 网络类失败（断线 / TLS 被掐断 / 超时）时回调：页面用它弹一条轻提示，
+   * 不然用户只看得到「正在加载」而不知道是代理节点阵了。
+   */
+  onNetworkInterrupted?: () => void;
   /** 退出本地搜索态（返回调用前是否处于本地搜索视图）—— 与官方列表互斥 */
   clearLocalSearch: () => boolean;
 }) {
@@ -418,7 +423,11 @@ export function useOnlineList(deps: {
       noCacheOffline.value = false;
       loading.value = items.value.length === 0;
       // 同一个筛选连点（且上一次请求还没落盘）时，2 秒内不重复请求
-      if (!forceNetwork && sinceFetch < USER_MIN_GAP_MS) return;
+      if (!forceNetwork && sinceFetch < USER_MIN_GAP_MS) {
+        // 提前退出必须自己收回转圈：本函数后面不会再走到 finally
+        loading.value = false;
+        return;
+      }
     }
 
     if (rebuildInstalled) {
@@ -490,10 +499,12 @@ export function useOnlineList(deps: {
     } catch (e) {
       if (mySeq === seq) {
         if (isNetworkFailure(e)) {
-          // 断网 / DNS / 超时：不把技术性报错抛到脸上，只给“请检查网络”
+          // 断网 / DNS / 超时 / 代理把 TLS 掐断：不把技术性报错抛到脸上，
+          // 底栏给一份提示，同时弹一条轻提示告诉用户「换节点或换网络」。
           noCacheOffline.value = !items.value.length;
           error.value = null;
           setStatusMessageKey("statusbar.networkDownHint");
+          deps.onNetworkInterrupted?.();
         } else {
           if (!items.value.length) error.value = messageOf(e);
           setStatusMessageKey("statusbar.offlineHint");

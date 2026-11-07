@@ -119,7 +119,13 @@ impl ApiClient {
             }
             Err(ureq::Error::Transport(t)) => {
                 let msg = t.to_string();
-                log::error!(target: "http", "传输层错误（{url}）：{msg}");
+                // 代理节点质量差导致的底层断连（TLS 握手被强行中断 / 对端提前关连接）
+                // 不是程序缺陷，逐次刷 [ERROR] 只会把真正的问题埋掉 → 降级为 WARN。
+                if is_connection_dropped(&msg) {
+                    log::warn!(target: "http", "连接被中断（{url}）：{msg}");
+                } else {
+                    log::error!(target: "http", "传输层错误（{url}）：{msg}");
+                }
                 // DNS / 连接 / TLS / 超时 一律归为 kind="network"：
                 // 前端据此点亮全局「网络已断开」，并在断网时停止一切后续请求。
                 Err(transport_failure(msg))
@@ -281,12 +287,35 @@ fn transport_failure(msg: String) -> ApiFailure {
         format!("网络不可用：域名解析失败（{msg}）")
     } else if lower.contains("timed out") || lower.contains("timeout") {
         format!("网络超时（{msg}）")
+    } else if is_connection_dropped(&msg) {
+        // 代理节点抖动 / TLS 被掐断：给用户一句能直接行动的话（换节点或换网络）
+        format!("网络连接被意外中断（代理节点可能不稳定）：{msg}")
     } else if lower.contains("refused") || lower.contains("unreachable") || lower.contains("reset") {
         format!("网络连接被拒绝或中断（{msg}）")
     } else {
         format!("网络请求失败：{msg}")
     };
     ApiFailure::new("network", friendly, None)
+}
+
+/// 判断一条传输层错误是否属于「代理 / 网络把连接掐断」这一类。
+///
+/// 只用于日志级别与一句人话文案，**不改 ApiFailure 的 kind**（仍是 network），
+/// 因此前端的断网标志、缓存降级逻辑都不受影响。
+/// 关键词全部来自 ureq / rustls / std::io 的英文原文；匹配不到就按普通错误处理。
+fn is_connection_dropped(msg: &str) -> bool {
+    const HINTS: [&str; 8] = [
+        "tls",
+        "handshake",
+        "peer closed connection",
+        "closed connection",
+        "unexpected end of file",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+    ];
+    let lower = msg.to_lowercase();
+    HINTS.iter().any(|hint| lower.contains(hint))
 }
 
 fn snippet(text: &str, max: usize) -> String {
@@ -326,6 +355,22 @@ mod tests {
         let failure = transport_failure("timed out reading response".to_string());
         assert_eq!(failure.kind, "network", "超时也要算网络不可用");
         assert!(failure.message.contains("网络超时"));
+    }
+
+    /// 代理断开类错误：仍归 kind=network，但文案要说清「可能换节点就好了」。
+    #[test]
+    fn dropped_connection_error_is_recognized_and_friendly() {
+        let failure = transport_failure(
+            "tls connection init failed: peer closed connection without sending TLS close_notify"
+                .to_string(),
+        );
+        assert_eq!(failure.kind, "network");
+        assert!(failure.message.contains("意外中断"), "{}", failure.message);
+
+        assert!(is_connection_dropped("tls connection init failed: unexpected end of file"));
+        assert!(is_connection_dropped("peer closed connection"));
+        assert!(!is_connection_dropped("connection refused"));
+        assert!(!is_connection_dropped("dns error: Failed to lookup address information"));
     }
 
     #[test]

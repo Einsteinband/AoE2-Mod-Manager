@@ -84,6 +84,8 @@ const list = useOnlineList({
   syncImages: thumbs.syncImages,
   // 401：交给登录层统一处理（清会话 + 尝试静默重登）
   onUnauthorized: (message) => sessionCtl.reportUnauthorized(message),
+  // 网络被搓断（代理节点抖动 / TLS 被中断）：弹一条轻提示，别让用户只看到转圈
+  onNetworkInterrupted: () => showToast(t("online.networkInterrupted"), "error"),
   // 本地搜索与官方列表互斥：切官方分类 / 来源 / 收藏时清空本地搜索框
   clearLocalSearch: () => localSearch.clearLocalSearch(),
 });

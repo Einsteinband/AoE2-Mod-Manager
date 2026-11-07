@@ -770,6 +770,8 @@ export default {
     tagsFailed: "分类读取失败，已使用内置分类：{msg}",
     probeFailed: "失败：{msg}",
     netSaved: "已保存：{proxy}（登录窗口会在下次打开时用新配置重建）",
+    networkInterrupted:
+      "网络连接被意外中断，请检查您的代理节点或切换网络（当前显示的是本地缓存）",
     silentNote: "正在后台尝试免密登录（{reason}）…",
     silentFailedStart: "后台免密登录无法启动：{msg}",
     silentFailed: "后台免密登录未成功，请手动登录一次（成功过之后通常可长期自动恢复）",

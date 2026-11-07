@@ -1,29 +1,33 @@
-# v0.4.7
+# v0.4.8
 
-## v0.4.7 - Fixes & Improvements
-
-### 🛠 Fixes
-- Downloads no longer hang after a connection drop: 60s socket idle timeout and 900s overall timeout on the Rust side, plus a 20-minute watchdog in the UI. One stuck task can no longer block the whole queue.
-- "Download not responding" now appears after 5 seconds without progress, and cancelling at that point releases the queue immediately.
-- Failed downloads can be retried directly from the download panel.
-- Network errors are shown in plain language; raw TLS / OS error strings are no longer exposed.
-- The install report (final path, backup info) is no longer shown after a successful install.
+## v0.4.8 - Fixes & Improvements
 
 ### ✨ New
-- Local mods: new "Download order" sort option - newest downloaded or reinstalled first, mods without install records last.
-- Settings - About: the author profile link is replaced by a "Feedback & suggestions" row with a GitHub Issue button that opens the issue tracker.
+- Full Spanish (Español) UI: every screen, dialog and toast is translated. The language picker now offers English / Español / 中文 and the choice is remembered in `settings.json`.
+- Backend error messages are translated: raw Rust errors are matched as whole sentences and rendered in the current UI language, with the original path / cause kept in place. Non-Chinese UIs no longer show mixed Chinese-English text.
+- Settings - Appearance: weight and line spacing moved from dropdowns to left/right toggle buttons; new card weight and a serif / sans-serif font switch. English UI gets its own font stack and slightly tighter tracking.
+- Settings window is now a floating, draggable panel: move it aside and keep working in the main window.
+- The bottom-left "Account & network" area is rebuilt into a single entry point: a fixed label with the live status shown beside it, plus a popup menu holding the account line (cookie source and count), "Check connection" (login state and a real request in one go) and "Sign out / clear cache". The duplicate account block in the online sidebar is gone.
+
+### 🛠 Fixes
+- Settings - General & Storage: folder paths and buttons no longer squeeze each other; action buttons moved to the left and wrap when space is tight.
+- Settings - Mod translation: the online data cache figure is hidden and the "clear translation cache" button is removed; the explanation now sits under the batch translation section.
+- Errors raised on the online mod browser now go through the same translation path as the rest of the app.
+- Signing out reports the real reason when it fails (for example a file still in use) instead of claiming success. "Check connection" now always answers, in all four login/network combinations.
 
 ---
 
-## v0.4.7 - 修复与优化
-
-### 🛠 修复
-- 断网后下载不再卡死：Rust 侧增加 60 秒 socket 空闲超时与 900 秒整体超时，界面侧增加 20 分钟看门狗；单个任务挂起不会再堵死整个队列。
-- 无进度 5 秒即提示「下载无响应」，此时点取消可立即释放队列。
-- 下载失败的任务可直接在下载面板重试，无需先移除再重新添加。
-- 网络错误改为通俗文案，不再向用户暴露 TLS / 系统错误原文。
-- 安装成功后不再显示路径与备份报告。
+## v0.4.8 - 修复与优化
 
 ### ✨ 新增
-- 本地模组页新增「按下载顺序」排序：最近下载或重装排最前，无安装记录的排最后。
-- 设置 - 关于：「作者主页」改为「反馈或建议」，并提供打开 GitHub Issue 的按钮。
+- 完整西班牙语界面：所有页面、对话框与提示均已翻译；语言下拉现有 English / Español / 中文，选择记在 `settings.json`。
+- 后端错误消息翻译：Rust 原文按整句匹配后转成当前界面语言，并保留原始路径 / 原因；非中文界面不再出现中外混排。
+- 设置 - 外观：字重与行距由下拉改为左右切换按钮，新增卡片字重、衬线 / 非衬线字体切换；英文界面使用专用字体栈并略微收紧字距。
+- 设置窗口改为可拖动的浮动面板，可挪到一边继续操作主界面。
+- 左下角「账号与网络」重做为一处入口：按钮文案固定、状态文字显示在右侧，弹出菜单内含账号信息（凭据来源与数量）、「校验连接」（登录状态与真实请求一次完成）与「退出登录 / 清缓存」；在线页侧栏重复的账号块已移除。
+
+### 🛠 修复
+- 设置 - 通用 / 存储：路径与按钮不再互相挤压，操作按钮统一左移、空间不足时换行排列。
+- 设置 - 模组翻译：隐藏在线数据缓存统计、「清理翻译缓存」按钮已移除，说明文本移到「批量翻译」下方。
+- 在线模组页的报错统一走翻译出口。
+- 退出登录失败时如实提示原因（如文件仍被占用），不再假报成功；「校验连接」在登录与网络的四种组合下都会给出结果。

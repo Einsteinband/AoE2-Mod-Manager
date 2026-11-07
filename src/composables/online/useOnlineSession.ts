@@ -125,8 +125,12 @@ export function useOnlineSession(deps: {
         tagsError.value = t("online.tagsEmpty");
       }
     } catch (e) {
+      // 界面只给可操作文案；底层技术串（peer closed connection without sending
+      // TLS close_notify / docs.rs/rustls 链接 / os error 10060）只进日志文件。
+      // 以前这里直接插进 {msg}，导致一整条 rustls 报错原样显示在左侧栏。
+      void uiLog("warn", `读取官方分类失败：${messageOf(e)}`);
       tags.value = FALLBACK_TAGS;
-      tagsError.value = t("online.tagsFailed", { msg: messageOf(e) });
+      tagsError.value = t("online.tagsFailed");
     }
   }
 

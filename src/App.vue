@@ -208,13 +208,24 @@ function readCachedTypography(): TypographyPrefs {
 function applyTypography(next: TypographyPrefs) {
   const root = document.documentElement;
   const prefs = normalizeTypography(next);
-  root.style.setProperty("--app-font-family", FONT_FAMILY_VARS[prefs.fontFamily]);
+  // v3.5：英文界面额外套一层「西文专用栈」—— "Segoe UI" 打头，再接用户选的中文字体做中文 fallback。
+  // 中文界面永远忽略这个开关，字体顺序与改动前完全一致。
+  const baseFamily = FONT_FAMILY_VARS[prefs.fontFamily];
+  const useLatinStack = prefs.latinFont && currentLocale.value !== "zh";
+  root.style.setProperty(
+    "--app-font-family",
+    useLatinStack ? `var(--font-latin), ${baseFamily}` : baseFamily,
+  );
   root.style.setProperty("--ui-font-weight", String(prefs.uiFontWeight));
+  // 强调层（标题 / 按钮）：常规时 600、加粗时 700。
+  // 这样「界面字重」既作用于正文级文字，又不会把标题和正文拉成同一档粗度。
+  root.style.setProperty("--ui-font-weight-strong", prefs.uiFontWeight >= 600 ? "700" : "600");
   root.style.setProperty("--global-scale", String(prefs.globalScale / 100));
   root.style.setProperty("--reader-font-size", `${prefs.readerFontSize}px`);
   root.style.setProperty("--reader-line-height", String(prefs.readerLineHeight));
   root.style.setProperty("--reader-font-weight", String(prefs.readerFontWeight));
   root.style.setProperty("--card-font-size", `${prefs.cardFontSize}px`);
+  root.style.setProperty("--card-font-weight", String(prefs.cardFontWeight));
   try {
     window.localStorage.setItem(TYPO_CACHE_KEY, JSON.stringify(prefs));
   } catch {
@@ -230,8 +241,11 @@ const readerFontSize = ref<number>(cachedTypography.readerFontSize);
 const readerLineHeight = ref<number>(cachedTypography.readerLineHeight);
 const readerFontWeight = ref<number>(cachedTypography.readerFontWeight);
 const cardFontSize = ref<number>(cachedTypography.cardFontSize);
+const cardFontWeight = ref<number>(cachedTypography.cardFontWeight);
+/** v3.5：英文界面西文专用字体栈开关（中文界面不生效，设置里也只在英文下显示） */
+const latinFont = ref<boolean>(cachedTypography.latinFont);
 
-/** 当前七项快照（归一化后的值，保证和 Rust 侧写盘结果一致） */
+/** 当前八项快照（归一化后的值，保证和 Rust 侧写盘结果一致） */
 function currentTypography(): TypographyPrefs {
   return normalizeTypography({
     fontFamily: uiFontFamily.value,
@@ -241,6 +255,8 @@ function currentTypography(): TypographyPrefs {
     readerLineHeight: readerLineHeight.value,
     readerFontWeight: readerFontWeight.value,
     cardFontSize: cardFontSize.value,
+    cardFontWeight: cardFontWeight.value,
+    latinFont: latinFont.value,
   });
 }
 
@@ -259,15 +275,25 @@ function sameTypography(a: TypographyPrefs, b: TypographyPrefs): boolean {
     a.readerFontSize === b.readerFontSize &&
     a.readerLineHeight === b.readerLineHeight &&
     a.readerFontWeight === b.readerFontWeight &&
-    a.cardFontSize === b.cardFontSize
+    a.cardFontSize === b.cardFontSize &&
+    a.cardFontWeight === b.cardFontWeight &&
+    a.latinFont === b.latinFont
   );
 }
 
 // 脚本建立阶段先打上缓存值，避免开屏时字号 / 字体跳一下
 applyTypography(cachedTypography);
 
+/**
+ * v3.5：语言切换不写盘，只影响「要不要用西文专用字体栈」这一个判断，
+ * 所以切中 / 英时直接重算一次 CSS 变量即可（中文 → 回落到用户选的中文字体）。
+ */
+watch(currentLocale, () => {
+  applyTypography(currentTypography());
+});
+
 watch(
-  [uiFontFamily, uiFontWeight, globalFontScale, readerFontSize, readerLineHeight, readerFontWeight, cardFontSize],
+  [uiFontFamily, uiFontWeight, globalFontScale, readerFontSize, readerLineHeight, readerFontWeight, cardFontSize, cardFontWeight, latinFont],
   () => {
     const next = currentTypography();
     // 1）先改 DOM：即时预览（不重建组件树、不丢滚动位置）
@@ -352,7 +378,6 @@ const {
   officialTagList,
   inferredTagList,
   heading,
-  contentHint,
   favoriteLocalCount,
   pickSource,
   pickStatus,
@@ -984,6 +1009,7 @@ onMounted(async () => {
       readerLineHeight: settings.readerLineHeight,
       readerFontWeight: settings.readerFontWeight,
       cardFontSize: settings.cardFontSize,
+      cardFontWeight: settings.cardFontWeight,
     });
     uiFontFamily.value = typoPrefs.fontFamily;
     uiFontWeight.value = typoPrefs.uiFontWeight;
@@ -992,6 +1018,7 @@ onMounted(async () => {
     readerLineHeight.value = typoPrefs.readerLineHeight;
     readerFontWeight.value = typoPrefs.readerFontWeight;
     cardFontSize.value = typoPrefs.cardFontSize;
+    cardFontWeight.value = typoPrefs.cardFontWeight;
     applyTypography(typoPrefs);
     // 回填后同步“已落盘值”，避免监听器把刚读到的值又写回去
     persistedTypography = { ...typoPrefs };
@@ -1199,11 +1226,18 @@ onBeforeUnmount(() => {
 
         <div class="content-head">
           <h2>{{ heading }}</h2>
-          <span class="hint">{{ contentHint }}</span>
+
+          <!-- v0.4.7：原来的“全部内容 · 全部状态”副标题已移除 —— 左侧栏已经高亮
+               当前来源与分类、状态筛选也在上方可见，这行只是复述，占位且让长提示被挤窄。 -->
 
           <!-- 常驻说明（仅来源＝本地时显示）：local 目录的模组若账号仍在订阅，
-               游戏会再下一份到 subscribed/。只作文字提示，不给按钮、不阻塞布局 -->
-          <span v-if="source === 'local'" class="local-dir-note">{{ t("content.localDirNote") }}</span>
+               游戏会再下一份到 subscribed/。只作文字提示，不给按钮、不阻塞布局。
+               :title 让被省略号截断的英文长句能悬停看全。 -->
+          <span
+            v-if="source === 'local'"
+            class="local-dir-note"
+            :title="t('content.localDirNote')"
+          >{{ t("content.localDirNote") }}</span>
 
           <!-- v2.6 批量操作组：预设 / 全部启用 / 全部禁用 / 排序模式 / 视图切换（网格·列表），
                贴在列表标题（说明文字）右侧、整组右靠。视图切换与在线页列表抬头的位置一致。 -->
@@ -1492,6 +1526,8 @@ onBeforeUnmount(() => {
       v-model:reader-line-height="readerLineHeight"
       v-model:reader-font-weight="readerFontWeight"
       v-model:card-font-size="cardFontSize"
+      v-model:card-font-weight="cardFontWeight"
+      v-model:latin-font="latinFont"
       :root-path="report?.root ?? ''"
       :initial-tab="settingsInitialTab"
       :focus-game-root="settingsFocusGameRoot"
@@ -1573,7 +1609,7 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   font-size: calc(11px * var(--global-scale));
   font-weight: 400;
-  letter-spacing: 0.3px;
+  letter-spacing: calc(0.3px * var(--ui-tracking));
   color: var(--muted);
   /* 淡金色微光，和羊皮纸底色协调，但不抢标题 */
   text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.10);
@@ -1617,13 +1653,13 @@ onBeforeUnmount(() => {
   color: var(--gold-text);
   border-color: var(--gold-dim);
   background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-hover));
-  letter-spacing: 1px;
+  letter-spacing: calc(1px * var(--ui-tracking));
 }
 
 /* 批量启用 / 禁用：绿色 / 红色描边（沿用 v0.9 的一套配色） */
 .batch-actions .batch-btn.batch-enable,
 .batch-actions .batch-btn.batch-disable {
-  letter-spacing: 1px;
+  letter-spacing: calc(1px * var(--ui-tracking));
 }
 .batch-actions .batch-btn.batch-enable {
   color: var(--ok-text-strong);
@@ -1666,8 +1702,8 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   font-family: inherit;
   font-size: calc(11.5px * var(--global-scale));
-  font-weight: 600;
-  letter-spacing: 0.6px;
+  font-weight: var(--ui-font-weight-strong);
+  letter-spacing: calc(0.6px * var(--ui-tracking));
   color: var(--text-on-accent);
   background: linear-gradient(180deg, var(--gold-bright), var(--gold));
   border: 1px solid var(--gold-dim);

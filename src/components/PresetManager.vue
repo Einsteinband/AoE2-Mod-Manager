@@ -322,6 +322,6 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
   color: var(--gold-bright);
   font-size: calc(12px * var(--global-scale));
   line-height: 1.55;
-  letter-spacing: 0.3px;
+  letter-spacing: calc(0.3px * var(--ui-tracking));
 }
 </style>

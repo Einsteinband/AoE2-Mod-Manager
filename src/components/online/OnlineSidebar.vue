@@ -93,22 +93,8 @@ const { t } = useI18n();
     <div v-else-if="tagsError" class="side-note note">{{ tagsError }}</div>
   </div>
 
-  <div class="side-group">
-    <div class="side-title">{{ t("online.account") }}</div>
-    <div class="side-note note">
-      {{ session?.loggedIn ? t("online.signedIn") : t("online.signedOut") }} ·
-      {{ session?.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview") }}
-      <template v-if="session?.cookieCount">· {{ session.cookieCount }} Cookie</template>
-    </div>
-    <button type="button" class="side-item" @click="emit('refresh-session')">
-      <span class="label">{{ t("online.recheck") }}</span>
-    </button>
-    <button type="button" class="side-item" :disabled="netClearing" @click="emit('logout')">
-      <span class="label">{{ netClearing ? t("online.clearing") : t("online.clearCache") }}</span>
-    </button>
-    <div v-if="netError" class="side-msg error">{{ netError }}</div>
-    <div v-else-if="netMessage" class="side-msg">{{ netMessage }}</div>
-  </div>
+  <!-- 账号区（登录态 / Cookie 数 / 重新检查 / 退出登录）已整体迁到左下角
+       「账号与网络」二级菜单：全应用只保留一个入口，不再在这里重复一份。 -->
 
   <!-- 代理 / 记住登录已迁到顶栏齿轮里的设置弹窗（SettingsModal → 网络） -->
 </template>

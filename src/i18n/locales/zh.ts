@@ -6,7 +6,7 @@ export const label = "中文";
 export default {
   app: {
     name: "帝国时代 II · 模组管理器",
-    taglinePrefix: "v0.4.7 · by ",
+    taglinePrefix: "v0.4.8 · by ",
     author: "Einsteinband",
     authorTitle: "打开作者 GitHub 主页（系统浏览器）",
     windowTitle: "AoE2 Mod Manager",
@@ -569,6 +569,16 @@ export default {
     netcheckTitle: "发一次真实请求，检测网络与当前代理是否可用",
     netOk: "网络正常",
     netFailOther: "网络可达，但接口返回错误（登录态可能已过期）",
+    accountMenu: "账号与网络",
+    checkTitle: "校验连接",
+    checkHint: "验证登录状态，并向官方服务器发一次真实请求确认网络可达",
+    checkNetworkFailed: "登录有效，但网络不通：请查看下方网络状态提示",
+    checkLoginFailed: "网络正常，但登录已失效，请重新登录",
+    checkAllFailed: "未登录，且网络不通",
+    sessionLine: "已登录 · {src} · {n} 个 Cookie",
+    logout: "退出登录 / 清缓存",
+    loggingOut: "正在退出…",
+    logoutDone: "已退出登录并清除本地凭证",
     cacheLoaded: "已从缓存加载",
     refreshing: "缓存已显示，正在静默刷新…",
     fetching: "正在请求网络数据…",
@@ -786,7 +796,7 @@ export default {
     installDoneShort: "安装完成",
     timeout: "{what}超时（{sec} 秒无响应）。若持续如此，说明后端命令被阻塞在主线程上。",
     tagsEmpty: "官方分类接口返回空列表，已使用内置分类",
-    tagsFailed: "分类读取失败，已使用内置分类：{msg}",
+    tagsFailed: "分类读取失败，已使用内置分类（请检查网络或代理后重试）",
     probeFailed: "失败：{msg}",
     netSaved: "已保存：{proxy}（登录窗口会在下次打开时用新配置重建）",
     networkInterrupted:
@@ -924,6 +934,12 @@ export default {
     fontFamilyHei: "黑体",
     fontFamilyYouyuan: "幼圆",
     fontFamilySystem: "跟随系统",
+    fontFamilySerif: "衬线（宋体）",
+    latinFontTitle: "英文界面用西文字体",
+    latinFontNote: "英文用 Segoe UI 等西文字体排字，比中文字体的西文字形更紧凑；只在英文界面生效",
+    moreTypography: "更多排版选项",
+    cardFontWeightTitle: "卡片字重",
+    cardFontWeightNote: "模组卡片标题与副标题的粗细，与卡片字号互不影响",
     uiFontWeightTitle: "界面字重",
     uiFontWeightNote: "导航、按钮与设置界面的描边粗细",
     globalScaleTitle: "全局缩放",
@@ -952,5 +968,48 @@ export default {
     rootEmpty: "尚未设置根目录",
     rootPath:
       "模组扫描路径（根目录）已统一到「通用」Tab 里的「更换根目录」按钮管理。",
+  },
+
+  /* ---------- 后端错误文案（src/format.ts 的后端报错翻译唯一查表处） ----------
+     pattern：Rust 仍返回中文原文时的关键词兜底（只用于非中文界面）。
+     code：错误码协议 `aoe2mm:err:<code>:<json>` 的文案表，key 与 Rust 的 code 逐段对应。
+     Rust 迁移错误码后，只需要补这一段的文案，不用改任何后端代码。 */
+  backendErrors: {
+    /* 协议命中、但语言包里还没有这个 code 的文案时的兜底（保留 code 便于反馈排查） */
+    protocolUnknown: "未识别的错误类型（{code}），可把这个代码反馈给作者。",
+    pattern: {
+      pathNotExist: "路径不存在：{detail}",
+      notFolder: "该路径不是文件夹：{detail}",
+      noLocalSub: "这里没有 local 或 subscribed 子目录，不是 AoE2DE 的模组根目录：{detail}",
+      noRoot: "尚未设置模组根目录。",
+      gameRunning: "游戏正在运行，请先关闭游戏。",
+      noModRecord: "mod-status.json 里没有该模组的记录（先启动一次游戏让它登记）。",
+      emptyFolder: "这个模组文件夹是空的。",
+      extractFailed: "解压失败，无法创建解压目录：{detail}",
+      writeFailed: "写入失败：{detail}",
+      backupFailed: "备份失败。",
+      verifyFailed: "写入后的回读校验失败：{detail}",
+      accessDenied: "拒绝访问：权限不足。",
+      outsideRoot: "已拒绝：目标路径不在模组根目录内。",
+      readFailed: "读取失败：{detail}",
+      createFailed: "创建目录失败：{detail}",
+      deleteFailed: "删除失败：{detail}",
+      downloadFailed: "下载失败或下载中断：{detail}",
+      connectionInterrupted: "网络连接被意外中断，请检查代理节点。",
+      network: "网络问题（连接失败或代理异常）：{detail}",
+      timeout: "请求超时。",
+      unknown: "未知错误。",
+    },
+    /* 协议样例（Rust 迁移到错误码后才用得上）：
+       Rust 返回 aoe2mm:err:install.extractFailed:{"modId":45427}
+       → 取 backendErrors.code.install.extractFailed，{modId} 由 JSON 字段填充 */
+    code: {
+      install: {
+        extractFailed: "解压失败（模组 {modId}）。",
+      },
+      net: {
+        timeout: "网络请求超时。",
+      },
+    },
   },
 } as const;

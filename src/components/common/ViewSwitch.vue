@@ -70,7 +70,7 @@ function setView(next: "grid" | "list") {
   padding: 6px 10px;
   font-size: 11.5px;
   line-height: 1.45;
-  letter-spacing: 0.8px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
   white-space: nowrap;
   border: none;
   border-radius: 0;
@@ -88,7 +88,7 @@ function setView(next: "grid" | "list") {
 .view-switch .view-btn.active {
   color: var(--text-on-accent);
   background: linear-gradient(180deg, var(--gold-bright), var(--gold));
-  font-weight: 600;
+  font-weight: var(--ui-font-weight-strong);
 }
 .view-switch .view-btn:active {
   transform: none;

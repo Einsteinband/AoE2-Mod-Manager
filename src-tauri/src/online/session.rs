@@ -9,6 +9,8 @@ use crate::models::Settings;
 use crate::net;
 use crate::secure;
 use crate::settings;
+use crate::user_err;
+use serde_json::json;
 
 /// 专门用于维持官网登录态的独立窗口。
 /// 登录过程完全发生在 WebView2 内，本应用不接触账号密码。
@@ -24,6 +26,27 @@ const WEBVIEW_DIR: &str = "webview2";
 
 /// 记录最近一次由我们主动隐藏窗口的原因，用于在 CloseRequested 日志里标注来源
 static LAST_PROGRAMMATIC_REASON: Mutex<String> = Mutex::new(String::new());
+
+/// Cookie header 内存缓存：前端每 2.5 秒轮询一次会话状态，
+/// 没有变化时不该每次都全量遍历 WebView2 Cookie + 重复打诊断日志。
+/// TTL 5 秒；登录成功（cookie 变持久）或退出登录（cookie 被清空）时主动失效。
+static COOKIE_HEADER_CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+const COOKIE_HEADER_TTL: Duration = Duration::from_secs(5);
+
+/// DPAPI 写盘节流：登录成功瞬间并发请求会导致同一秒内重复加密 + 写盘 3 次。
+/// 1 秒内只写一次，其余调用直接跳过（下次 probe 会自然补写）。
+static LAST_COOKIE_SAVE: Mutex<Option<Instant>> = Mutex::new(None);
+const COOKIE_SAVE_THROTTLE: Duration = Duration::from_secs(1);
+
+/// 主动失效 cookie header 缓存（退出登录、cookie 被清空或改成持久型后调用）。
+pub fn invalidate_cookie_header_cache() {
+    if let Ok(mut slot) = COOKIE_HEADER_CACHE.lock() {
+        if slot.is_some() {
+            *slot = None;
+            log::debug!(target: "account", "Cookie 头内存缓存已主动失效");
+        }
+    }
+}
 
 pub fn note_programmatic_hide(reason: &str) {
     if let Ok(mut slot) = LAST_PROGRAMMATIC_REASON.lock() {
@@ -268,9 +291,11 @@ pub fn clear_login_cache(app: &AppHandle) -> Result<String, String> {
     }
 
     let dir = webview_data_dir(app)?;
+    // 窗口刚销毁，WebView2 可能还持有数据库/缓存文件句柄，先等 1 秒再删。
+    std::thread::sleep(Duration::from_millis(1000));
     let mut removed = false;
     let mut last_err = String::new();
-    for attempt in 0..12 {
+    for attempt in 0..3 {
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {
                 removed = true;
@@ -287,20 +312,20 @@ pub fn clear_login_cache(app: &AppHandle) -> Result<String, String> {
                     "第 {} 次删除 WebView2 数据目录失败：{e}",
                     attempt + 1
                 );
-                std::thread::sleep(Duration::from_millis(250));
+                if attempt < 2 {
+                    std::thread::sleep(Duration::from_millis(1000));
+                }
             }
         }
     }
     if !removed {
-        log::error!(
+        // 3 次都失败：只记 WARN，不阻塞退出登录主流程。
+        // 文件句柄可能被其他进程占用（杀软索引、资源管理器预览窗格等），下次启动再清即可。
+        log::warn!(
             target: "account-window",
-            "WebView2 数据目录仍被占用：{}（{last_err}）",
+            "WebView2 数据目录清理未完成（不阻塞退出登录，下次启动将重试）：{}（{last_err}）",
             dir.display()
         );
-        failures.push(format!(
-            "WebView2 数据目录仍被占用（{}）：{last_err}",
-            dir.display()
-        ));
     }
 
     if !failures.is_empty() {
@@ -326,6 +351,21 @@ pub fn clear_login_cache(app: &AppHandle) -> Result<String, String> {
 /// 先用 cookies_for_url(api) 精确匹配目标域，避免把 www.ageofempires.com 上的
 /// WordPress/Analytics Cookie 误判成登录态（这正是之前登录窗口“秒关”的原因）。
 pub fn collect_cookie_header(webview: &WebviewWindow) -> Result<String, String> {
+    // 缓存命中：5 秒内复用上次拼装结果，避免轮询时重复全量遍历 WebView2 Cookie。
+    // 登录成功 / 退出登录时会主动调 invalidate_cookie_header_cache() 失效。
+    if let Ok(slot) = COOKIE_HEADER_CACHE.lock() {
+        if let Some((at, header)) = slot.as_ref() {
+            if at.elapsed() < COOKIE_HEADER_TTL {
+                log::debug!(
+                    target: "account",
+                    "Cookie 头缓存命中（{} 秒前拼，{} 字节）",
+                    at.elapsed().as_secs(),
+                    header.len()
+                );
+                return Ok(header.clone());
+            }
+        }
+    }
 
     let targeted = match Url::parse(API_COOKIE_URL) {
         Ok(parsed) => match webview.cookies_for_url(parsed) {
@@ -410,11 +450,18 @@ pub fn collect_cookie_header(webview: &WebviewWindow) -> Result<String, String> 
         );
     }
 
-    Ok(jar
+    let header = jar
         .into_iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect::<Vec<_>>()
-        .join("; "))
+        .join("; ");
+
+    // 写入内存缓存，供 5 秒内的轮询复用
+    if let Ok(mut slot) = COOKIE_HEADER_CACHE.lock() {
+        *slot = Some((Instant::now(), header.clone()));
+    }
+
+    Ok(header)
 }
 
 /// 会话来源：webview = WebView2 内实时 Cookie；cache = DPAPI 加密缓存
@@ -499,23 +546,48 @@ pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
         log_key_credentials(&header);
         if settings.remember_login {
             if let Ok(path) = settings::session_cache_for(app) {
-                match secure::save(&path, &header) {
-                    Ok(()) => log::info!(
+                // 节流：1 秒内只写一次盘，避免登录成功瞬间并发请求重复 DPAPI 加密
+                let should_save = match LAST_COOKIE_SAVE.lock() {
+                    Ok(slot) => match slot.as_ref() {
+                        Some(at) => at.elapsed() >= COOKIE_SAVE_THROTTLE,
+                        None => true,
+                    },
+                    Err(_) => true,
+                };
+                if should_save {
+                    match secure::save(&path, &header) {
+                        Ok(()) => {
+                            if let Ok(mut slot) = LAST_COOKIE_SAVE.lock() {
+                                *slot = Some(Instant::now());
+                            }
+                            log::info!(
+                                target: "session-cache",
+                                "已用 DPAPI 加密保存会话 Cookie（{} 字节，内容不打印）",
+                                header.len()
+                            );
+                        }
+                        Err(e) => log::warn!(target: "session-cache", "保存会话缓存失败：{e}"),
+                    }
+                } else {
+                    log::debug!(
                         target: "session-cache",
-                        "已用 DPAPI 加密保存会话 Cookie（{} 字节，内容不打印）",
+                        "DPAPI 保存节流：距上次不足 1 秒，跳过写盘（{} 字节 header）",
                         header.len()
-                    ),
-                    Err(e) => log::warn!(target: "session-cache", "保存会话缓存失败：{e}"),
+                    );
                 }
             }
         }
         // 门控：开关关闭时只用本次进程内的会话，绝不把 AoE 凭证写进磁盘
         if settings.remember_login {
             match persist_auth_cookies(&window) {
-                Ok(n) if n > 0 => log::info!(
-                    target: "session-cookie",
-                    "已把 {n} 条会话 Cookie 改成 7 天持久 Cookie（下次启动无需重新登录）"
-                ),
+                Ok(n) if n > 0 => {
+                    log::info!(
+                        target: "session-cookie",
+                        "已把 {n} 条会话 Cookie 改成 7 天持久 Cookie（下次启动无需重新登录）"
+                    );
+                    // cookie 属性变更后，下一次轮询重新拼 header（缓存里的是 session 态的旧值）
+                    invalidate_cookie_header_cache();
+                }
                 Ok(_) => {}
                 Err(e) => log::warn!(target: "session-cookie", "持久化会话 Cookie 失败：{e}"),
             }
@@ -558,7 +630,7 @@ pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
     }
 
     log::info!(target: "account", "当前没有可用的 ageofempires 会话 Cookie");
-    Err("尚未登录".to_string())
+    Err(user_err("account.notLoggedIn", json!({})))
 }
 
 /// 是否已具备可用会话（Cookie 头非空）
@@ -571,6 +643,8 @@ pub fn current_cookie_header(app: &AppHandle) -> Result<String, String> {
 pub fn invalidate_cached_session(app: &AppHandle) -> Result<(), String> {
     // 诊断开关重置：下次登录成功后还能再打一次 Cookie 快照
     ALL_COOKIES_LOGGED.store(false, Ordering::Relaxed);
+    // cookie 即将被清空，立刻失效内存缓存，避免后续轮询拿到旧 header
+    invalidate_cookie_header_cache();
     // ① 立刻中止索引同步：退出登录后不该再有任何在线请求
     cancel_sync(app);
 
@@ -701,14 +775,15 @@ const PHP_SESSID_KEY: &str = "PHPSESSID";
 
 /// 这份 Cookie 头里是否含真实登录凭证（只判 name，不判 domain / expires）。
 ///
-/// v1.5 收紧（退出登录后 UI 横跳的根因）：
-/// - **只有 `PHPSESSID` 或只有 `AgeAuthSession` 一律不算登录**——游客态同样会下发这两条；
-/// - 唯一的一等凭证是 `wordpress_logged_in_*`；
-/// - 若服务端确实只认 `AgeAuthSession`，必须 `AgeAuthSession + PHPSESSID` 同时具备。
+/// v0.4.9 收紧（假登录根因）：
+/// - **必须同时有 `wordpress_logged_in_*` 与 `AgeAuthSession` 才算真登录**；
+/// - 只有 `wordpress_logged_in`（缺 `AgeAuthSession`）= 授权跳链未走完，API 实际会 401；
+/// - 只有 `AgeAuthSession`（缺 `wordpress_logged_in`）= 登录未完成，同样不算；
+/// - 游客态的 `PHPSESSID` / 单独某条凭证一律不认。
 pub fn has_real_credential(header: &str) -> bool {
     let names = header_names(header);
     let has = |key: &str| names.iter().any(|n| n.contains(key));
-    has(WP_LOGIN_KEY) || (has(AGE_AUTH_KEY) && has(PHP_SESSID_KEY))
+    has(WP_LOGIN_KEY) && has(AGE_AUTH_KEY)
 }
 
 /// 把 jar 拼回 Cookie 头字符串
@@ -825,7 +900,7 @@ pub fn persist_auth_cookies(window: &WebviewWindow) -> Result<usize, String> {
 
     let outcome = rx
         .recv_timeout(PERSIST_TIMEOUT)
-        .map_err(|_| "设置持久 Cookie 超时（WebView2 未回应）".to_string())?;
+        .map_err(|_| user_err("session.persistTimeout", json!({})))?;
 
     if let Ok(count) = &outcome {
         if *count > 0 {
@@ -955,7 +1030,7 @@ fn persist_in_window(
 /// 用 recv_timeout，主线程照常跑消息循环，所以既不卡 UI 也不会自锁。超时/失败只 warn。
 fn purge_webview_cookies(app: &AppHandle) -> Result<usize, String> {
     let Some(window) = app.get_webview_window(ACCOUNT_WINDOW) else {
-        let msg = "账号窗口不存在，无法清理 WebView2 Cookie".to_string();
+        let msg = user_err("session.windowNotExist", json!({}));
         log::error!(target: "session-cookie", "{msg}");
         return Err(msg);
     };
@@ -1064,21 +1139,21 @@ fn delete_aoe_cookies_in_window(
     let core = match unsafe { controller.CoreWebView2() } {
         Ok(core) => core,
         Err(e) => {
-            let _ = tx.send(Err(format!("取 CoreWebView2 失败：{e}")));
+            let _ = tx.send(Err(user_err("session.coreFailed", json!({ "error": e.to_string() }))));
             return;
         }
     };
     let core = match core.cast::<ICoreWebView2_2>() {
         Ok(core) => core,
         Err(e) => {
-            let _ = tx.send(Err(format!("升级到 ICoreWebView2_2 失败：{e}")));
+            let _ = tx.send(Err(user_err("session.interfaceUpgradeFailed", json!({ "error": e.to_string() }))));
             return;
         }
     };
     let manager = match unsafe { core.CookieManager() } {
         Ok(manager) => manager,
         Err(e) => {
-            let _ = tx.send(Err(format!("取 CookieManager 失败：{e}")));
+            let _ = tx.send(Err(user_err("session.cookieManagerFailed", json!({ "error": e.to_string() }))));
             return;
         }
     };
@@ -1090,7 +1165,7 @@ fn delete_aoe_cookies_in_window(
         let handler = GetCookiesCompletedHandler::create(Box::new(move |hr, list| {
             // 第一个参数已被 webview2-com 包装成 Result：Err 表示这次查询失败
             let outcome = match hr {
-                Err(e) => Err(format!("GetCookies({url}) 失败：{e}")),
+                Err(e) => Err(user_err("session.getCookiesFailed", json!({ "url": url, "error": e.to_string() }))),
                 Ok(()) => delete_aoe_cookies_from_list(&manager_in_handler, list, url),
             };
             let _ = tx_reply.send(outcome);
@@ -1098,7 +1173,7 @@ fn delete_aoe_cookies_in_window(
         }));
         let uri = HSTRING::from(url);
         if let Err(e) = unsafe { manager.GetCookies(&uri, &handler) } {
-            let _ = tx.send(Err(format!("GetCookies({url}) 调用失败：{e}")));
+            let _ = tx.send(Err(user_err("session.getCookiesCallFailed", json!({ "url": url, "error": e.to_string() }))));
         }
     }
 }
@@ -1331,7 +1406,7 @@ pub fn ensure_session(app: &AppHandle) -> Result<String, String> {
         SILENT_LOGIN_TIMEOUT.as_secs(),
         if stalled_at.is_empty() { "<未知>".to_string() } else { stalled_at }
     );
-    Err("自动重新登录未完成：请在设置里手动点一次登录".to_string())
+    Err(user_err("session.autoReloginIncomplete", json!({})))
 }
 
 #[cfg(test)]

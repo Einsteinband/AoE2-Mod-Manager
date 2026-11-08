@@ -11,11 +11,23 @@ const emit = defineEmits<{ (e: "close"): void; (e: "applied", presetId: string):
 
 const { t } = useI18n();
 
+/**
+ * 提示文本存「key + 参数」，渲染时才翻译 —— 切换语言后旧提示会跟着重译，
+ * 不会在英文 / 西语界面里残留上一门语言（string 分支用于后端原始错误串）。
+ */
+type Msg = { key: string; params?: Record<string, unknown> } | string;
+
+function msgText(m: Msg | null | undefined): string {
+  if (!m) return "";
+  if (typeof m === "string") return m;
+  return String(t(m.key, m.params ?? {}));
+}
+
 const presets = ref<Preset[]>([]);
 const loading = ref(true);
 const busy = ref<"" | "save" | "apply" | "delete">("");
-const error = ref<string | null>(null);
-const notice = ref<string | null>(null);
+const error = ref<Msg | null>(null);
+const notice = ref<Msg | null>(null);
 const name = ref("");
 const result = ref<ApplyReport | null>(null);
 const resultName = ref("");
@@ -72,7 +84,7 @@ async function doSave() {
   if (busy.value) return;
   const items = toItems(enabled.value);
   if (!items.length) {
-    error.value = t("preset.noEnabled");
+    error.value = { key: "preset.noEnabled" };
     return;
   }
   busy.value = "save";
@@ -83,7 +95,7 @@ async function doSave() {
     const preset = await savePreset(effectiveName.value, items);
     presets.value = await listPresets();
     name.value = "";
-    notice.value = t("preset.saved", { name: preset.name, n: preset.items.length });
+    notice.value = { key: "preset.saved", params: { name: preset.name, n: preset.items.length } };
   } catch (e) {
     error.value = normalizeError(e);
   } finally {
@@ -139,7 +151,7 @@ async function doDelete(preset: Preset) {
   try {
     presets.value = await deletePreset(preset.id);
     pendingDelete.value = null;
-    notice.value = t("preset.deleted", { name: preset.name });
+    notice.value = { key: "preset.deleted", params: { name: preset.name } };
   } catch (e) {
     error.value = normalizeError(e);
   } finally {
@@ -193,8 +205,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
           </p>
         </section>
 
-        <div v-if="error" class="preset-alert error">{{ error }}</div>
-        <div v-if="notice" class="preset-alert ok">{{ notice }}</div>
+        <div v-if="error" class="preset-alert error">{{ msgText(error) }}</div>
+        <div v-if="notice" class="preset-alert ok">{{ msgText(notice) }}</div>
 
         <section v-if="result" class="preset-alert ok">
           <strong>{{ resultName }}: {{ translateBackendMessage(result.message) }}</strong>

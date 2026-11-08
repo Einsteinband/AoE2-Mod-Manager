@@ -101,6 +101,25 @@ const props = withDefaults(
 const emit = defineEmits<{ close: []; "change-root": [] }>();
 const { t, locale } = useI18n();
 
+/**
+ * 提示文本统一存「key + 参数」，渲染时才翻译。
+ *
+ * 为什么不是存翻译结果：ref 里一旦存了译文，切换语言后这段旧文字不会跟着变，
+ * 用户就会在英文 / 西语界面里看到上一条中文提示（反馈里的「游戏根目录已保存」
+ * 「已保存：127.0.0.1:7897」「已打开日志文件夹」都是这个原因）。
+ * string 分支留给后端原始错误串（本身不随界面语言变化）。
+ */
+type Msg = { key: string; params?: Record<string, unknown> } | string;
+
+function msgText(m: Msg | null | undefined): string {
+  if (!m) return "";
+  if (typeof m === "string") return m;
+  const params: Record<string, unknown> = { ...(m.params ?? {}) };
+  // 「直连」也是文案的一部分，同样按当前语言现算
+  if (m.key === "online.netSaved" && !params.proxy) params.proxy = t("online.netDirectWord");
+  return String(t(m.key, params));
+}
+
 type Tab = "general" | "appearance" | "network" | "local" | "online" | "storage" | "about";
 const tab = ref<Tab>(props.initialTab);
 
@@ -518,8 +537,8 @@ function formatReleaseDate(value: string): string {
 /** 用户填写的问题描述（可空，空则用默认文案） */
 const diagProblem = ref("");
 const diagBusy = ref(false);
-const diagError = ref<string | null>(null);
-const diagMessage = ref<string | null>(null);
+const diagError = ref<Msg | null>(null);
+const diagMessage = ref<Msg | null>(null);
 /** 「已复制」提示弹窗 */
 const diagCopied = ref(false);
 
@@ -561,7 +580,7 @@ async function openLogsFolder() {
   diagMessage.value = null;
   try {
     const path = await openLogsDir();
-    diagMessage.value = t("settings.diagOpenLogsDone", { path });
+    diagMessage.value = { key: "settings.diagOpenLogsDone", params: { path } };
   } catch (e) {
     diagError.value = describe(e);
   }
@@ -587,12 +606,12 @@ async function copyDiagnostics() {
     });
     const ok = await copyTextToClipboard(text);
     if (!ok) {
-      diagError.value = t("settings.diagCopyFailed", { error: "clipboard rejected" });
+      diagError.value = { key: "settings.diagCopyFailed", params: { error: "clipboard rejected" } };
       return;
     }
     diagCopied.value = true;
   } catch (e) {
-    diagError.value = t("settings.diagCopyFailed", { error: describe(e) });
+    diagError.value = { key: "settings.diagCopyFailed", params: { error: describe(e) } };
   } finally {
     diagBusy.value = false;
   }
@@ -632,7 +651,7 @@ const netUrl = ref("");
 const netRemember = ref(false);
 const netSaving = ref(false);
 const netError = ref<string | null>(null);
-const netMessage = ref<string | null>(null);
+const netMessage = ref<Msg | null>(null);
 const netLoading = ref(false);
 
 // ---------------- 通用：字节数格式化（数据目录体积等共用） ----------------
@@ -656,8 +675,8 @@ function formatBytes(bytes: number): string {
 
 const dataDirView = ref<DataDirView | null>(null);
 const dataDirBusy = ref(false);
-const dataDirMessage = ref<string | null>(null);
-const dataDirError = ref<string | null>(null);
+const dataDirMessage = ref<Msg | null>(null);
+const dataDirError = ref<Msg | null>(null);
 /** 已选好、等待二次确认的目标目录（null = 没有待确认的迁移） */
 const migrateTarget = ref<string | null>(null);
 const migrateError = ref<string | null>(null);
@@ -687,7 +706,7 @@ async function openDataDir() {
   try {
     await invoke<string>("open_data_dir");
   } catch (e) {
-    dataDirError.value = t("settings.dataDirFailed", { msg: describe(e) });
+    dataDirError.value = { key: "settings.dataDirFailed", params: { msg: describe(e) } };
   }
 }
 
@@ -710,7 +729,7 @@ async function migrateDataDir() {
     if (typeof picked !== "string" || !picked) return; // 用户取消
     migrateTarget.value = picked;
   } catch (e) {
-    dataDirError.value = t("settings.dataDirFailed", { msg: describe(e) });
+    dataDirError.value = { key: "settings.dataDirFailed", params: { msg: describe(e) } };
   }
 }
 
@@ -731,7 +750,7 @@ async function runMigrate() {
   try {
     const view = await invoke<DataDirView>("migrate_data_dir", { newPath: target });
     dataDirView.value = view;
-    dataDirMessage.value = t("settings.dataDirMigrated", { path: view.path });
+    dataDirMessage.value = { key: "settings.dataDirMigrated", params: { path: view.path } };
     migrateTarget.value = null;
     // 卡片上的封面 URL 是按旧目录拼的，重载一次让它们全部指向新目录
     // （确认弹窗本来就承诺「迁移后会重新加载」）
@@ -750,8 +769,8 @@ async function runMigrate() {
 /** 当前配置的游戏根目录（null = 未配置）；保存后以后端回传的 Settings 为准 */
 const gameRoot = ref<string | null>(null);
 const gameRootBusy = ref(false);
-const gameRootMessage = ref<string | null>(null);
-const gameRootError = ref<string | null>(null);
+const gameRootMessage = ref<Msg | null>(null);
+const gameRootError = ref<Msg | null>(null);
 /** 从顶栏「启动游戏」跳过来时，短暂高亮这一行 */
 const gameRootFlash = ref(false);
 const gameRootRow = ref<HTMLElement | null>(null);
@@ -805,7 +824,7 @@ async function pickGameRoot(): Promise<void> {
     gameRootBusy.value = true;
     const saved = await setGameRootDir(picked);
     gameRoot.value = saved.gameRootDir ?? null;
-    gameRootMessage.value = t("settings.gameRootSaved");
+    gameRootMessage.value = { key: "settings.gameRootSaved" };
   } catch (e) {
     gameRootError.value = describe(e);
   } finally {
@@ -822,12 +841,12 @@ async function detectGameRootDir(): Promise<void> {
   try {
     const found = await detectGameRoot();
     if (!found) {
-      gameRootError.value = t("settings.gameRootDetectFailed");
+      gameRootError.value = { key: "settings.gameRootDetectFailed" };
       return;
     }
     const saved = await setGameRootDir(found);
     gameRoot.value = saved.gameRootDir ?? null;
-    gameRootMessage.value = t("settings.gameRootSaved");
+    gameRootMessage.value = { key: "settings.gameRootSaved" };
   } catch (e) {
     gameRootError.value = describe(e);
   } finally {
@@ -844,7 +863,7 @@ async function clearGameRoot(): Promise<void> {
   try {
     const saved = await setGameRootDir(null);
     gameRoot.value = saved.gameRootDir ?? null;
-    gameRootMessage.value = t("settings.gameRootCleared");
+    gameRootMessage.value = { key: "settings.gameRootCleared" };
   } catch (e) {
     gameRootError.value = describe(e);
   } finally {
@@ -906,7 +925,7 @@ async function applyRememberLogin() {
   try {
     const enabled = await setRememberLogin(netRemember.value);
     netRemember.value = enabled;
-    netMessage.value = t(enabled ? "online.rememberOn" : "online.rememberOff");
+    netMessage.value = { key: enabled ? "online.rememberOn" : "online.rememberOff" };
   } catch (e) {
     netError.value = describe(e);
   }
@@ -928,9 +947,10 @@ async function saveNetwork() {
     if (view.error) {
       netError.value = view.error;
     } else {
-      netMessage.value = t("online.netSaved", {
-        proxy: view.effectiveProxy ?? t("online.netDirectWord"),
-      });
+      netMessage.value = {
+        key: "online.netSaved",
+        params: { proxy: view.effectiveProxy ?? "" },
+      };
     }
   } catch (e) {
     netError.value = describe(e);
@@ -944,8 +964,8 @@ async function saveNetwork() {
 const translateView = ref<TranslateSettingsView | null>(null);
 const translateLoading = ref(false);
 const translateSaving = ref(false);
-const translateError = ref<string | null>(null);
-const translateMessage = ref<string | null>(null);
+const translateError = ref<Msg | null>(null);
+const translateMessage = ref<Msg | null>(null);
 
 /** 下拉框的值："" = 跟随界面语言 */
 const targetChoice = ref("");
@@ -1053,7 +1073,7 @@ async function saveTranslate(): Promise<boolean> {
     savedEngineChoice.value = engineForSelect(view.provider);
     // 全局状态：立即更新 targetLang + langEpoch++，详情页/列表按钮文案同步刷新
     applyTranslateSettings(view, String(locale.value));
-    translateMessage.value = t("settings.translateSaved");
+    translateMessage.value = { key: "settings.translateSaved" };
     return true;
   } catch (e) {
     translateError.value = describe(e);
@@ -1084,7 +1104,7 @@ async function commitTranslate(pick: "target" | "engine", next: string) {
   engineChoice.value = prevEngine;
   await nextTick();
   syncSelectDom();
-  translateError.value = t("favorites.failSave", { msg: translateError.value ?? "" });
+  translateError.value = { key: "favorites.failSave", params: { msg: msgText(translateError.value) } };
 }
 
 function onTargetChange(event: Event) {
@@ -1436,8 +1456,8 @@ onBeforeUnmount(() => {
                 <span class="row-note mono game-root-path" :title="gameRoot ?? ''">
                   {{ gameRoot || t("settings.gameRootEmpty") }}
                 </span>
-                <span v-if="gameRootError" class="game-root-warn">{{ gameRootError }}</span>
-                <span v-else-if="gameRootMessage" class="game-root-ok">{{ gameRootMessage }}</span>
+                <span v-if="gameRootError" class="game-root-warn">{{ msgText(gameRootError) }}</span>
+                <span v-else-if="gameRootMessage" class="game-root-ok">{{ msgText(gameRootMessage) }}</span>
               </div>
               <div class="game-root-actions">
                 <button
@@ -1807,7 +1827,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div v-if="netError" class="settings-msg error">{{ netError }}</div>
-            <div v-else-if="netMessage" class="settings-msg">{{ netMessage }}</div>
+            <div v-else-if="netMessage" class="settings-msg">{{ msgText(netMessage) }}</div>
           </section>
 
           <!-- 本地模组：索引 / 搜索 / 批量更新检测 -->
@@ -1931,8 +1951,8 @@ onBeforeUnmount(() => {
 
             <p class="settings-hint">{{ t("settings.translateAutoSave") }}</p>
 
-            <div v-if="translateError" class="settings-msg error">{{ translateError }}</div>
-            <div v-else-if="translateMessage" class="settings-msg">{{ translateMessage }}</div>
+            <div v-if="translateError" class="settings-msg error">{{ msgText(translateError) }}</div>
+            <div v-else-if="translateMessage" class="settings-msg">{{ msgText(translateMessage) }}</div>
 
             <div class="settings-sep"></div>
 
@@ -2016,8 +2036,8 @@ onBeforeUnmount(() => {
             <div v-if="dataDirView?.legacy" class="settings-msg">
               {{ t("settings.dataDirLegacy") }}
             </div>
-            <div v-if="dataDirError" class="settings-msg error">{{ dataDirError }}</div>
-            <div v-else-if="dataDirMessage" class="settings-msg">{{ dataDirMessage }}</div>
+            <div v-if="dataDirError" class="settings-msg error">{{ msgText(dataDirError) }}</div>
+            <div v-else-if="dataDirMessage" class="settings-msg">{{ msgText(dataDirMessage) }}</div>
           </section>
 
           <!-- 关于（v2.0）：「软件更新」从通用 Tab 整体搬到这里（版本号 / 检查更新 / 发布页） -->
@@ -2110,8 +2130,8 @@ onBeforeUnmount(() => {
                   {{ diagBusy ? t("settings.diagCopying") : t("settings.diagCopy") }}
                 </button>
               </div>
-              <p v-if="diagError" class="settings-status bad">{{ diagError }}</p>
-              <p v-else-if="diagMessage" class="settings-status ok">{{ diagMessage }}</p>
+              <p v-if="diagError" class="settings-status bad">{{ msgText(diagError) }}</p>
+              <p v-else-if="diagMessage" class="settings-status ok">{{ msgText(diagMessage) }}</p>
             </div>
 
             <div class="settings-sep"></div>

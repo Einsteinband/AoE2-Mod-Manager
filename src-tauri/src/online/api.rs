@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 use std::io::Read;
 use std::time::Duration;
 
+use crate::user_err;
+
 use super::models::{pick_str, FindResult, ModTag};
 
 /// 官方模组服务基址（来自官网 main.js：const V="https://api.ageofempires.com",
@@ -28,13 +30,15 @@ impl ApiFailure {
         Self { kind: kind.to_string(), message: message.into(), status }
     }
     pub fn unauthenticated() -> Self {
-        Self::new("unauthenticated", "登录状态无效或已过期，请重新登录", Some(401))
+        // v0.4.9：不再硬编码中文，走 aoe2mm:err 错误码协议，前端按 i18n 三语展示。
+        Self::new("unauthenticated", "aoe2mm:err:account.sessionExpired", Some(401))
     }
     pub fn network(msg: impl Into<String>) -> Self {
-        Self::new("network", format!("网络请求失败：{}", msg.into()), None)
+        // 调用方应传 user_err 协议串；这里只包 kind，不再加中文前缀。
+        Self::new("network", msg.into(), None)
     }
     pub fn parse(msg: impl Into<String>) -> Self {
-        Self::new("parse", format!("服务端返回内容无法解析：{}", msg.into()), None)
+        Self::new("parse", msg.into(), None)
     }
 }
 
@@ -82,14 +86,17 @@ impl ApiClient {
             Ok(resp) => {
                 log::info!(target: "http", "HTTP {}（{url}）", resp.status());
                 resp.into_string()
-                    .map_err(|e| ApiFailure::parse(e.to_string()))
+                    .map_err(|e| ApiFailure::network(user_err("api.readBodyFailed", json!({ "error": e.to_string() }))))
                     .and_then(|text| {
                         if text.trim().is_empty() {
                             // 订阅类接口可能返回 200 + 空响应体
                             return Ok(Value::Null);
                         }
                         serde_json::from_str::<Value>(&text).map_err(|e| {
-                            ApiFailure::parse(format!("{e}（前 160 字符：{}）", snippet(&text, 160)))
+                            ApiFailure::parse(user_err("api.parseBodyFailed", json!({
+                                "error": e.to_string(),
+                                "preview": snippet(&text, 160),
+                            })))
                         })
                     })
             }
@@ -105,15 +112,11 @@ impl ApiClient {
                     .and_then(|v| pick_str(&v, &["errorMessage", "message"]));
                 Err(ApiFailure::new(
                     if code == 404 { "not_found" } else { "http" },
-                    format!(
-                        "服务端返回 HTTP {code}{}{}",
-                        server_msg.map(|m| format!("：{m}")).unwrap_or_default(),
-                        if code == 405 && !allow.is_empty() {
-                            format!("（该接口只接受 {allow} 请求）")
-                        } else {
-                            String::new()
-                        }
-                    ),
+                    user_err("api.serverHttpError", json!({
+                        "code": code,
+                        "serverMessage": server_msg.unwrap_or_default(),
+                        "allow": if code == 405 { allow } else { String::new() },
+                    })),
                     Some(code),
                 ))
             }
@@ -203,10 +206,9 @@ impl ApiClient {
     pub fn download_url(&self, mod_id: i64) -> Result<String, ApiFailure> {
         let value = self.get(&format!("/Download/{mod_id}"))?;
         pick_str(&value, &["downloadUrl", "downloadURL", "url"]).ok_or_else(|| {
-            ApiFailure::parse(format!(
-                "响应中没有 downloadUrl 字段（{}）",
-                snippet(&value.to_string(), 200)
-            ))
+            ApiFailure::parse(user_err("api.noDownloadUrl", json!({
+                "preview": snippet(&value.to_string(), 200),
+            })))
         })
     }
 
@@ -214,9 +216,9 @@ impl ApiClient {
     /// 仅允许 https，且限制最大体积，避免被异常内容拖死。
     pub fn fetch_bytes(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiFailure> {
         let parsed = tauri::Url::parse(url)
-            .map_err(|e| ApiFailure::new("invalid", format!("资源地址无效：{e}"), None))?;
+            .map_err(|e| ApiFailure::new("invalid", user_err("api.resourceInvalid", json!({ "error": e.to_string() })), None))?;
         if parsed.scheme() != "https" {
-            return Err(ApiFailure::new("invalid", "资源地址不是 HTTPS，已拒绝", None));
+            return Err(ApiFailure::new("invalid", user_err("api.resourceNotHttps", json!({})), None));
         }
         let response = self
             .agent
@@ -227,11 +229,11 @@ impl ApiClient {
             .map_err(|e| match e {
                 ureq::Error::Status(code, _) => ApiFailure::new(
                     "http",
-                    format!("缩略图下载失败：HTTP {code}"),
+                    user_err("api.thumbnailHttpError", json!({ "code": code })),
                     Some(code),
                 ),
                 ureq::Error::Transport(t) => {
-                    ApiFailure::network(format!("缩略图下载失败：{t}"))
+                    ApiFailure::network(user_err("api.thumbnailTransport", json!({ "error": t.to_string() })))
                 }
             })?;
         let mut buf: Vec<u8> = Vec::new();
@@ -239,16 +241,16 @@ impl ApiClient {
             .into_reader()
             .take(max_bytes + 1)
             .read_to_end(&mut buf)
-            .map_err(|e| ApiFailure::network(format!("读取缩略图失败：{e}")))?;
+            .map_err(|e| ApiFailure::network(user_err("api.thumbnailReadFailed", json!({ "error": e.to_string() }))))?;
         if buf.len() as u64 > max_bytes {
             return Err(ApiFailure::new(
                 "invalid",
-                format!("缩略图超过 {max_bytes} 字节上限，已放弃"),
+                user_err("api.thumbnailTooLarge", json!({ "maxBytes": max_bytes })),
                 None,
             ));
         }
         if buf.is_empty() {
-            return Err(ApiFailure::new("invalid", "缩略图内容为空", None));
+            return Err(ApiFailure::new("invalid", user_err("api.thumbnailEmpty", json!({})), None));
         }
         Ok(buf)
     }
@@ -284,16 +286,15 @@ fn transport_failure(msg: String) -> ApiFailure {
         || lower.contains("name or service")
         || lower.contains("failed to resolve")
     {
-        format!("网络不可用：域名解析失败（{msg}）")
+        user_err("api.dnsFailed", json!({ "error": msg }))
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        format!("网络超时（{msg}）")
+        user_err("api.networkTimeout", json!({ "error": msg }))
     } else if is_connection_dropped(&msg) {
-        // 代理节点抖动 / TLS 被掐断：给用户一句能直接行动的话（换节点或换网络）
-        format!("网络连接被意外中断（代理节点可能不稳定）：{msg}")
+        user_err("api.connectionDropped", json!({ "error": msg }))
     } else if lower.contains("refused") || lower.contains("unreachable") || lower.contains("reset") {
-        format!("网络连接被拒绝或中断（{msg}）")
+        user_err("api.connectionRefused", json!({ "error": msg }))
     } else {
-        format!("网络请求失败：{msg}")
+        user_err("api.networkFailed", json!({ "error": msg }))
     };
     ApiFailure::new("network", friendly, None)
 }
@@ -336,7 +337,12 @@ mod tests {
         let failure = ApiFailure::unauthenticated();
         assert_eq!(failure.kind, "unauthenticated");
         assert_eq!(failure.status, Some(401));
-        assert!(failure.message.contains("重新登录"));
+        // v0.4.9：message 已走 aoe2mm:err 错误码协议，前端 translateBackendMessage 按 i18n 三语展示
+        assert!(
+            failure.message.starts_with("aoe2mm:err:account."),
+            "实际提示：{}",
+            failure.message
+        );
     }
 
     /// DNS 失败必须归为 kind="network"：前端靠这个点亮「网络已断开」并停止后续请求。
@@ -347,14 +353,14 @@ mod tests {
         );
         assert_eq!(failure.kind, "network");
         assert_eq!(failure.status, None);
-        assert!(failure.message.contains("域名解析失败"), "{}", failure.message);
+        assert!(failure.message.starts_with("aoe2mm:err:api.dnsFailed"), "{}", failure.message);
     }
 
     #[test]
     fn timeout_error_maps_to_network_kind() {
         let failure = transport_failure("timed out reading response".to_string());
         assert_eq!(failure.kind, "network", "超时也要算网络不可用");
-        assert!(failure.message.contains("网络超时"));
+        assert!(failure.message.starts_with("aoe2mm:err:api.networkTimeout"));
     }
 
     /// 代理断开类错误：仍归 kind=network，但文案要说清「可能换节点就好了」。
@@ -365,7 +371,7 @@ mod tests {
                 .to_string(),
         );
         assert_eq!(failure.kind, "network");
-        assert!(failure.message.contains("意外中断"), "{}", failure.message);
+        assert!(failure.message.starts_with("aoe2mm:err:api.connectionDropped"), "{}", failure.message);
 
         assert!(is_connection_dropped("tls connection init failed: unexpected end of file"));
         assert!(is_connection_dropped("peer closed connection"));
@@ -377,7 +383,7 @@ mod tests {
     fn other_transport_errors_still_network_kind() {
         let failure = transport_failure("connection refused".to_string());
         assert_eq!(failure.kind, "network");
-        assert!(failure.message.contains("拒绝"));
+        assert!(failure.message.starts_with("aoe2mm:err:api.connectionRefused"));
     }
 
     #[test]

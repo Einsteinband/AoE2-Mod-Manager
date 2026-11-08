@@ -21,6 +21,8 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
+use crate::user_err;
+
 /// 迁移白名单：只搬这些顶层条目（目录 / 文件混排）。
 /// 新增持久化文件时必须显式加进来——白名单制，绝不遍历整个配置目录
 /// （用户可能往配置目录里丢过自己的杂物，不能一起搬走）。
@@ -108,7 +110,7 @@ fn is_inside(child: &Path, parent: &Path) -> bool {
 pub fn default_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+        .map_err(|e| user_err("dataDir.locateDefaultFailed", serde_json::json!({ "error": e.to_string() })))
 }
 
 fn configured(app: &tauri::AppHandle) -> Option<String> {
@@ -238,21 +240,25 @@ pub fn view(app: &tauri::AppHandle) -> DataDirView {
 fn prepare_target(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err("目录路径不能为空".to_string());
+        return Err(user_err("dataDir.targetEmpty", serde_json::json!({})));
     }
     let path = PathBuf::from(trimmed);
     if !path.is_absolute() {
-        return Err(format!("请选择完整路径（如 D:\\AoE2Data）：{trimmed}"));
+        return Err(user_err("dataDir.notAbsolute", serde_json::json!({ "path": trimmed })));
     }
     if path.is_file() {
-        return Err(format!("这个路径是一个文件，不是文件夹：{trimmed}"));
+        return Err(user_err("dataDir.targetIsFile", serde_json::json!({ "path": trimmed })));
     }
-    fs::create_dir_all(&path).map_err(|e| format!("无法创建目录 {trimmed}：{e}"))?;
+    fs::create_dir_all(&path).map_err(|e| {
+        user_err("dataDir.createTargetFailed", serde_json::json!({ "path": trimmed, "error": e.to_string() }))
+    })?;
 
     let probe = path.join(format!(".aoe2mm-write-test-{}.tmp", std::process::id()));
     let written = fs::write(&probe, b"ok");
     let _ = fs::remove_file(&probe);
-    written.map_err(|e| format!("目标目录不可写（{trimmed}）：{e}"))?;
+    written.map_err(|e| {
+        user_err("dataDir.targetNotWritable", serde_json::json!({ "path": trimmed, "error": e.to_string() }))
+    })?;
     Ok(path)
 }
 
@@ -260,7 +266,9 @@ fn tmp_path_for(to: &Path) -> Result<PathBuf, String> {
     let name = to
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| format!("目标路径没有文件名：{}", to.display()))?;
+        .ok_or_else(|| {
+            user_err("dataDir.missingFileName", serde_json::json!({ "path": to.display().to_string() }))
+        })?;
     Ok(to.with_file_name(format!(".{name}.aoe2mm-migrating")))
 }
 
@@ -278,14 +286,22 @@ fn remove_any(path: &Path) -> Result<(), String> {
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
-    fs::create_dir_all(to).map_err(|e| format!("创建目录失败 {}：{e}", to.display()))?;
-    let entries = fs::read_dir(from).map_err(|e| format!("读取目录失败 {}：{e}", from.display()))?;
+    fs::create_dir_all(to).map_err(|e| {
+        user_err("dataDir.copyCreateDirFailed", serde_json::json!({ "path": to.display().to_string(), "error": e.to_string() }))
+    })?;
+    let entries = fs::read_dir(from).map_err(|e| {
+        user_err("dataDir.copyReadDirFailed", serde_json::json!({ "path": from.display().to_string(), "error": e.to_string() }))
+    })?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("枚举目录失败 {}：{e}", from.display()))?;
+        let entry = entry.map_err(|e| {
+            user_err("dataDir.copyListFailed", serde_json::json!({ "path": from.display().to_string(), "error": e.to_string() }))
+        })?;
         let src = entry.path();
         let dst = to.join(entry.file_name());
         let meta =
-            fs::symlink_metadata(&src).map_err(|e| format!("读取 {} 信息失败：{e}", src.display()))?;
+            fs::symlink_metadata(&src).map_err(|e| {
+                user_err("dataDir.copyStatFailed", serde_json::json!({ "path": src.display().to_string(), "error": e.to_string() }))
+            })?;
         if meta.file_type().is_symlink() {
             // 缓存目录里不该有符号链接；遇到就跳过，绝不跟随（否则可能递归成环）
             log::warn!(target: "data-dir", "跳过符号链接：{}", src.display());
@@ -294,7 +310,9 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
         if meta.is_dir() {
             copy_dir(&src, &dst)?;
         } else {
-            fs::copy(&src, &dst).map_err(|e| format!("复制 {} 失败：{e}", src.display()))?;
+            fs::copy(&src, &dst).map_err(|e| {
+                user_err("dataDir.copyFileFailed", serde_json::json!({ "path": src.display().to_string(), "error": e.to_string() }))
+            })?;
         }
     }
     Ok(())
@@ -348,28 +366,36 @@ fn move_entry(from: &Path, to: &Path) -> Result<(), String> {
         let dst = tree_stat(&tmp);
         if src != dst {
             let _ = remove_any(&tmp);
-            return Err(format!(
-                "复制后目录内容不一致（{} 个文件 / {} 字节 → {} 个文件 / {} 字节），已放弃",
-                src.0, src.1, dst.0, dst.1
+            return Err(user_err(
+                "dataDir.verifyDirMismatch",
+                serde_json::json!({
+                    "srcFiles": src.0, "srcBytes": src.1,
+                    "dstFiles": dst.0, "dstBytes": dst.1,
+                }),
             ));
         }
     } else {
-        fs::copy(from, &tmp).map_err(|e| format!("复制到新目录失败：{e}"))?;
+        fs::copy(from, &tmp).map_err(|e| {
+            user_err("dataDir.copyFileToTmpFailed", serde_json::json!({ "error": e.to_string() }))
+        })?;
         let src = fs::metadata(from)
-            .map_err(|e| format!("读取源文件信息失败：{e}"))?
+            .map_err(|e| user_err("dataDir.statSourceFailed", serde_json::json!({ "error": e.to_string() })))?
             .len();
         let dst = fs::metadata(&tmp)
-            .map_err(|e| format!("读取目标文件信息失败：{e}"))?
+            .map_err(|e| user_err("dataDir.statTargetFailed", serde_json::json!({ "error": e.to_string() })))?
             .len();
         if src != dst {
             let _ = remove_any(&tmp);
-            return Err(format!("复制后大小不一致（{src} → {dst}），已放弃"));
+            return Err(user_err(
+                "dataDir.verifySizeMismatch",
+                serde_json::json!({ "src": src, "dst": dst }),
+            ));
         }
     }
 
     fs::rename(&tmp, to).map_err(|e| {
         let _ = remove_any(&tmp);
-        format!("目标目录改名失败：{e}")
+        user_err("dataDir.renameTargetFailed", serde_json::json!({ "error": e.to_string() }))
     })?;
 
     // 旧副本删不掉不算迁移失败：数据已经完整落在新目录，只是多占一份空间。
@@ -406,11 +432,18 @@ fn rollback(moved: &[(PathBuf, PathBuf)]) -> Vec<String> {
 
 fn migration_error(step: &str, err: &str, rollback_failed: &[String]) -> String {
     if rollback_failed.is_empty() {
-        format!("迁移失败，已回滚（{step}）：{err}")
+        user_err(
+            "dataDir.migrateRolledBack",
+            serde_json::json!({ "step": step, "error": err }),
+        )
     } else {
-        format!(
-            "迁移失败，部分回滚未完成（{step}）：{err}。以下条目仍留在新目录，请手动移回：{}",
-            rollback_failed.join("、")
+        user_err(
+            "dataDir.migratePartialRollback",
+            serde_json::json!({
+                "step": step,
+                "error": err,
+                "failed": rollback_failed.join("、"),
+            }),
         )
     }
 }
@@ -443,10 +476,10 @@ pub fn migrate(app: &tauri::AppHandle, new_path: &str) -> Result<DataDirView, St
     let new_root = prepare_target(new_path)?;
 
     if same_path(&old_root, &new_root) {
-        return Err("目标目录就是当前的数据目录，无需迁移".to_string());
+        return Err(user_err("dataDir.sameAsCurrent", serde_json::json!({})));
     }
     if is_inside(&new_root, &old_root) || is_inside(&old_root, &new_root) {
-        return Err("目标目录不能是当前数据目录的子目录或上级目录".to_string());
+        return Err(user_err("dataDir.nestedWithCurrent", serde_json::json!({})));
     }
 
     // ---- 1) 计划 + 预检：目标不能已存在同名条目 ----
@@ -458,8 +491,9 @@ pub fn migrate(app: &tauri::AppHandle, new_path: &str) -> Result<DataDirView, St
         }
         let to = new_root.join(name);
         if to.exists() {
-            return Err(format!(
-                "目标目录里已存在同名条目：{name}。请换一个空文件夹，或先把它改名 / 删除。"
+            return Err(user_err(
+                "dataDir.targetHasExisting",
+                serde_json::json!({ "name": name }),
             ));
         }
         plan.push((name, from, to));

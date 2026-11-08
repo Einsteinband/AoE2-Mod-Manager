@@ -18,7 +18,10 @@
 //! 现在只在 2 小时内已查过时省一次请求（匿名接口 60 req/h，正常使用绰绰有余）。
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::user_err;
 
 /// 仓库首页（Release 地址兜底用）
 pub const REPO_URL: &str = "https://github.com/Einsteinband/AoE2-Mod-Manager";
@@ -166,9 +169,9 @@ fn log_rate_limit(response: &ureq::Response) {
 
 fn translate_status(code: u16) -> String {
     match code {
-        403 => "GitHub 接口暂时限流（403），请稍后再试".to_string(),
-        404 => "仓库或 Release 不存在（404）".to_string(),
-        other => format!("GitHub 返回 HTTP {other}"),
+        403 => user_err("update.githubRateLimited", json!({})),
+        404 => user_err("update.notFound", json!({})),
+        other => user_err("update.httpError", json!({ "code": other })),
     }
 }
 
@@ -347,7 +350,7 @@ pub fn fetch_latest(proxy: Option<ureq::Proxy>) -> Result<UpdateInfo, String> {
 /// 解析 2xx 响应体（镜像与直连的响应体走同一条路径）
 fn parse_info(body: &str) -> Result<UpdateInfo, String> {
     let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| format!("GitHub 响应不是合法 JSON：{e}（可能是镜像返回了错误页）"))?;
+        .map_err(|e| user_err("update.invalidJson", json!({ "error": e.to_string() })))?;
 
     let tag = value
         .get("tag_name")
@@ -355,7 +358,7 @@ fn parse_info(body: &str) -> Result<UpdateInfo, String> {
         .unwrap_or("")
         .to_string();
     if tag.trim().is_empty() {
-        return Err("Release 缺少 tag_name 字段".to_string());
+        return Err(user_err("update.missingTagName", json!({})));
     }
 
     let latest = normalize(&tag);

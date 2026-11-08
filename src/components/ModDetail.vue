@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, revealModFolder, toggleModEnabled } from "../api";
-import { activeTaskOfMod } from "../online/downloadQueue";
+import { activeTaskOfMod, latestTaskOfMod } from "../online/downloadQueue";
 import {
   formatBytes,
   formatDateTime,
@@ -72,6 +72,8 @@ const deleting = ref(false);
 const deleteError = ref<string | null>(null);
 const openingWeb = ref(false);
 const webError = ref<string | null>(null);
+/** 描述拉取 / 翻译失败的错误（API 404 等）：描述为空时优先显示真实错误，而不是吞掉变成「未提供描述」 */
+const descError = ref<string | null>(null);
 
 // v0.5：收藏 / 备注名（只和 WorkshopID 绑定，改完立即落盘 + 局部 Patch，不重扫）
 const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
@@ -82,9 +84,17 @@ const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
  */
 const uninstalled = computed(() => props.mod.uninstalled === true);
 /** 正在下载 / 已在下载队列（同名模组不重复入队） */
-const downloadTask = computed(() => {
+const activeDownloadTask = computed(() => {
   const id = props.mod.workshopId ?? 0;
   return id > 0 ? activeTaskOfMod(id) : null;
+});
+/** 最近一次下载任务的错误（失败时在详情面板红框显示，与在线页口径一致） */
+const downloadError = computed(() => {
+  const id = props.mod.workshopId ?? 0;
+  if (id <= 0) return null;
+  const task = latestTaskOfMod(id);
+  if (!task || task.status !== "failed") return null;
+  return task.error;
 });
 const favorited = computed(() => isFavorite(props.mod.workshopId));
 const customName = computed(() => customNameOf(props.mod.workshopId));
@@ -255,6 +265,8 @@ async function onTranslateClick(): Promise<void> {
     }
   } catch (e) {
     showToast(translationErrorText(e), "error");
+    // 描述为空时，把 API 错误（如 HTTP 404）暴露到描述区，而不是吞掉变成「未提供描述」
+    descError.value = rawMessageOf(e);
   }
 }
 
@@ -410,6 +422,7 @@ watch(
     deleteError.value = null;
     favError.value = null;
     renameOpen.value = false;
+    descError.value = null;
     // 只读查一次缓存（无网络）：命中就瞬间显示中文，未命中也只是让按钮可点
     void probeTranslationCache();
   },
@@ -543,12 +556,15 @@ watch(
         <button
           type="button"
           class="primary install-btn"
-          :disabled="!!downloadTask || !canFavorite"
-          :title="downloadTask ? t('detail.downloadQueued') : t('detail.downloadTitle')"
+          :disabled="!!activeDownloadTask || !canFavorite"
+          :title="activeDownloadTask ? t('detail.downloadQueued') : t('detail.downloadTitle')"
           @click="emit('download')"
         >
-          {{ downloadTask ? t("detail.downloadQueued") : t("detail.downloadInstall") }}
+          {{ activeDownloadTask ? t("detail.downloadQueued") : t("detail.downloadInstall") }}
         </button>
+      </div>
+      <div v-if="downloadError" class="path-actions">
+        <span class="path-error">{{ downloadError }}</span>
       </div>
     </section>
 
@@ -556,6 +572,7 @@ watch(
     <section class="dv-zone dv-zone-desc">
       <h4 class="dv-zone-title">{{ t("detail.description") }}</h4>
       <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
+      <div v-else-if="descError" class="note">{{ descError }}</div>
       <div v-else class="note">{{ t("detail.descriptionMissing") }}</div>
       <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
         {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}

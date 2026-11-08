@@ -50,6 +50,7 @@ import {
   localSearchEnabled,
   openSettingsNonce,
   sessionEpoch,
+  sessionPhase,
 } from "./sessionState";
 import { ensureUserData } from "./userData";
 import { SORT_OPTIONS } from "./online/types";
@@ -428,6 +429,11 @@ function downloadUninstalledFavorite(mod: ModEntry): void {
   const modId = Number(mod.workshopId ?? 0);
   if (!Number.isFinite(modId) || modId <= 0) {
     showToast(t("favorites.downloadNoId"), "error");
+    return;
+  }
+  // 与在线页 pushToQueue 保持一致：离线时拦截下载，避免必吃 DNS 报错
+  if (sessionPhase.value !== "online") {
+    showToast(t("online.offlineBlocked"), "error");
     return;
   }
   const meta = favoriteMetaOf(modId);

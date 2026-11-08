@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
 use crate::online::ApiFailure;
+use crate::user_err;
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -41,16 +43,16 @@ pub fn download_zip(
     url: &str,
     cancel: &AtomicBool,
 ) -> Result<DownloadOutcome, ApiFailure> {
-    let parsed = tauri::Url::parse(url).map_err(|e| ApiFailure::new("invalid", format!("下载地址无效：{e}"), None))?;
+    let parsed = tauri::Url::parse(url).map_err(|e| ApiFailure::new("invalid", user_err("download.invalidUrl", json!({ "error": e.to_string() })), None))?;
     if parsed.scheme() != "https" {
-        return Err(ApiFailure::new("invalid", "下载地址不是 HTTPS，已拒绝", None));
+        return Err(ApiFailure::new("invalid", user_err("download.notHttps", json!({})), None));
     }
     let host = parsed.host_str().unwrap_or("unknown").to_string();
 
     let stamp = crate::scan::now_ms();
     let work_dir = std::env::temp_dir().join("aoe2mm").join(format!("{mod_id}-{stamp}"));
     fs::create_dir_all(&work_dir)
-        .map_err(|e| ApiFailure::new("io", format!("无法创建临时目录：{e}"), None))?;
+        .map_err(|e| ApiFailure::new("io", user_err("download.createWorkDirFailed", json!({ "error": e.to_string() })), None))?;
     let zip_path = work_dir.join("mod.zip");
 
     emit(app, DownloadProgress {
@@ -113,7 +115,7 @@ pub fn download_zip(
             Err(ureq::Error::Transport(t)) if attempt < MAX_CALL_ATTEMPTS => {
                 if cancel.load(Ordering::Relaxed) {
                     let _ = fs::remove_dir_all(&work_dir);
-                    return Err(ApiFailure::new("cancelled", "下载已取消", None));
+                    return Err(ApiFailure::new("cancelled", user_err("download.cancelled", json!({})), None));
                 }
                 log::warn!(
                     target: "downloader",
@@ -132,7 +134,7 @@ pub fn download_zip(
                         );
                         ApiFailure::new(
                             if code == 401 || code == 403 { "unauthenticated" } else { "http" },
-                            format!("下载地址返回 HTTP {code}（链接可能已过期，请重试）"),
+                            user_err("download.httpError", json!({ "code": code })),
                             Some(code),
                         )
                     }
@@ -142,7 +144,11 @@ pub fn download_zip(
                             target: "downloader",
                             "下载失败 modId={mod_id}：传输层错误（host={host}，共尝试 {attempt} 次）：{t}"
                         );
-                        ApiFailure::network(t.to_string())
+                        ApiFailure::new(
+                            "network",
+                            user_err("download.transport", json!({ "error": t.to_string() })),
+                            None,
+                        )
                     }
                 };
                 return Err(failure);
@@ -162,7 +168,7 @@ pub fn download_zip(
 
     let mut reader = response.into_reader();
     let file = fs::File::create(&zip_path)
-        .map_err(|e| ApiFailure::new("io", format!("无法写入临时文件：{e}"), None));
+        .map_err(|e| ApiFailure::new("io", user_err("download.openFileFailed", json!({ "error": e.to_string() })), None));
     let mut file = match file {
         Ok(f) => f,
         Err(e) => {
@@ -182,7 +188,7 @@ pub fn download_zip(
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = fs::remove_dir_all(&work_dir);
-            return Err(ApiFailure::new("cancelled", "下载已取消", None));
+            return Err(ApiFailure::new("cancelled", user_err("download.cancelled", json!({})), None));
         }
         if started.elapsed() >= MAX_DOWNLOAD {
             let _ = fs::remove_dir_all(&work_dir);
@@ -191,10 +197,11 @@ pub fn download_zip(
                 "下载超时中止 modId={mod_id} 已收 {received}/{total} 字节（上限 {} 分钟）",
                 MAX_DOWNLOAD.as_secs() / 60
             );
-            return Err(ApiFailure::network(format!(
-                "下载超过 {} 分钟仍未完成，已中止（网络可能已断开）",
-                MAX_DOWNLOAD.as_secs() / 60
-            )));
+            return Err(ApiFailure::new(
+                "network",
+                user_err("download.timeout", json!({ "minutes": MAX_DOWNLOAD.as_secs() / 60 })),
+                None,
+            ));
         }
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -202,7 +209,7 @@ pub fn download_zip(
                 received += n as u64;
                 if let Err(e) = file.write_all(&buf[..n]) {
                     let _ = fs::remove_dir_all(&work_dir);
-                    return Err(ApiFailure::new("io", format!("写入失败（磁盘可能已满）：{e}"), None));
+                    return Err(ApiFailure::new("io", user_err("download.writeFailed", json!({ "error": e.to_string() })), None));
                 }
                 if last_emit.elapsed() >= Duration::from_millis(250) {
                     last_emit = Instant::now();
@@ -218,7 +225,11 @@ pub fn download_zip(
                     target: "downloader",
                     "下载中断 modId={mod_id} 已收 {received}/{total} 字节：{e}"
                 );
-                return Err(ApiFailure::network(format!("下载中断：{e}")));
+                return Err(ApiFailure::new(
+                    "network",
+                    user_err("download.interrupted", json!({ "error": e.to_string() })),
+                    None,
+                ));
             }
         }
     }
@@ -228,14 +239,14 @@ pub fn download_zip(
 
     if received == 0 {
         let _ = fs::remove_dir_all(&work_dir);
-        return Err(ApiFailure::new("invalid", "下载内容为空", None));
+        return Err(ApiFailure::new("invalid", user_err("download.emptyContent", json!({})), None));
     }
     // 服务器返回 HTML（例如登录页/错误页）时，zip 校验会给出明确错误，这里先提示得更直白
     if content_type.contains("text/html") {
         let _ = fs::remove_dir_all(&work_dir);
         return Err(ApiFailure::new(
             "invalid",
-            "下载地址返回的是网页而不是压缩包，登录可能已失效或链接已过期",
+            user_err("download.notArchive", json!({})),
             None,
         ));
     }

@@ -6,7 +6,7 @@
  * 2. 承载登录流程的**临时**状态（等待中 / 探测结果 / 提示文案）与定时器，
  *    这些随组件卸载即可丢弃，不需要跨页面共享。
  */
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { messageOf } from "../../online/errors";
 import {
@@ -49,11 +49,27 @@ export function useOnlineSession(deps: {
 }) {
   const { t } = useI18n();
 
+  /**
+   * 提示文本存「key + 参数」，读的时候才翻译。
+   *
+   * 为什么不是存 t() 的结果：切语言后 ref 里的旧译文不会变，
+   * 英文 / 西语界面就会挂着上一条中文（字符串分支留给后端原始错误串）。
+   */
+  type Msg = { key: string; params?: Record<string, unknown> } | string;
+
+  function msgText(m: Msg | null | undefined): string {
+    if (!m) return "";
+    if (typeof m === "string") return m;
+    return String(t(m.key, m.params ?? {}));
+  }
+
   const session = ref<SessionStatus | null>(null);
-  const sessionError = ref<string | null>(null);
+  const sessionErrorState = ref<Msg | null>(null);
+  const sessionError = computed(() => msgText(sessionErrorState.value));
   const waitingLogin = ref(false);
   const probing = ref(false);
-  const probeResult = ref<string | null>(null);
+  const probeResultState = ref<Msg | null>(null);
+  const probeResult = computed(() => msgText(probeResultState.value));
 
   /**
    * 共享会话状态的镜像：本组件绝不再发起第二份探测，只把 sessionState 的结果同步到本地 ref，
@@ -77,7 +93,8 @@ export function useOnlineSession(deps: {
 
   /** 左侧分类（官方 /api/v4/mods/Tags） */
   const tags = ref<ModTag[]>([]);
-  const tagsError = ref<string | null>(null);
+  const tagsErrorState = ref<Msg | null>(null);
+  const tagsError = computed(() => msgText(tagsErrorState.value));
 
   let pollTimer: number | null = null;
   let silentTimer: number | null = null;
@@ -102,15 +119,15 @@ export function useOnlineSession(deps: {
 
   /** 手动「重新检查登录状态」：强制再探一次；成功后由 sessionEpoch 统一触发刷新 */
   async function refreshSession(): Promise<void> {
-    sessionError.value = null;
+    sessionErrorState.value = null;
     await ensureSession(true);
     session.value = sessionInfo.value;
-    sessionError.value = sharedSessionError.value;
+    sessionErrorState.value = sharedSessionError.value;
   }
 
   /** 分类字典：GET /api/v4/mods/Tags（匿名可读）；失败时用内置 17 项兜底 */
   async function loadTags(): Promise<void> {
-    tagsError.value = null;
+    tagsErrorState.value = null;
     // 离线 / 未登录：官方字典接口需要登录态，直接用内置 17 项兜底，不打网络
     if (sessionPhase.value !== "online") {
       tags.value = FALLBACK_TAGS;
@@ -122,7 +139,7 @@ export function useOnlineSession(deps: {
         tags.value = list;
       } else {
         tags.value = FALLBACK_TAGS;
-        tagsError.value = t("online.tagsEmpty");
+        tagsErrorState.value = { key: "online.tagsEmpty" };
       }
     } catch (e) {
       // 界面只给可操作文案；底层技术串（peer closed connection without sending
@@ -130,23 +147,23 @@ export function useOnlineSession(deps: {
       // 以前这里直接插进 {msg}，导致一整条 rustls 报错原样显示在左侧栏。
       void uiLog("warn", `读取官方分类失败：${messageOf(e)}`);
       tags.value = FALLBACK_TAGS;
-      tagsError.value = t("online.tagsFailed");
+      tagsErrorState.value = { key: "online.tagsFailed" };
     }
   }
 
   /** 诊断：让后端显式创建隐藏会话窗口，把真实结果或错误显示出来 */
   async function runProbe(): Promise<void> {
     probing.value = true;
-    probeResult.value = null;
-    sessionError.value = null;
+    probeResultState.value = null;
+    sessionErrorState.value = null;
     try {
-      probeResult.value = await withTimeout(
+      probeResultState.value = await withTimeout(
         probeAccountWindow(),
         25_000,
         t("online.probe"),
       );
     } catch (e) {
-      probeResult.value = t("online.probeFailed", { msg: messageOf(e) });
+      probeResultState.value = { key: "online.probeFailed", params: { msg: messageOf(e) } };
     } finally {
       probing.value = false;
     }
@@ -193,14 +210,14 @@ export function useOnlineSession(deps: {
 
   async function startLogin(): Promise<void> {
     waitingLogin.value = true;
-    sessionError.value = null;
+    sessionErrorState.value = null;
     deps.onLoginStart?.();
     void uiLog("info", "user clicked sign in (Microsoft / Xbox)");
     try {
       await withTimeout(openLogin(), 25_000, t("online.openLogin"));
     } catch (e) {
       waitingLogin.value = false;
-      sessionError.value = messageOf(e);
+      sessionErrorState.value = messageOf(e);
       void uiLog("error", `failed to open the sign-in window: ${messageOf(e)}`);
       return;
     }
@@ -209,7 +226,7 @@ export function useOnlineSession(deps: {
       try {
         const status = await withTimeout(sessionStatus(), 15_000, t("online.recheck"));
         session.value = status;
-        if (status.error) sessionError.value = messageOf(status.error);
+        if (status.error) sessionErrorState.value = messageOf(status.error);
         void uiLog(
           "info",
           `polling sign-in status: loggedIn=${status.loggedIn} cookieCount=${status.cookieCount} windowReady=${status.windowReady}`,
@@ -232,11 +249,11 @@ export function useOnlineSession(deps: {
           setStatusMessageKey("statusbar.loginDone");
         } catch (e) {
           const text = messageOf(e);
-          sessionError.value = t("online.cookieButFailed", { text });
+          sessionErrorState.value = { key: "online.cookieButFailed", params: { text } };
           void uiLog("warn", `cookies found but the API failed; keeping the window open: ${text}`);
         }
       } catch (e) {
-        sessionError.value = messageOf(e);
+        sessionErrorState.value = messageOf(e);
         void uiLog("warn", `polling error: ${messageOf(e)}`);
       }
     }, 2500);
@@ -244,7 +261,8 @@ export function useOnlineSession(deps: {
 
   /** 后台静默登录：不阻塞首屏，失败也不打断用户 */
   const silentAuth = ref(false);
-  const silentAuthNote = ref<string | null>(null);
+  const silentAuthNoteState = ref<Msg | null>(null);
+  const silentAuthNote = computed(() => msgText(silentAuthNoteState.value));
   let silentTried = false;
 
   function stopSilentTimer(): void {
@@ -262,13 +280,13 @@ export function useOnlineSession(deps: {
     if (silentTried || silentAuth.value || waitingLogin.value) return;
     silentTried = true;
     silentAuth.value = true;
-    silentAuthNote.value = t("online.silentNote", { reason });
+    silentAuthNoteState.value = { key: "online.silentNote", params: { reason } };
     void uiLog("info", `background silent sign-in started: ${reason}`);
     try {
       await withTimeout(openLoginSilent(), 15_000, t("online.openLogin"));
     } catch (e) {
       silentAuth.value = false;
-      silentAuthNote.value = t("online.silentFailedStart", { msg: messageOf(e) });
+      silentAuthNoteState.value = { key: "online.silentFailedStart", params: { msg: messageOf(e) } };
       return;
     }
 
@@ -286,8 +304,8 @@ export function useOnlineSession(deps: {
           void uiLog("info", "background silent sign-in succeeded (session cookie ready)");
           stopSilentTimer();
           silentAuth.value = false;
-          silentAuthNote.value = null;
-          sessionError.value = null;
+          silentAuthNoteState.value = null;
+          sessionErrorState.value = null;
           await closeLoginWindow();
           // 只在 离线→在线 这一跳 bump epoch；重复探测不会反复触发列表刷新
           markOnline(status);
@@ -299,7 +317,7 @@ export function useOnlineSession(deps: {
       if (!ok && ticks >= 6) {
         stopSilentTimer();
         silentAuth.value = false;
-        silentAuthNote.value = t("online.silentFailed");
+        silentAuthNoteState.value = { key: "online.silentFailed" };
       }
     }, 2500);
   }

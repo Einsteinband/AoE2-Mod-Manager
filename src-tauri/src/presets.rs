@@ -11,7 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+
+use crate::user_err;
 
 use crate::scan::{detect_data_mod, now_ms, normalize_key};
 
@@ -155,14 +157,14 @@ fn clean_items(items: Vec<PresetItem>) -> Vec<PresetItem> {
 pub fn upsert(store: &mut Store, name: &str, items: Vec<PresetItem>) -> Result<Preset, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("预设名称不能为空".to_string());
+        return Err(user_err("preset.nameEmpty", json!({})));
     }
     if name.chars().count() > MAX_NAME_LEN {
-        return Err(format!("预设名称不能超过 {MAX_NAME_LEN} 个字符"));
+        return Err(user_err("preset.nameTooLong", json!({ "max": MAX_NAME_LEN })));
     }
     let items = clean_items(items);
     if items.is_empty() {
-        return Err("当前没有任何可保存的模组（需要已启用、且能在 mod-status.json 里定位）".to_string());
+        return Err(user_err("preset.noItemsToSave", json!({})));
     }
 
     let ms = now_ms();
@@ -202,7 +204,7 @@ pub fn delete(store: &mut Store, id: &str) -> Result<(), String> {
     let before = store.presets.len();
     store.presets.retain(|p| p.id != id);
     if store.presets.len() == before {
-        return Err("该预设已不存在，请重新打开预设管理器".to_string());
+        return Err(user_err("preset.notFound", json!({})));
     }
     Ok(())
 }
@@ -236,11 +238,11 @@ pub fn apply_for_app(app: &tauri::AppHandle, id: &str) -> Result<ApplyReport, St
         .presets
         .iter()
         .find(|p| p.id == id)
-        .ok_or_else(|| "该预设已不存在，请重新打开预设管理器".to_string())?;
+        .ok_or_else(|| user_err("preset.notFound", json!({})))?;
     let root = crate::settings::load_for_app(app)
         .mod_root
         .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+        .ok_or_else(|| user_err("preset.modRootNotSet", json!({})))?;
 
     let status_path = PathBuf::from(&root).join(STATUS_FILE);
     let backup_dir = backups_dir_for(app)?;
@@ -320,9 +322,7 @@ pub(crate) fn ensure_game_closed(skip_process_check: bool) -> Result<(), String>
         return Ok(());
     }
     if let Some(exe) = game_process_running() {
-        return Err(format!(
-            "检测到游戏正在运行（{exe}）。请先完全退出游戏再操作——游戏退出时会重写 mod-status.json，覆盖本次修改。"
-        ));
+        return Err(user_err("preset.gameRunning", json!({ "exe": exe })));
     }
     Ok(())
 }
@@ -331,15 +331,18 @@ fn read_status(status_path: &Path) -> Result<(Vec<u8>, Value), String> {
     let raw = match fs::read(status_path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(format!(
-                "未找到 mod-status.json：{}。请先在游戏里启动一次，让游戏生成本文件后重试。",
-                status_path.display()
+            return Err(user_err(
+                "preset.statusNotFound",
+                json!({ "path": status_path.display().to_string() }),
             ))
         }
-        Err(e) => return Err(format!("无法读取 {}：{e}", status_path.display())),
+        Err(e) => return Err(user_err(
+            "preset.statusReadFailed",
+            json!({ "path": status_path.display().to_string(), "error": e.to_string() }),
+        )),
     };
     let root: Value = serde_json::from_slice(strip_bom(&raw))
-        .map_err(|e| format!("mod-status.json 不是合法 JSON（{e}），已中止，未做任何修改"))?;
+        .map_err(|e| user_err("preset.statusInvalidJson", json!({ "error": e.to_string() })))?;
     Ok((raw, root))
 }
 
@@ -351,9 +354,9 @@ fn commit_status(
     root: &Value,
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(backup_dir).map_err(|e| {
-        format!(
-            "无法创建备份目录 {}，已中止，未修改任何内容：{e}",
-            backup_dir.display()
+        user_err(
+            "preset.backupDirCreateFailed",
+            json!({ "path": backup_dir.display().to_string(), "error": e.to_string() }),
         )
     })?;
     let ms = now_ms();
@@ -364,48 +367,47 @@ fn commit_status(
         suffix += 1;
     }
     fs::write(&backup_path, raw).map_err(|e| {
-        format!(
-            "备份失败（{}），已中止，未修改任何内容：{e}",
-            backup_path.display()
+        user_err(
+            "preset.backupWriteFailed",
+            json!({ "path": backup_path.display().to_string(), "error": e.to_string() }),
         )
     })?;
     let backup_len = fs::metadata(&backup_path).map(|m| m.len()).unwrap_or(0);
     if backup_len != raw.len() as u64 {
-        return Err(format!(
-            "备份文件大小校验失败（{} / {}），已中止，未修改任何内容",
-            backup_len,
-            raw.len()
+        return Err(user_err(
+            "preset.backupSizeMismatch",
+            json!({ "expected": raw.len(), "actual": backup_len }),
         ));
     }
 
     let text =
-        serde_json::to_string(root).map_err(|e| format!("序列化 mod-status.json 失败：{e}"))?;
+        serde_json::to_string(root).map_err(|e| user_err("preset.statusSerializeFailed", json!({ "error": e.to_string() })))?;
     let tmp_path = status_path.with_file_name(format!("{STATUS_FILE}.aoe2mm-{ms}.tmp"));
     if let Err(e) = fs::write(&tmp_path, text.as_bytes()) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!(
-            "写入临时文件失败（备份保存在 {}）：{e}",
-            backup_path.display()
+        return Err(user_err(
+            "preset.tmpWriteFailed",
+            json!({ "backup": backup_path.display().to_string(), "error": e.to_string() }),
         ));
     }
     if let Err(e) = fs::rename(&tmp_path, status_path) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!(
-            "替换 mod-status.json 失败（备份保存在 {}）：{e}",
-            backup_path.display()
+        return Err(user_err(
+            "preset.renameFailed",
+            json!({ "backup": backup_path.display().to_string(), "error": e.to_string() }),
         ));
     }
 
     let verified = fs::read(status_path)
         .map_err(|e| {
-            format!(
-                "回读 mod-status.json 失败（备份保存在 {}）：{e}",
-                backup_path.display()
+            user_err(
+                "preset.rereadFailed",
+                json!({ "backup": backup_path.display().to_string(), "error": e.to_string() }),
             )
         })
         .and_then(|bytes| {
             serde_json::from_slice::<Value>(strip_bom(&bytes))
-                .map_err(|e| format!("回读的 mod-status.json 无法解析（{e}）"))
+                .map_err(|e| user_err("preset.rereadParseFailed", json!({ "error": e.to_string() })))
         });
 
     match verified {
@@ -413,14 +415,17 @@ fn commit_status(
         Ok(after) if after == *root => Ok(backup_path),
         Ok(_) => {
             let _ = fs::write(status_path, raw);
-            Err(format!(
-                "回读校验失败：写入后的 mod-status.json 与预期不一致，已回滚原始文件。备份：{}",
-                backup_path.display()
+            Err(user_err(
+                "preset.verifyFailed",
+                json!({ "backup": backup_path.display().to_string() }),
             ))
         }
         Err(e) => {
             let _ = fs::write(status_path, raw);
-            Err(format!("{e}；已回滚原始文件。备份：{}", backup_path.display()))
+            Err(user_err(
+                "preset.verifyErrorRolledBack",
+                json!({ "error": e, "backup": backup_path.display().to_string() }),
+            ))
         }
     }
 }
@@ -512,10 +517,7 @@ pub fn set_enabled(
             break;
         }
         if !found {
-            return Err(
-                "mod-status.json 里没有该模组的记录（游戏还没登记它）。请先启动一次游戏，让它出现在启用列表里再试。"
-                    .to_string(),
-            );
+            return Err(user_err("preset.modNotInStatus", json!({})));
         }
         Ok(((), changed))
     })?;
@@ -594,7 +596,7 @@ pub fn batch_set_enabled(
     skip_process_check: bool,
 ) -> Result<BatchToggleReport, String> {
     if targets.is_empty() {
-        return Err("当前列表没有可操作的模组".to_string());
+        return Err(user_err("preset.noTargets", json!({})));
     }
 
     let selectors: Vec<ModSelector> = targets.iter().map(BatchTarget::selector).collect();
@@ -948,16 +950,13 @@ pub fn register_mod(
     })?;
 
     let message = if added {
-        format!("已登记到 mod-status.json 并自动启用（Path={}）", rec.path)
+        user_err("preset.registerAdded", json!({ "path": rec.path }))
     } else if path_fixed.is_some() {
-        format!(
-            "mod-status.json 里已有该模组记录，已把 Path 修正为 {}（沿用原有启用状态）",
-            rec.path
-        )
+        user_err("preset.registerPathFixed", json!({ "path": rec.path }))
     } else if already_present {
-        "mod-status.json 里已有该模组记录，未做改动".to_string()
+        user_err("preset.registerAlreadyPresent", json!({}))
     } else {
-        "未写入 mod-status.json".to_string()
+        user_err("preset.registerNotWritten", json!({}))
     };
 
     Ok(RegisterOutcome {
@@ -1040,7 +1039,7 @@ pub fn apply_items(
     skip_process_check: bool,
 ) -> Result<ApplyReport, String> {
     if items.is_empty() {
-        return Err("该预设是空的，没有可应用的模组".to_string());
+        return Err(user_err("preset.empty", json!({})));
     }
 
     // 数据模组裁决必须在写盘前完成：同一时间只允许一个 .dat
@@ -1188,13 +1187,13 @@ pub struct PriorityOutcome {
 fn priority_key(raw: &str) -> Result<String, String> {
     let raw = raw.trim();
     let (kind, folder) = raw.split_once(':').ok_or_else(|| {
-        format!("无法识别的模组 ID：{raw}（应为 local:目录名 或 subscribed:目录名）")
+        user_err("preset.invalidSelector", json!({ "raw": raw }))
     })?;
     if kind != "local" && kind != "subscribed" {
-        return Err(format!("无法识别的模组 ID：{raw}（来源只能是 local / subscribed）"));
+        return Err(user_err("preset.invalidSelectorKind", json!({ "raw": raw })));
     }
     if folder.is_empty() || folder.contains('/') || folder.contains('\\') || folder.contains("..") {
-        return Err(format!("模组文件夹名不合法：{raw}"));
+        return Err(user_err("preset.invalidFolderName", json!({ "raw": raw })));
     }
     Ok(normalize_key(&crate::install::status_rel_path(kind, folder)))
 }
@@ -1218,16 +1217,14 @@ pub fn reorder_priority(
     skip_process_check: bool,
 ) -> Result<PriorityOutcome, String> {
     if ordered.is_empty() {
-        return Err("排序列表为空，未修改任何内容".to_string());
+        return Err(user_err("preset.reorderEmpty", json!({})));
     }
 
     let mut wanted: Vec<String> = Vec::with_capacity(ordered.len());
     for raw in ordered {
         let key = priority_key(raw)?;
         if wanted.contains(&key) {
-            return Err(format!(
-                "排序列表里出现了重复项：{raw}，已中止，未修改任何内容"
-            ));
+            return Err(user_err("preset.reorderDuplicate", json!({ "raw": raw })));
         }
         wanted.push(key);
     }
@@ -1256,9 +1253,9 @@ pub fn reorder_priority(
             .map(|(raw, _)| raw.clone())
             .collect();
         if !missing.is_empty() {
-            return Err(format!(
-                "以下模组在 mod-status.json 里没有记录，排序已中止（未修改任何内容）：{}。请先启动一次游戏，让游戏登记这些模组。",
-                missing.join("、")
+            return Err(user_err(
+                "preset.reorderMissing",
+                json!({ "missing": missing.join("、") }),
             ));
         }
 
@@ -1592,7 +1589,7 @@ mod tests {
             kind: String::new(),
         }];
         let err = apply_items(&status, &dir.join("backups"), &items, true).unwrap_err();
-        assert!(err.contains("不是合法 JSON"));
+        assert!(err.starts_with("aoe2mm:err:preset.statusInvalidJson"), "实际错误：{err}");
         assert_eq!(fs::read_to_string(&status).unwrap(), "{not json");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1610,7 +1607,7 @@ mod tests {
             kind: "subscribed".to_string(),
         }];
         let err = apply_items(&dir.join(STATUS_FILE), &dir.join("backups"), &items, true).unwrap_err();
-        assert!(err.contains("未找到 mod-status.json"));
+        assert!(err.starts_with("aoe2mm:err:preset.statusNotFound"), "实际错误：{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1655,7 +1652,7 @@ mod tests {
             path: "subscribed//777_X".to_string(),
         };
         let err = set_enabled(&status, &dir.join("backups"), &missing, true, true).unwrap_err();
-        assert!(err.contains("没有该模组的记录"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:preset.modNotInStatus"), "实际错误：{err}");
         assert_eq!(fs::read_to_string(&status).unwrap(), before);
 
         let _ = fs::remove_dir_all(&dir);
@@ -2037,7 +2034,7 @@ mod tests {
 
         let err = reorder_priority(&status, &backups, &["local:不存在".to_string()], true)
             .unwrap_err();
-        assert!(err.contains("没有记录"), "{err}");
+        assert!(err.starts_with("aoe2mm:err:preset.reorderMissing"), "{err}");
 
         let err = reorder_priority(
             &status,
@@ -2046,11 +2043,11 @@ mod tests {
             true,
         )
         .unwrap_err();
-        assert!(err.contains("重复"), "{err}");
+        assert!(err.starts_with("aoe2mm:err:preset.reorderDuplicate"), "{err}");
 
         let err = reorder_priority(&status, &backups, &["../evil:9_Local".to_string()], true)
             .unwrap_err();
-        assert!(err.contains("无法识别"), "{err}");
+        assert!(err.starts_with("aoe2mm:err:preset.invalidSelectorKind"), "{err}");
 
         assert_eq!(fs::read_to_string(&status).unwrap(), SAMPLE, "报错时不得写盘");
         let _ = fs::remove_dir_all(&dir);

@@ -1,17 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::json;
 use tauri::Manager;
 
 use crate::models::{RootCandidate, Settings};
 use crate::net;
+use crate::user_err;
 
 /// 配置目录下的 settings.json（首次启动引导、网络设置等共用同一个路径）
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map(|dir| dir.join("settings.json"))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+        .map_err(|e| user_err("settings.configDirNotFound", json!({ "error": e.to_string() })))
 }
 
 /// DPAPI 加密的会话 Cookie 缓存文件（不属于 settings 明文）
@@ -72,10 +74,10 @@ pub fn load(path: &Path) -> Settings {
 pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+            .map_err(|e| user_err("settings.createDirFailed", json!({ "path": parent.display().to_string(), "error": e.to_string() })))?;
     }
-    let text = serde_json::to_string_pretty(settings).map_err(|e| format!("配置序列化失败：{e}"))?;
-    fs::write(path, text).map_err(|e| format!("无法写入配置文件 {}：{e}", path.display()))
+    let text = serde_json::to_string_pretty(settings).map_err(|e| user_err("settings.serializeFailed", json!({ "error": e.to_string() })))?;
+    fs::write(path, text).map_err(|e| user_err("settings.writeFailed", json!({ "path": path.display().to_string(), "error": e.to_string() })))
 }
 
 // ---------------- 首次启动：自动探测游戏模组根目录 ----------------
@@ -317,21 +319,17 @@ pub fn game_root_of_exe(exe: &Path) -> PathBuf {
 pub fn validate_game_root(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim().trim_end_matches(['\\', '/']);
     if trimmed.is_empty() {
-        return Err("游戏根目录不能为空".to_string());
+        return Err(user_err("settings.gameRootEmpty", json!({})));
     }
     let dir = PathBuf::from(trimmed);
     if !dir.is_absolute() {
-        return Err(format!(
-            "请选择完整的游戏根目录（如 D:\\SteamLibrary\\steamapps\\common\\AoE2DE）：{trimmed}"
-        ));
+        return Err(user_err("settings.gameRootNotAbsolute", json!({ "path": trimmed })));
     }
     if !dir.is_dir() {
-        return Err(format!("游戏根目录配置有误：目录不存在（{trimmed}）"));
+        return Err(user_err("settings.gameRootNotDir", json!({ "path": trimmed })));
     }
     if game_exe_in(&dir).is_none() {
-        return Err(format!(
-            "游戏根目录配置有误：目录里没有 AoE2DE_s.exe（{trimmed}）"
-        ));
+        return Err(user_err("settings.gameRootNoExe", json!({ "path": trimmed })));
     }
     Ok(dir)
 }

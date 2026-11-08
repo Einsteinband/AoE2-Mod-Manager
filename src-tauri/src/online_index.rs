@@ -29,7 +29,7 @@
 //! - 中断 / 暂停一律 `done = false`，游标每 5 页落一次盘，下次从那一页接着爬。
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,6 +41,7 @@ use tauri::Emitter;
 
 use crate::online::api::{ApiClient, ApiFailure, GAME_AOE2DE};
 use crate::online::models::{pick_str, FindResult, OnlineModSummary};
+use crate::user_err;
 
 pub const FILE_NAME: &str = "online_index.json";
 /// 索引进度事件名：每写入一批数据推一次，前端据此实时刷新进度（不再轮询）
@@ -48,9 +49,9 @@ pub const PROGRESS_EVENT: &str = "online://index-progress";
 /// 退出登录 / 会话结束时广播：前端据此立刻把登录态归零并停止在线请求
 pub const CANCEL_EVENT: &str = "online://index-cancelled";
 /// 中断原因（同时写进索引状态与日志）
-const CANCEL_MESSAGE: &str = "已退出登录，索引同步已中断";
+const CANCEL_MESSAGE: &str = "aoe2mm:err:index.cancelled";
 /// Cookie 失效 / 未登录时的统一文案（界面红点直接用这句）
-pub const NEED_LOGIN_MESSAGE: &str = "索引同步失败：请先登录";
+pub const NEED_LOGIN_MESSAGE: &str = "aoe2mm:err:index.needLogin";
 /// 2 = 分区遍历（v1 的单游标模型会把「深翻页截断」误判成「全网扫完」）
 pub const CURRENT_VERSION: u32 = 2;
 
@@ -561,7 +562,7 @@ fn api_client(app: &tauri::AppHandle, anonymous: bool) -> Result<ApiClient, ApiF
     };
     let settings = crate::settings::load_for_app(app);
     let resolved = crate::net::resolve(&crate::net::NetConfig::from_settings(&settings))
-        .map_err(|e| ApiFailure::new("network", format!("网络配置无效：{e}"), None))?;
+        .map_err(|e| ApiFailure::new("network", user_err("net.configInvalid", json!({ "error": e.to_string() })), None))?;
     let proxy = crate::net::ureq_proxy(&resolved)
         .map_err(|e| ApiFailure::new("network", e, None))?;
     Ok(ApiClient::new(cookie, proxy))
@@ -664,7 +665,7 @@ fn relogin_and_refresh(
             Some(401),
         ));
     }
-    set_phase("syncing", "登录态已过期，正在自动重新登录…");
+    set_phase("syncing", &user_err("index.autoRelogging", json!({})));
     emit_progress(app);
     log::warn!(target: "index", "第 {page} 页返回 401：开始静默自动重登");
 
@@ -722,7 +723,7 @@ pub fn spawn_resume(app: tauri::AppHandle) {
 
 /// 开关被关闭：立刻把状态切成「未开启」并推给前端（指示灯变 ⚪）
 pub fn mark_disabled(app: &tauri::AppHandle) {
-    set_phase("disabled", "本地索引未开启");
+    set_phase("disabled", &user_err("index.disabledByUser", json!({})));
     emit_progress(app);
 }
 
@@ -751,7 +752,7 @@ fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, ApiFailure> {
     let guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_ref()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     Ok(Snapshot {
         items: mem.store.items.len(),
         partitions: mem.store.partitions.len(),
@@ -812,7 +813,7 @@ fn apply_partition_page(
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     let written = upsert_items(&mut mem.store, items);
     if let Some(part) = mem.store.partitions.get_mut(mem.store.active) {
         part.cursor = cursor_after;
@@ -837,7 +838,7 @@ fn apply_global_page(
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     let written = upsert_items(&mut mem.store, items);
     if global_total > 0 {
         mem.store.total_count = global_total;
@@ -1006,7 +1007,7 @@ fn build_plan(app: &tauri::AppHandle, fetcher: &mut Fetcher) -> Result<(), ApiFa
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     log::info!(
         target: "index",
         "索引遍历计划已重建（v{PLAN_VERSION}）：{} 个窗口（排序 {} + q 前缀 {} + 分类/派生 {}），继承断点 {} 个，保留旧派生窗口 {} 个",
@@ -1051,7 +1052,7 @@ fn current_partition(app: &tauri::AppHandle) -> Result<Option<Partition>, ApiFai
     let guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_ref()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     Ok(mem.store.partitions.get(mem.store.active).cloned())
 }
 
@@ -1059,7 +1060,7 @@ fn advance_partition(app: &tauri::AppHandle) -> Result<(), ApiFailure> {
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     mem.store.active += 1;
     mem.dirty = true;
     Ok(())
@@ -1070,7 +1071,7 @@ fn mark_partition_exhausted(app: &tauri::AppHandle, part_total: i64) -> Result<(
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     if let Some(part) = mem.store.partitions.get_mut(mem.store.active) {
         part.exhausted = true;
         if part_total > 0 {
@@ -1085,7 +1086,7 @@ fn finalize(app: &tauri::AppHandle, done: bool) -> Result<(), ApiFailure> {
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
-        .ok_or_else(|| ApiFailure::new("internal", "索引存储未就绪", None))?;
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
     let now = now_ms();
     mem.store.done = done;
     mem.store.updated_at_ms = now;
@@ -1138,7 +1139,7 @@ fn mark_interrupted(app: &tauri::AppHandle, message: &str) {
 fn begin_run() -> Result<(), ApiFailure> {
     let mut rt = lock_runtime();
     if rt.syncing {
-        return Err(ApiFailure::new("busy", "索引同步已在进行中", None));
+        return Err(ApiFailure::new("busy", user_err("index.alreadyRunning", json!({})), None));
     }
     let now = now_ms();
     if rt.cooldown_until_ms > now {
@@ -1151,7 +1152,7 @@ fn begin_run() -> Result<(), ApiFailure> {
     }
     rt.syncing = true;
     rt.phase = "checking".to_string();
-    rt.message = "正在准备索引同步".to_string();
+    rt.message = user_err("index.preparing", json!({}));
     Ok(())
 }
 
@@ -1189,7 +1190,7 @@ fn phase_for(err: &ApiFailure) -> &'static str {
 pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport, ApiFailure> {
     // 开关关闭：一个请求都不发（本地搜索仍然可用，只是只查已缓存的条目）
     if !is_enabled(app) {
-        return Err(ApiFailure::new("disabled", "本地索引未开启", None));
+        return Err(ApiFailure::new("disabled", user_err("index.disabledByUser", json!({})), None));
     }
     // 会话已结束（退出登录）：一个请求都不发，避免拿失效 Cookie 把 401 刷满
     if crate::online::session::is_sync_cancelled() {
@@ -1274,7 +1275,7 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
         return Ok(report);
     }
 
-    set_phase("syncing", "正在连接官方接口");
+    set_phase("syncing", &user_err("index.connecting", json!({})));
     // 让界面立刻从「未开始 / 旧进度」切到 🟡 同步中，不用等第一页回来
     emit_progress(app);
     // v1.2：未登录就别浪费请求了。官方 `/Find` 匿名一律 401，
@@ -1365,16 +1366,16 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
         // 用户点了「暂停」：保留分区游标立即收手，done 绝不置 true
         if is_pause_requested() {
             mark_paused(app, true);
-            stop_note = "索引已暂停，点「继续索引」从断点接着爬".to_string();
+            stop_note = user_err("index.paused", json!({}));
             break;
         }
         if report.pages >= MAX_PAGES_PER_RUN {
-            stop_note = "本次同步已达单轮上限，剩余部分下次启动继续".to_string();
+            stop_note = user_err("index.reachedLimit", json!({}));
             break;
         }
         // v1.2：用户在设置里把开关关掉 → 立刻停下，不再发任何请求
         if !is_enabled(app) {
-            stop_note = "本地索引已被关闭".to_string();
+            stop_note = user_err("index.disabled", json!({}));
             break;
         }
         if snapshot(app).map(|s| s.items).unwrap_or(0) >= MAX_ITEMS {
@@ -1584,7 +1585,7 @@ pub fn spawn_background(app: tauri::AppHandle) {
         std::thread::sleep(Duration::from_secs(BG_START_DELAY_SECS));
         // v1.2：开关未开 → 启动后一个爬取请求都不发，只把状态标成「未开启」
         if !is_enabled(&app) {
-            set_phase("disabled", "本地索引未开启");
+            set_phase("disabled", &user_err("index.disabledByUser", json!({})));
             emit_progress(&app);
             log::info!(target: "index", "本地索引未开启（设置 → 通用），跳过后台同步");
             return;
@@ -1599,7 +1600,7 @@ pub fn spawn_background(app: tauri::AppHandle) {
         }
         // 上一轮是用户主动暂停的：启动后不自动续爬，等用户点「继续索引」
         if snapshot(&app).map(|s| s.paused).unwrap_or(false) {
-            set_phase("paused", "索引已暂停，点「继续索引」从断点接着爬");
+            set_phase("paused", &user_err("index.paused", json!({})));
             emit_progress(&app);
             log::info!(target: "index", "索引处于暂停状态，跳过后台自动续爬");
             return;
@@ -1655,7 +1656,7 @@ pub fn status_for_app(app: &tauri::AppHandle) -> IndexStatus {
         rt.phase.clone()
     };
     let message = if phase == "paused" && rt.message.is_empty() {
-        "索引已暂停，点「继续索引」从断点接着爬".to_string()
+        user_err("index.paused", json!({}))
     } else {
         rt.message.clone()
     };
@@ -1699,7 +1700,7 @@ pub fn clear_for_app(app: &tauri::AppHandle) -> Result<ClearReport, String> {
     let path = path_for(app)?;
     let items_before = {
         let mut guard = ensure_loaded(app)?;
-        let mem = guard.as_mut().ok_or_else(|| "索引存储未就绪".to_string())?;
+        let mem = guard.as_mut().ok_or_else(|| user_err("index.notReady", json!({})))?;
         let before = mem.store.items.len();
         *mem = Memory { path: path.clone(), store: Store::default(), dirty: true };
         before
@@ -1715,7 +1716,7 @@ pub fn clear_for_app(app: &tauri::AppHandle) -> Result<ClearReport, String> {
             false
         }
     };
-    set_phase("idle", "索引已清空");
+    set_phase("idle", &user_err("index.cleared", json!({})));
     Ok(ClearReport { removed, path: path.display().to_string(), items_before })
 }
 

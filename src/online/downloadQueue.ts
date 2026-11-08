@@ -23,7 +23,7 @@ import { cancelInstall, installMod, loadDownloadQueue, onDownloadProgress, saveD
 import { messageOf } from "./errors";
 import { classifyNetworkFailure } from "./networkError";
 import { translate } from "../i18n";
-import { sessionPhase } from "../sessionState";
+import { sessionPhase, markUnauthenticated } from "../sessionState";
 import {
   isApiFailure,
   type DownloadProgress,
@@ -523,6 +523,14 @@ async function runTask(task: DownloadTask): Promise<void> {
     if (kind === "cancelled") {
       task.status = "cancelled";
       task.message = { key: "online.downloadCancelled" };
+    } else if (kind === "unauthenticated") {
+      // v0.4.9：下载时才发现 401（登录态过期），必须立刻把底栏打回离线，
+      // 不能只弹个安装失败。messageOf 会走 aoe2mm:err 协议查 i18n。
+      markUnauthenticated(messageOf(e));
+      task.status = "failed";
+      task.error = messageOf(e);
+      task.needForce = false;
+      task.message = { key: "online.installFailed" };
     } else if (kind === "network") {
       // 底层 ureq/rustls 错误（os error 10060 / TLS close_notify / URL 等）全是技术串，
       // 且 Rust 侧 ApiFailure::network 写死了「网络请求失败：」中文前缀，英文界面下会
@@ -544,7 +552,12 @@ async function runTask(task: DownloadTask): Promise<void> {
     } else {
       const message = messageOf(e);
       task.status = "failed";
-      task.error = message;
+      // 作者已删模组 / 下载链接失效：底层报 `aoe2mm:err:download.invalidUrl`，
+      // 翻译后会把 ureq 的 "relative URL without a base" 原样拼进文案。
+      // 这里识别出来换成用户友好的 modRemoved 提示，不把 URL 解析错误暴露给玩家。
+      task.error = /relative\s*URL/i.test(message)
+        ? translate("downloader.modRemoved")
+        : message;
       task.needForce = kind === "install" && message.includes("允许覆盖");
       task.message = { key: "online.installFailed" };
     }

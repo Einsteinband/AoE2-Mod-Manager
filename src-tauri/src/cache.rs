@@ -13,12 +13,14 @@
 //! 容量：条目 10000、体积 200MB，超了按“最旧写入”淘汰。
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::user_err;
 
 
 pub const FILE_NAME: &str = "online_cache.json";
@@ -260,15 +262,18 @@ fn write_store(path: &Path, store: &Store) -> Result<(), String> {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| {
+            user_err("cache.createDirFailed", json!({ "path": parent.display().to_string(), "error": e.to_string() }))
+        })?;
     }
-    let text = serde_json::to_vec(store).map_err(|e| format!("缓存序列化失败：{e}"))?;
+    let text = serde_json::to_vec(store).map_err(|e| user_err("cache.serializeFailed", json!({ "error": e.to_string() })))?;
 
     // 写盘期间独占：同一进程内不会有两个线程同时动 tmp / target
     let _io = IO_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = unique_tmp(path);
-    fs::write(&tmp, &text).map_err(|e| format!("写入临时缓存失败（{}）：{e}", tmp.display()))?;
+    fs::write(&tmp, &text).map_err(|e| {
+        user_err("cache.writeTmpFailed", json!({ "path": tmp.display().to_string(), "error": e.to_string() }))
+    })?;
 
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
@@ -280,10 +285,14 @@ fn write_store(path: &Path, store: &Store) -> Result<(), String> {
             }
             Err(second) => {
                 let _ = fs::remove_file(&tmp);
-                Err(format!(
-                    "rename 失败（{first}）；copy 兜底也失败（{second}）；tmp={} target={}",
-                    tmp.display(),
-                    path.display()
+                Err(user_err(
+                    "cache.atomicWriteFailed",
+                    json!({
+                        "first": first.to_string(),
+                        "second": second.to_string(),
+                        "tmp": tmp.display().to_string(),
+                        "target": path.display().to_string(),
+                    }),
                 ))
             }
         },
@@ -470,7 +479,7 @@ pub fn clear_for_app(app: &tauri::AppHandle) -> Result<ClearReport, String> {
     };
     let removed = if path.is_file() {
         let _io = IO_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        fs::remove_file(&path).map_err(|e| format!("删除缓存文件失败：{e}"))?;
+        fs::remove_file(&path).map_err(|e| user_err("cache.deleteFailed", json!({ "error": e.to_string() })))?;
         true
     } else {
         false

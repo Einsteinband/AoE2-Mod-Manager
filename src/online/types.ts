@@ -3,6 +3,7 @@
  *  因此详情统一用 `Record<string, unknown>` + 原始的已知字段兜底展示。 */
 
 import { i18n } from "../i18n";
+import { translateBackendMessage } from "../format";
 
 export interface OnlineMod {
   modId: number;
@@ -127,6 +128,9 @@ const TAG_ZH_BY_EN: Record<string, string> = Object.entries(TAG_EN_BY_ZH).reduce
 export function localizedTagName(name: string): string {
   const raw = (name ?? "").trim();
   if (!raw) return raw;
+  // Rust 迁移到错误码协议后，scan 失败时分类位可能是 `aoe2mm:err:scan.tagOther` 等串，
+  // 必须走统一翻译函数，绝不允许把协议码原样泄到侧栏。
+  if (raw.startsWith("aoe2mm:err:")) return translateBackendMessage(raw);
   if (i18n.global.locale.value === "zh") return TAG_ZH_BY_EN[raw] ?? raw;
   return TAG_EN_BY_ZH[raw] ?? raw;
 }

@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::scan::now_ms;
+use crate::user_err;
 
 /// 与 settings.json / mod_metadata.json / presets.json 同目录：
 /// %APPDATA%\com.aoe2.modmanager\user_data.json
@@ -167,21 +169,21 @@ pub fn save(path: &Path, backup_dir: &Path, store: &Store) -> Result<SaveReport,
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+            .map_err(|e| user_err("userData.createDirFailed", json!({ "path": parent.display().to_string(), "error": e.to_string() })))?;
     }
 
     let backup = backup_before_write(path, backup_dir)?;
 
     let text =
-        serde_json::to_string_pretty(&cleaned).map_err(|e| format!("user_data 序列化失败：{e}"))?;
+        serde_json::to_string_pretty(&cleaned).map_err(|e| user_err("userData.serializeFailed", json!({ "error": e.to_string() })))?;
     let tmp_path = path.with_file_name(format!("{FILE_NAME}.aoe2mm-{}.tmp", now_ms()));
     if let Err(e) = fs::write(&tmp_path, text.as_bytes()) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("写入临时文件失败：{e}"));
+        return Err(user_err("userData.writeTmpFailed", json!({ "error": e.to_string() })));
     }
     if let Err(e) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("替换 user_data.json 失败：{e}"));
+        return Err(user_err("userData.replaceFailed", json!({ "error": e.to_string() })));
     }
 
     let favorite_count = cleaned.mods.values().filter(|m| m.is_favorite).count();

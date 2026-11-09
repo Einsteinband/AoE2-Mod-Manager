@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, revealModFolder, toggleModEnabled } from "../api";
-import { activeTaskOfMod } from "../online/downloadQueue";
+import { activeTaskOfMod, latestTaskOfMod } from "../online/downloadQueue";
 import {
   formatBytes,
   formatDateTime,
@@ -72,6 +72,8 @@ const deleting = ref(false);
 const deleteError = ref<string | null>(null);
 const openingWeb = ref(false);
 const webError = ref<string | null>(null);
+/** 描述拉取 / 翻译失败的错误（API 404 等）：描述为空时优先显示真实错误，而不是吞掉变成「未提供描述」 */
+const descError = ref<string | null>(null);
 
 // v0.5：收藏 / 备注名（只和 WorkshopID 绑定，改完立即落盘 + 局部 Patch，不重扫）
 const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
@@ -82,9 +84,17 @@ const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
  */
 const uninstalled = computed(() => props.mod.uninstalled === true);
 /** 正在下载 / 已在下载队列（同名模组不重复入队） */
-const downloadTask = computed(() => {
+const activeDownloadTask = computed(() => {
   const id = props.mod.workshopId ?? 0;
   return id > 0 ? activeTaskOfMod(id) : null;
+});
+/** 最近一次下载任务的错误（失败时在详情面板红框显示，与在线页口径一致） */
+const downloadError = computed(() => {
+  const id = props.mod.workshopId ?? 0;
+  if (id <= 0) return null;
+  const task = latestTaskOfMod(id);
+  if (!task || task.status !== "failed") return null;
+  return task.error;
 });
 const favorited = computed(() => isFavorite(props.mod.workshopId));
 const customName = computed(() => customNameOf(props.mod.workshopId));
@@ -255,6 +265,8 @@ async function onTranslateClick(): Promise<void> {
     }
   } catch (e) {
     showToast(translationErrorText(e), "error");
+    // 描述为空时，把 API 错误（如 HTTP 404）暴露到描述区，而不是吞掉变成「未提供描述」
+    descError.value = rawMessageOf(e);
   }
 }
 
@@ -307,10 +319,11 @@ const confirmMessage = computed(
 /** 有 WorkshopID 才能定位官网页面；无 ID 的本地模组不算失败，只是没得浏览 */
 const canOpenWebsite = computed(() => (props.mod.workshopId ?? 0) > 0);
 
+/** 返回 raw 错误串，渲染时由 translateBackendMessage 翻译，切语言即时跟随。 */
 function errorText(e: unknown, fallbackKey: string): string {
-  if (typeof e === "string") return translateBackendMessage(e);
+  if (typeof e === "string") return e;
   const message = (e as Error)?.message;
-  return message ? translateBackendMessage(message) : t(fallbackKey);
+  return message ?? `aoe2mm:err:${fallbackKey}`;
 }
 
 async function openWebsite() {
@@ -410,6 +423,7 @@ watch(
     deleteError.value = null;
     favError.value = null;
     renameOpen.value = false;
+    descError.value = null;
     // 只读查一次缓存（无网络）：命中就瞬间显示中文，未命中也只是让按钮可点
     void probeTranslationCache();
   },
@@ -448,77 +462,9 @@ watch(
     </section>
 
     <!-- ② 操作区（v2.0 前置）：所有可点按钮集中在这里，紧跟识别区，先能做再读描述
-         （顺序：主操作 → 辅助 → 危险） -->
+         （顺序：主操作 → 常用辅助 → 次要操作 → 危险） -->
     <section class="dv-zone dv-zone-actions">
       <h4 class="dv-zone-title">{{ t("detailPanel.actions") }}</h4>
-
-      <!-- v0.2.4：一键翻译（仅手动触发；打开详情页只做一次本地缓存查询，绝无网络请求） -->
-      <div v-if="translateId > 0" class="translate-row">
-        <button
-          type="button"
-          class="translate-btn"
-          :class="{ active: hasTranslation && !showingOriginalText }"
-          :disabled="translateBusy || translateQueued || (!hasTranslation && !canTranslate)"
-          :title="t('translate.triggerTitle')"
-          @click="onTranslateClick"
-        >
-          <span class="translate-icon">🌐</span>
-          {{ translateLabel }}
-        </button>
-        <span v-if="translateProvider" class="translate-note">{{ translateProvider }}</span>
-        <span v-else-if="!canTranslate" class="translate-note">{{ t("translate.waitingContent") }}</span>
-      </div>
-
-      <!-- v0.5：收藏 / 备注名 -->
-      <div class="fav-row">
-        <button
-          type="button"
-          class="fav-btn"
-          :class="{ active: favorited }"
-          :disabled="!canFavorite || favBusy"
-          :title="canFavorite ? t('favorites.favoriteTitle') : t('favorites.noId')"
-          @click="toggleFavorite"
-        >
-          <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
-          {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
-        </button>
-        <button
-          type="button"
-          class="fav-btn"
-          :disabled="!canFavorite || renameBusy"
-          :title="canFavorite ? t('favorites.renameTitle') : t('favorites.noId')"
-          @click="openRename"
-        >
-          <span class="fav-star">📝</span>
-          {{ t("favorites.rename") }}
-        </button>
-        <span v-if="!canFavorite" class="note" style="margin: 0">{{ t("favorites.noId") }}</span>
-      </div>
-      <div v-if="favError" class="path-actions">
-        <span class="path-error">{{ favError }}</span>
-      </div>
-
-      <div v-if="hasUpdate" class="update-panel">
-        <div class="update-panel-text">
-          <strong>{{ t("detail.updateTitle") }}</strong>
-          <span class="note" style="margin: 0">{{ updateTimeNote }}</span>
-        </div>
-        <button
-          type="button"
-          class="primary update-btn"
-          :disabled="updating || deleting || toggling"
-          :title="t('detail.updateTitle')"
-          @click="emit('update')"
-        >
-          {{ updating ? t("detail.updating") : t("detail.updateNow") }}
-        </button>
-      </div>
-
-      <!-- 数据模组：游戏同一时间只能加载一个，先给用户解释清楚 -->
-      <div v-if="mod.isDataMod" class="dv-datamod-warn">
-        <span class="dv-warn-icon">⚙️</span>
-        <span>{{ t("detail.dataModWarning") }}</span>
-      </div>
 
       <!-- 主操作：启用 / 停用（金色高亮的开关控件）—— 未安装条目没有 mod-status.json 记录，不显示 -->
       <div v-if="!uninstalled" class="dv-action-row">
@@ -543,31 +489,75 @@ watch(
         <button
           type="button"
           class="primary install-btn"
-          :disabled="!!downloadTask || !canFavorite"
-          :title="downloadTask ? t('detail.downloadQueued') : t('detail.downloadTitle')"
+          :disabled="!!activeDownloadTask || !canFavorite"
+          :title="activeDownloadTask ? t('detail.downloadQueued') : t('detail.downloadTitle')"
           @click="emit('download')"
         >
-          {{ downloadTask ? t("detail.downloadQueued") : t("detail.downloadInstall") }}
+          {{ activeDownloadTask ? t("detail.downloadQueued") : t("detail.downloadInstall") }}
         </button>
       </div>
-    </section>
+      <div v-if="downloadError" class="path-actions">
+        <span class="path-error">{{ downloadError }}</span>
+      </div>
 
-    <!-- ③ 描述区（v2.1）：夹在主操作与其他操作之间，长文本折叠 -->
-    <section class="dv-zone dv-zone-desc">
-      <h4 class="dv-zone-title">{{ t("detail.description") }}</h4>
-      <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
-      <div v-else class="note">{{ t("detail.descriptionMissing") }}</div>
-      <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
-        {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}
-      </button>
-    </section>
+      <!-- 更新提示（有更新时显示） -->
+      <div v-if="hasUpdate" class="update-panel">
+        <div class="update-panel-text">
+          <strong>{{ t("detail.updateTitle") }}</strong>
+          <span class="note" style="margin: 0">{{ updateTimeNote }}</span>
+        </div>
+        <button
+          type="button"
+          class="primary update-btn"
+          :disabled="updating || deleting || toggling"
+          :title="t('detail.updateTitle')"
+          @click="emit('update')"
+        >
+          {{ updating ? t("detail.updating") : t("detail.updateNow") }}
+        </button>
+      </div>
 
-    <!-- ④ 其他操作（v2.1 后置）：打开所在文件夹 / 在网站浏览 / 卸载模组 -->
-    <section class="dv-zone dv-zone-actions">
-      <h4 class="dv-zone-title">{{ t("detailPanel.moreActions") }}</h4>
+      <!-- 数据模组提示 -->
+      <div v-if="mod.isDataMod" class="dv-datamod-warn">
+        <span class="dv-warn-icon">⚙️</span>
+        <span>{{ t("detail.dataModWarning") }}</span>
+      </div>
 
-      <!-- 辅助操作：打开目录 / 官网（描边 Ghost 样式） -->
-      <div class="dv-action-row">
+      <!-- 常用辅助操作：收藏 + 翻译 -->
+      <div class="dv-action-row dv-action-secondary">
+        <button
+          type="button"
+          class="fav-btn"
+          :class="{ active: favorited }"
+          :disabled="!canFavorite || favBusy"
+          :title="canFavorite ? t('favorites.favoriteTitle') : t('favorites.noId')"
+          @click="toggleFavorite"
+        >
+          <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
+          {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
+        </button>
+        <button
+          v-if="translateId > 0"
+          type="button"
+          class="fav-btn"
+          :class="{ active: hasTranslation && !showingOriginalText }"
+          :disabled="translateBusy || translateQueued || (!hasTranslation && !canTranslate)"
+          :title="t('translate.triggerTitle')"
+          @click="onTranslateClick"
+        >
+          <span class="fav-star">🌐</span>
+          {{ translateLabel }}
+        </button>
+      </div>
+      <div v-if="favError" class="path-actions">
+        <span class="path-error">{{ translateBackendMessage(favError) }}</span>
+      </div>
+      <div v-if="translateProvider" class="translate-note-row">
+        <span class="translate-note">{{ translateProvider }}</span>
+      </div>
+
+      <!-- 次要操作：打开文件夹 + 网站浏览 + 更多操作（备注名） -->
+      <div class="dv-action-row dv-action-ghost-row">
         <button
           v-if="!uninstalled"
           type="button"
@@ -586,13 +576,28 @@ watch(
         >
           {{ openingWeb ? t("detail.opening") : t("detail.browseSite") }}
         </button>
+        <details class="more-actions">
+          <summary class="dv-btn-ghost more-actions-summary">
+            ⋯ {{ t("detailPanel.more") }}
+          </summary>
+          <div class="more-actions-menu">
+            <button
+              type="button"
+              :disabled="!canFavorite || renameBusy"
+              :title="canFavorite ? t('favorites.renameTitle') : t('favorites.noId')"
+              @click="openRename(); ($event.currentTarget as HTMLButtonElement).closest('details')!.open = false"
+            >
+              📝 {{ t("favorites.rename") }}
+            </button>
+          </div>
+        </details>
       </div>
       <p v-if="!canOpenWebsite" class="dv-action-note">{{ t("detail.noWorkshopNote") }}</p>
       <div v-if="revealError" class="path-actions">
-        <span class="path-error">{{ revealError }}</span>
+        <span class="path-error">{{ translateBackendMessage(revealError) }}</span>
       </div>
       <div v-if="webError" class="path-actions">
-        <span class="path-error">{{ webError }}</span>
+        <span class="path-error">{{ translateBackendMessage(webError) }}</span>
       </div>
 
       <!-- 危险操作：卸载本机文件（红色 + 二次确认）—— 未安装条目无文件可删 -->
@@ -609,6 +614,17 @@ watch(
       </div>
     </section>
 
+    <!-- ③ 描述区：夹在操作区与状态之间，长文本折叠 -->
+    <section class="dv-zone dv-zone-desc">
+      <h4 class="dv-zone-title">{{ t("detail.description") }}</h4>
+      <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
+      <div v-else-if="descError" class="note">{{ descError }}</div>
+      <div v-else class="note">{{ t("detail.descriptionMissing") }}</div>
+      <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
+        {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}
+      </button>
+    </section>
+
     <!-- ⑤ 状态区：启用/停用、加载优先级、数据提示（仅已安装条目） -->
     <section v-if="!uninstalled" class="dv-zone dv-zone-status">
       <h4 class="dv-zone-title">{{ t("detailPanel.status") }}</h4>
@@ -616,7 +632,7 @@ watch(
         <span class="badge" :class="mod.enabled === null ? 'warn' : ''">{{ statusLabel(mod.enabled) }}</span>
       </div>
       <div v-if="toggleError" class="path-actions">
-        <span class="path-error">{{ toggleError }}</span>
+        <span class="path-error">{{ translateBackendMessage(toggleError) }}</span>
       </div>
       <div v-else-if="mod.enabled === null" class="path-actions">
         <span class="path-error">{{ t("detail.statusNoRecord") }}</span>
@@ -706,7 +722,7 @@ watch(
     :original="mod.displayName"
     :initial="customName"
     :busy="renameBusy"
-    :error="renameError"
+    :error="translateBackendMessage(renameError)"
     @save="applyRename"
     @cancel="renameOpen = false"
   />
@@ -719,7 +735,7 @@ watch(
     :detail="mod.path"
     :confirm-label="t('detail.deleteConfirmLabel')"
     :busy="deleting"
-    :error="deleteError"
+    :error="translateBackendMessage(deleteError)"
     @confirm="confirmDelete"
     @cancel="confirmOpen = false"
   />
@@ -755,5 +771,60 @@ watch(
   padding: 6px 14px;
   letter-spacing: calc(0.6px * var(--ui-tracking));
   white-space: nowrap;
+}
+
+/* 更多操作下拉菜单 */
+.more-actions {
+  position: relative;
+}
+.more-actions-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.more-actions-summary::-webkit-details-marker {
+  display: none;
+}
+.more-actions-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 140px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 20px rgba(var(--shadow-rgb), 0.4);
+  z-index: 10;
+  padding: 4px 0;
+}
+.more-actions-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--parch);
+  font-size: calc(12px * var(--global-scale, 1));
+  cursor: pointer;
+  white-space: nowrap;
+}
+.more-actions-menu button:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--gold-text);
+}
+.more-actions-menu button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 辅助操作行统一间距 */
+.dv-action-secondary {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.translate-note-row {
+  margin-top: 4px;
 }
 </style>

@@ -21,7 +21,11 @@ export type SessionPhase = "offline" | "checking" | "online";
 export const sessionPhase = ref<SessionPhase>("checking");
 /** 最近一次探测到的完整会话信息（Cookie 数 / 来源 / 错误） */
 export const sessionInfo = ref<SessionStatus | null>(null);
-export const sessionError = ref<string | null>(null);
+/** 存 raw 错误串（aoe2mm:err:... 或后端原文），渲染时再 translateBackendMessage，切语言即时跟随。 */
+export const sessionErrorRaw = ref<string | null>(null);
+export const sessionError = computed(() =>
+  sessionErrorRaw.value ? translateBackendMessage(sessionErrorRaw.value) : null,
+);
 /** 登录态确认有效的次数；**只在 离线/校验中 → 在线 这一跳 +1**，在线页 watch 它静默刷新 */
 export const sessionEpoch = ref(0);
 /**
@@ -59,17 +63,17 @@ const STARTUP_TIMEOUT_MS = 45_000;
 let inflight: Promise<boolean> | null = null;
 
 function describe(e: unknown): string {
-  if (typeof e === "string") return translateBackendMessage(e);
-  if (e instanceof Error) return translateBackendMessage(e.message);
-  return translate("labels.unknown");
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return "aoe2mm:err:labels.unknown";
 }
 
 /**
- * 后端 SessionStatus.error 是简体中文原文，底栏 / 在线页直接展示会漏到英文界面，
- * 统一在写入前过一遍后端文案转写。
+ * 后端 SessionStatus.error 是 raw 错误串（aoe2mm:err:... 或旧中文），
+ * 这里原样保留，渲染时由 sessionError computed 统一翻译。
  */
 function errorText(raw: string | null | undefined): string | null {
-  return raw ? translateBackendMessage(raw) : null;
+  return raw ?? null;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -176,7 +180,7 @@ function probeNetworkIfNeeded(): void {
 export function markOnline(status?: SessionStatus | null): void {
   if (status) {
     sessionInfo.value = status;
-    sessionError.value = errorText(status.error);
+    sessionErrorRaw.value = errorText(status.error);
   }
   const wasOnline = sessionPhase.value === "online";
   sessionPhase.value = "online";
@@ -194,7 +198,7 @@ export function markOnline(status?: SessionStatus | null): void {
 /** 未登录 / 探测失败：灯变灰 */
 export function markOffline(reason: string | null = null): void {
   sessionPhase.value = "offline";
-  sessionError.value = reason;
+  sessionErrorRaw.value = reason;
   lastCheckedMs.value = Date.now();
 }
 
@@ -226,7 +230,7 @@ function runSessionCheck(
       // 等结果的这段时间里用户退出了登录：这次结果作废，绝不把灯点回绿色
       if (generation !== sessionGeneration.value) return false;
       sessionInfo.value = status;
-      sessionError.value = errorText(status.error);
+      sessionErrorRaw.value = errorText(status.error);
       lastCheckedMs.value = Date.now();
       if (status.loggedIn) {
         markOnline(status);
@@ -260,7 +264,7 @@ export function markLoggedOut(reason: string | null = null): void {
   inflight = null;
   sessionInfo.value = null;
   sessionPhase.value = "offline";
-  sessionError.value = reason;
+  sessionErrorRaw.value = reason;
   lastCheckedMs.value = Date.now();
   clearStatusMessage();
 }

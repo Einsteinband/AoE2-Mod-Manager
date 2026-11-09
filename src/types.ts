@@ -337,8 +337,10 @@ export interface UpdateInfo {
 export interface ModUpdateItem {
   /** 与 ModEntry.id 一致：local:文件夹 / subscribed:文件夹 */
   entryId: string;
-  /** 官方 WorkshopID（工具安装的模组也能拿到，来自 mod_metadata.json） */
+  /** 元数据中的模组 ID（可能为 0，不用于官方匹配） */
   modId: number;
+  /** 官方 WorkshopID（用于匹配 /Installed）；无官方身份时为 0 */
+  workshopId?: number;
   folderName: string;
   hasUpdate: boolean;
   /** 本地 mod-status.json 里的 LastUpdate（毫秒） */
@@ -347,6 +349,8 @@ export interface ModUpdateItem {
   serverLastUpdateMs: number | null;
   /** 服务端没返回这个模组（本地独有 / 未订阅） */
   unknown: boolean;
+  /** 检测分类：matched / known_not_in_installed / no_workshop_id / data_incomplete / detail_failed */
+  category: 'matched' | 'known_not_in_installed' | 'no_workshop_id' | 'data_incomplete' | 'detail_failed';
 }
 
 export interface ModUpdateReport {
@@ -357,6 +361,18 @@ export interface ModUpdateReport {
   serverTotal: number | null;
   /** 实际请求了几页（每页 50 条） */
   pages: number;
+  /** Detail 补充检测：发起了多少次请求 */
+  detailRequested?: number;
+  /** Detail 补充检测：成功返回了多少条 */
+  detailSucceeded?: number;
+  /** Detail 补充检测：失败了多少条 */
+  detailFailed?: number;
+  /** Detail 补充检测：缓存命中数 */
+  detailCacheHit?: number;
+  /** Detail 补充检测：网络请求成功数 */
+  detailNetworkOk?: number;
+  /** Detail 补充检测：网络请求失败数 */
+  detailNetworkFailed?: number;
   items: ModUpdateItem[];
 }
 

@@ -5,8 +5,9 @@
  * 绝不触发重扫 —— 筛选状态、滚动位置、体积统计都不受影响。
  * 统计信息与选中项绑在一起（detail 面板的数据源），所以一起放在这里。
  */
-import { ref, watch, type Ref } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 import { modStats } from "../../api";
+import { translateBackendMessage } from "../../format";
 import { rememberModMeta } from "../../favoriteMeta";
 import type { ModEntry, ModStats, ScanReport } from "../../types";
 import type { SortMode } from "./useSortMode";
@@ -23,7 +24,10 @@ export function useLocalModActions(deps: {
 
   const stats = ref<ModStats | null>(null);
   const statsLoading = ref(false);
-  const statsError = ref<string | null>(null);
+  const statsErrorRaw = ref<string | null>(null);
+  const statsError = computed(() =>
+    statsErrorRaw.value ? translateBackendMessage(statsErrorRaw.value) : null,
+  );
 
   function selectMod(mod: ModEntry): void {
     // 拖拽松手时浏览器仍会补一个 click：这段时间内忽略，避免排序时误切换选中项
@@ -72,7 +76,7 @@ export function useLocalModActions(deps: {
   // 详情统计：跟着选中项走，切换时先清空避免上一份数据残留
   watch(selectedId, async (id) => {
     stats.value = null;
-    statsError.value = null;
+    statsErrorRaw.value = null;
     if (!id) return;
     const mod = report.value?.mods.find((m) => m.id === id);
     if (!mod) return;
@@ -80,7 +84,7 @@ export function useLocalModActions(deps: {
     try {
       stats.value = await modStats(mod.path);
     } catch (e) {
-      statsError.value = deps.normalizeError(e);
+      statsErrorRaw.value = deps.normalizeError(e);
     } finally {
       statsLoading.value = false;
     }

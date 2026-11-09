@@ -628,3 +628,51 @@ export function loadUserData(): Promise<UserDataStore> {
 export function saveUserData(data: UserDataStore): Promise<SaveUserDataReport> {
   return invoke<SaveUserDataReport>("save_user_data", { data });
 }
+
+// ---------------- v0.6：第三方 ZIP 模组导入 ----------------
+
+export interface AnalyzeResult {
+  taskId: string;
+  title: string;
+  author: string;
+  description: string;
+  targetFolder: string;
+  fileCount: number;
+  bytes: number;
+  exists: boolean;
+  fixes: string[];
+}
+
+export interface InstallResult {
+  folderName: string;
+  fileCount: number;
+  bytes: number;
+  backupPath: string | null;
+  warnings: string[];
+}
+
+/** 选择 ZIP 文件并分析（阶段一） */
+export function analyzeLocalZip(zipPath: string): Promise<AnalyzeResult> {
+  return invoke<AnalyzeResult>("analyze_local_zip", { zipPath });
+}
+
+/** 确认安装（阶段二） */
+export function installLocalZip(taskId: string, force?: boolean): Promise<InstallResult> {
+  return invoke<InstallResult>("install_local_zip", { taskId, force: force ?? false });
+}
+
+/** 取消未完成的导入任务 */
+export function cancelImportTask(taskId: string): Promise<void> {
+  return invoke<void>("cancel_import_task", { taskId });
+}
+
+/** 弹出文件选择器选 ZIP */
+export async function pickModZip(): Promise<string | null> {
+  const picked = await open({
+    directory: false,
+    multiple: false,
+    filters: [{ name: "ZIP", extensions: ["zip"] }],
+    title: "Import Mod ZIP",
+  });
+  return typeof picked === "string" ? picked : null;
+}

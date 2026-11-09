@@ -21,7 +21,10 @@ import type { ModSource } from "./types";
  * 只收「句式固定、一句话说得清」的句子；带多段上下文的复杂组合句故意不匹配，
  * 交给下面的片段兜底，避免整句替换把 final_dir / 回退记录之类的信息压掉。
  */
-const BACKEND_PATTERNS: [RegExp, string][] = [
+/** 多参数整句：[正则, key, 捕获组→参数名]；第三项省略时沿用旧的 {detail} 单参数行为 */
+type BackendPattern = [RegExp, string, string[]?];
+
+const BACKEND_PATTERNS: BackendPattern[] = [
   [/^路径不存在[：:]\s*(.+)$/, "pathNotExist"],
   [/^该路径不是文件夹[：:]\s*(.+)$/, "notFolder"],
   [/^该目录下没有 local 或 subscribed 子目录[，,][\s\S]*?[：:]\s*(.+)$/, "noLocalSub"],
@@ -43,13 +46,25 @@ const BACKEND_PATTERNS: [RegExp, string][] = [
   [/^网络配置无效[：:]\s*([\s\S]*)$/, "network"],
   [/^[^。]{0,30}超时[^。]{0,30}[：:，,。][\s\S]*$/, "timeout"],
   [/^未知错误[：:]?[\s\S]*$/, "unknown"],
+  /* 预设应用报告（Rust presets.rs 拼的整句）：6 个数值 + 可选的数据模组子句 */
+  [
+    /^已按预设覆盖配置：启用 (\d+) 个（其中原本已启用 (\d+) 个），禁用 (\d+) 个不在预设中的模组，未找到记录 (\d+) 个([^。]*)。现在共 (\d+) 个模组处于启用状态，请启动游戏确认。$/,
+    "presetApplied",
+    ["enabled", "already", "disabled", "notFound", "extra", "total"],
+  ],
+  /* 预设与现状已一致：没有写文件，也就没有备份 */
+  [
+    /^当前配置已与该预设一致（预设内 (\d+) 个模组已启用，其余均已禁用），未修改文件。([\s\S]*)$/,
+    "presetIdentical",
+    ["enabled", "extra"],
+  ],
 ];
 
 /**
  * 片段兜底：整句没命中（说明 Rust 侧改了句式）时退回关键词替换。
  * 宁可出现中外混排，也绝不吞掉用户需要反馈的关键报错信息。
  */
-const BACKEND_PATTERNS_FALLBACK: [RegExp, string][] = [
+const BACKEND_PATTERNS_FALLBACK: BackendPattern[] = [
   [/^路径不存在[:：]\s*(.+)$/, "pathNotExist"],
   [/^该路径不是文件夹[:：]\s*(.+)$/, "notFolder"],
   [/没有 local 或 subscribed 子目录/, "noLocalSub"],
@@ -111,12 +126,54 @@ function parseBackendCode(raw: string): BackendCodeEnvelope | null {
 }
 
 /**
+ * 递归翻译参数里嵌套的错误码串。
+ *
+ * 复合错误（如 dataDir.migrateRolledBack）会把 move_entry 产出的内层
+ * `aoe2mm:err:…` 整串塞进 {error} 参数。vue-i18n 不会递归插值，必须在这里
+ * 先把内层串翻成当前语言的文案，否则 en/es 界面会看到一段协议串混在中间。
+ */
+function localizeNestedParams(params: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (typeof v === "string" && v.startsWith(BACKEND_CODE_PREFIX)) {
+      out[k] = translateBackendMessage(v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** [i18n Tracker]：非中文环境下，遇到未翻译中文 / 缺失 code 在控制台报警。 */
+const I18N_TRACKER_ENABLED = true;
+
+function trackerWarn(hint: string, raw: string): void {
+  if (!I18N_TRACKER_ENABLED) return;
+  if (i18n.global.locale.value === "zh") return;
+  if (!/[一-龥]/.test(raw)) return;
+  console.warn(`[i18n Tracker] ${hint}:`, raw);
+}
+
+/**
  * 查当前语言包的文案。
  * `translate` 在缺 key 时会把 key 原样返回（且不会走 fallback 之后再兜一层），据此判断“有没有这条文案”。
  */
 function lookupMessage(key: string, params?: Record<string, unknown>): string | null {
   const text = translate(key, params);
   return text === key ? null : text;
+}
+
+/**
+ * 预设报告尾巴上的「数据模组已跳过」子句（Rust 拼在整句后面，本身也是中文）。
+ * 外层整句翻译后，这段要单独转写，否则会留下半个中文尾巴。
+ */
+const PRESET_DATA_MOD_NOTE = /^；游戏同一时间只能加载一个数据模组，已跳过 (\d+) 个（([\s\S]+)）$/;
+
+function localizePresetNote(text: string): string {
+  const m = PRESET_DATA_MOD_NOTE.exec(text ?? "");
+  if (!m) return text;
+  const key = "backendErrors.pattern.presetDataModNote";
+  return lookupMessage(key, { n: m[1], list: m[2] }) ?? text;
 }
 
 export function translateBackendMessage(message: string | null | undefined): string {
@@ -126,9 +183,11 @@ export function translateBackendMessage(message: string | null | undefined): str
   // ① 错误码协议：与界面语言无关，任何语言下都查「当前语言包」的 backendErrors.code
   const envelope = parseBackendCode(raw);
   if (envelope) {
-    const translated = lookupMessage(`backendErrors.code.${envelope.code}`, envelope.params);
+    const localizedParams = localizeNestedParams(envelope.params);
+    const translated = lookupMessage(`backendErrors.code.${envelope.code}`, localizedParams);
     if (translated) return translated;
     // 语言包还没有这个 code 的文案：给出可读提示并保留 code，方便用户反馈定位
+    trackerWarn(`code "${envelope.code}" missing in locale "${i18n.global.locale.value}"`, raw);
     return translate("backendErrors.protocolUnknown", { code: envelope.code });
   }
 
@@ -136,15 +195,45 @@ export function translateBackendMessage(message: string | null | undefined): str
   if (i18n.global.locale.value === "zh") return raw;
 
   // ③ 非中文界面：先跑整句锚定表（整句替换），未命中再跑片段兜底表（该语言缺 key 会先回落 en）
-  for (const [pattern, key] of [...BACKEND_PATTERNS, ...BACKEND_PATTERNS_FALLBACK]) {
+  for (const [pattern, key, named] of [...BACKEND_PATTERNS, ...BACKEND_PATTERNS_FALLBACK]) {
     if (!pattern.test(raw)) continue;
     const templateKey = `backendErrors.pattern.${key}`;
     if (!lookupMessage(templateKey)) return raw;
+    // 多参数整句：按声明顺序把捕获组注入命名占位符
+    if (named?.length) {
+      return raw.replace(pattern, (...args: unknown[]) => {
+        const caps = args.slice(0, named.length + 1) as string[];
+        const params: Record<string, unknown> = {};
+        named.forEach((name, i) => {
+          params[name] = localizePresetNote(caps[i + 1] ?? "");
+        });
+        return translate(templateKey, params);
+      });
+    }
     return raw.replace(pattern, (match: string, detail?: string) =>
       translate(templateKey, { detail: detail ?? match }),
     );
   }
+  trackerWarn("untranslated Chinese backend message", raw);
   return raw;
+}
+
+/**
+ * 统一消息类型：后端错误码 key 对象 或 已翻译字符串。
+ * - 对象形式 `{ key, params }` 由 i18n 翻译。
+ * - 字符串形式视为已经过后端错误翻译，直接展示。
+ */
+export type Msg = { key: string; params?: Record<string, unknown> } | string;
+
+/**
+ * 统一消息格式化：Msg → 可展示字符串。
+ * 字符串直接返回（假定已翻译）；对象走 i18n translate。
+ * 不处理业务专属特殊分支（如 online.netSaved 的 proxy 注入），由调用方自行包装。
+ */
+export function msgText(m: Msg | null | undefined): string {
+  if (!m) return "";
+  if (typeof m === "string") return m;
+  return String(translate(m.key, m.params ?? {}));
 }
 
 /**
@@ -217,4 +306,14 @@ export function initials(name: string): string {
   if (!trimmed) return "?";
   const first = Array.from(trimmed)[0] ?? "?";
   return first.toUpperCase();
+}
+
+/**
+ * 提取原始错误串（不翻译），存进 ref，渲染时再翻译。
+ * 全局通用，所有页面的错误处理都走这里。
+ */
+export function normalizeError(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  try { return JSON.stringify(e); } catch { return "aoe2mm:err:labels.unknown"; }
 }

@@ -134,7 +134,7 @@ export async function setFavorite(
   favorite: boolean,
 ): Promise<boolean> {
   const key = modKey(workshopId);
-  if (!key) throw new Error("This mod has no Workshop ID, so it cannot be favorited");
+  if (!key) throw new Error("aoe2mm:err:userData.localModNoWorkshopId");
   await ensureUserData();
 
   const before = state.mods[key] ? { ...state.mods[key] } : null;
@@ -155,7 +155,7 @@ export async function setCustomName(
   name: string,
 ): Promise<string | null> {
   const key = modKey(workshopId);
-  if (!key) throw new Error("This mod has no Workshop ID, so it cannot be renamed");
+  if (!key) throw new Error("aoe2mm:err:userData.localModNoWorkshopId");
   await ensureUserData();
 
   const trimmed = name.trim();

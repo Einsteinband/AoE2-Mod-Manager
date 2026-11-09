@@ -12,7 +12,8 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { readDetailCache, usableDetailCache } from "../../online/cache";
-import { messageOf } from "../../online/errors";
+import { messageOf, rawMessageOf } from "../../online/errors";
+import { translateBackendMessage } from "../../format";
 import { isNetworkError, isNetworkFailure, noteRequestFailure } from "../../online/networkError";
 import { modDetail } from "../../online/service";
 import {
@@ -82,7 +83,11 @@ export function useOnlineDetail(deps: {
 
   const detail = ref<Record<string, unknown> | null>(null);
   const detailLoading = ref(false);
-  const detailError = ref<string | null>(null);
+  /** 存 raw 错误串，渲染时再 translateBackendMessage，切语言即时跟随。 */
+  const detailErrorRaw = ref<string | null>(null);
+  const detailError = computed(() =>
+    detailErrorRaw.value ? translateBackendMessage(detailErrorRaw.value) : null,
+  );
   /**
    * v3.3：断网 / 已判定网络不可用 + 本地没有该模组详情缓存。
    * 这种情况**不发任何请求**，界面只显示「详情未缓存，请连网后查看」，
@@ -103,7 +108,7 @@ export function useOnlineDetail(deps: {
   watch(selected, (next) => {
     if (next) return;
     detail.value = null;
-    detailError.value = null;
+    detailErrorRaw.value = null;
     detailUncached.value = false;
     detailLoading.value = false;
   });
@@ -116,7 +121,7 @@ export function useOnlineDetail(deps: {
   /** 切换到另一个模组时清掉上一条详情（不发布请求） */
   function resetForSwitch(): void {
     detail.value = null;
-    detailError.value = null;
+    detailErrorRaw.value = null;
     detailUncached.value = false;
     detailLoading.value = false;
     measuredBytes.value = null;
@@ -125,7 +130,7 @@ export function useOnlineDetail(deps: {
   /** 断网兜底文案：只有缓存也没有时才走到这里 */
   function markUncached(): void {
     detail.value = null;
-    detailError.value = null;
+    detailErrorRaw.value = null;
     detailUncached.value = true;
     detailLoading.value = false;
   }
@@ -167,7 +172,7 @@ export function useOnlineDetail(deps: {
       const value = await modDetail(id);
       if (selection.selectedId.value === id) {
         detail.value = value;
-        detailError.value = null;
+        detailErrorRaw.value = null;
       }
     } catch (e) {
       if (selection.selectedId.value === id) {
@@ -176,7 +181,7 @@ export function useOnlineDetail(deps: {
           noteRequestFailure(e);
           markUncached();
         } else {
-          detailError.value = messageOf(e);
+          detailErrorRaw.value = rawMessageOf(e);
         }
       }
     } finally {

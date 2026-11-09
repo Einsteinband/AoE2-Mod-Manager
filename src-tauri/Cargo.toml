@@ -1,6 +1,6 @@
 [package]
 name = "aoe2-mod-manager"
-version = "0.4.8"
+version = "0.5.0"
 description = "AoE2 DE Mod Manager (read-only prototype)"
 authors = ["AoE2 Mod Manager"]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -23,6 +23,9 @@ tauri-plugin-log = "2"
 # 单实例守护：重复双击图标时不再起第二个进程，而是把已有窗口拉到前台。
 # 必须作为 Builder 上**第一个**注册的插件（plugin 内部用命名互斥量 + 事件转发实现）。
 tauri-plugin-single-instance = "2"
+# 主窗口位置/尺寸/最大化状态自动持久化：启动时恢复上次正常关闭时的状态，
+# 移动/缩放后 debounce 自动落盘。filter 只跟踪 label="main"，登录弹窗(ACCOUNT_WINDOW)不记忆。
+tauri-plugin-window-state = "2"
 log = "0.4"
 # 仅用于生成本次运行的日志文件名（本地时区）。
 # tauri-plugin-log 本身已经依赖 time，这里复用同一版本，不会引入新的依赖树。

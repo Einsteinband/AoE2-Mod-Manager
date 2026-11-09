@@ -131,54 +131,11 @@ watch(
       </div>
     </section>
 
-    <!-- ② 操作区（v2.0 前置）：翻译 / 收藏 / 备注 / 安装 / 卸载 / 重装 / 取消下载 / 官网 -->
+    <!-- ② 操作区（v2.0 前置）：主操作 → 常用辅助 → 次要操作 -->
     <section class="dv-zone dv-zone-actions">
       <h4 class="dv-zone-title">{{ t("detailPanel.actions") }}</h4>
 
-      <!-- v0.2.4：一键翻译（手动触发；未点击时绝不发任何翻译请求） -->
-      <div class="translate-row">
-        <button
-          type="button"
-          class="translate-btn"
-          :class="{ active: translateActive }"
-          :disabled="translateDisabled"
-          :title="t('translate.triggerTitle')"
-          @click="emit('translate')"
-        >
-          <span class="translate-icon">🌐</span>
-          {{ translateLabel }}
-        </button>
-        <span v-if="translateProvider" class="translate-note">{{ translateProvider }}</span>
-        <span v-else-if="translateNote" class="translate-note">{{ translateNote }}</span>
-      </div>
-
-      <!-- v0.5：收藏 / 备注名 -->
-      <div class="fav-row">
-        <button
-          type="button"
-          class="fav-btn"
-          :class="{ active: favorited }"
-          :disabled="!canFavorite || favBusy"
-          :title="t('favorites.favoriteTitle')"
-          @click="emit('toggle-favorite')"
-        >
-          <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
-          {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
-        </button>
-        <button
-          type="button"
-          class="fav-btn"
-          :disabled="!canFavorite || renameBusy"
-          :title="t('favorites.renameTitle')"
-          @click="emit('rename')"
-        >
-          <span class="fav-star">📝</span>
-          {{ t("favorites.rename") }}
-        </button>
-      </div>
-      <div v-if="favError" class="online-error">{{ favError }}</div>
-
-      <!-- 主操作：安装（实心金色）/ 卸载（危险红，父组件的二次确认弹窗照常触发） -->
+      <!-- 主操作：安装 / 卸载 / 移出队列 -->
       <div class="detail-actions">
         <!-- 排队中：按钮依然可点（点它 = 移出队列），用户可立即去操作别的模组 -->
         <button
@@ -201,17 +158,6 @@ watch(
         </button>
         <button v-else type="button" class="danger" :disabled="subscribeBusy" @click="emit('uninstall')">
           {{ subscribeLabel }}
-        </button>
-        <!-- 已安装到本地时：卸载按钮右侧直接定位到磁盘上的模组文件夹 -->
-        <button
-          v-if="primaryAction === 'uninstall-local'"
-          type="button"
-          class="dv-btn-ghost"
-          :disabled="revealingFolder"
-          :title="t('detail.openFolder')"
-          @click="emit('reveal-folder')"
-        >
-          {{ revealingFolder ? t("detail.opening") : t("detail.openFolder") }}
         </button>
       </div>
 
@@ -237,27 +183,48 @@ watch(
 
       <div v-if="installError" class="online-error">{{ installError }}</div>
 
-      <!-- 安装成功后的详细报告（Final location / mod-status.json backup / 解压字节数等）
-           对用户无价值，已隐藏；installNote prop 保留不渲染，避免改父组件传参。 -->
-    </section>
+      <!-- 常用辅助操作：收藏 + 翻译 -->
+      <div class="dv-action-row dv-action-secondary">
+        <button
+          type="button"
+          class="fav-btn"
+          :class="{ active: favorited }"
+          :disabled="!canFavorite || favBusy"
+          :title="t('favorites.favoriteTitle')"
+          @click="emit('toggle-favorite')"
+        >
+          <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
+          {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
+        </button>
+        <button
+          type="button"
+          class="fav-btn"
+          :class="{ active: translateActive }"
+          :disabled="translateDisabled"
+          :title="t('translate.triggerTitle')"
+          @click="emit('translate')"
+        >
+          <span class="fav-star">🌐</span>
+          {{ translateLabel }}
+        </button>
+      </div>
+      <div v-if="favError" class="online-error">{{ favError }}</div>
+      <div v-if="translateProvider" class="translate-note-row">
+        <span class="translate-note">{{ translateProvider }}</span>
+      </div>
 
-    <!-- ③ 描述区（v2.1）：夹在主操作与其他操作之间，长文本折叠 -->
-    <section class="dv-zone dv-zone-desc">
-      <h4 class="dv-zone-title">{{ t("online.description") }}</h4>
-      <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
-      <div v-else-if="detailLoading" class="note">{{ t("online.loading") }}</div>
-      <div v-else-if="detailError" class="note">{{ detailError }}</div>
-      <div v-else-if="detailUncached" class="note">{{ t("online.detailUncached") }}</div>
-      <div v-else class="note">{{ t("online.noDetail") }}</div>
-      <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
-        {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}
-      </button>
-    </section>
-
-    <!-- ④ 其他操作（v2.1 后置）：重装 / 取消下载 / 在网站浏览 -->
-    <section class="dv-zone dv-zone-actions">
-      <h4 class="dv-zone-title">{{ t("detailPanel.moreActions") }}</h4>
+      <!-- 次要操作：打开文件夹 + 网站浏览 + 重装 + 更多操作（备注名） -->
       <div class="detail-actions">
+        <button
+          v-if="primaryAction === 'uninstall-local'"
+          type="button"
+          class="dv-btn-ghost"
+          :disabled="revealingFolder"
+          :title="t('detail.openFolder')"
+          @click="emit('reveal-folder')"
+        >
+          {{ revealingFolder ? t("detail.opening") : t("detail.openFolder") }}
+        </button>
         <button
           v-if="localEntry"
           type="button"
@@ -279,7 +246,35 @@ watch(
         <button type="button" class="dv-btn-ghost" :disabled="openingWeb" @click="emit('open-webpage')">
           {{ t("online.browseSite") }}
         </button>
+        <details class="more-actions">
+          <summary class="dv-btn-ghost more-actions-summary">
+            ⋯ {{ t("detailPanel.more") }}
+          </summary>
+          <div class="more-actions-menu">
+            <button
+              type="button"
+              :disabled="!canFavorite || renameBusy"
+              :title="t('favorites.renameTitle')"
+              @click="emit('rename'); ($event.currentTarget as HTMLButtonElement).closest('details')!.open = false"
+            >
+              📝 {{ t("favorites.rename") }}
+            </button>
+          </div>
+        </details>
       </div>
+    </section>
+
+    <!-- ③ 描述区（v2.1）：夹在主操作与其他操作之间，长文本折叠 -->
+    <section class="dv-zone dv-zone-desc">
+      <h4 class="dv-zone-title">{{ t("online.description") }}</h4>
+      <div v-if="descText" class="dv-desc" :class="{ clamped: descClamped }">{{ descText }}</div>
+      <div v-else-if="detailLoading" class="note">{{ t("online.loading") }}</div>
+      <div v-else-if="detailError" class="note">{{ detailError }}</div>
+      <div v-else-if="detailUncached" class="note">{{ t("online.detailUncached") }}</div>
+      <div v-else class="note">{{ t("online.noDetail") }}</div>
+      <button v-if="descLong" type="button" class="dv-desc-toggle" @click="descExpanded = !descExpanded">
+        {{ descExpanded ? t("detailPanel.collapse") : t("detailPanel.expand") }}
+      </button>
     </section>
 
     <!-- ⑤ 状态区：本机安装状态 / 是否可更新 -->
@@ -424,5 +419,66 @@ watch(
   font-size: calc(11.5px * var(--global-scale));
   line-height: 1.6;
   color: var(--danger-text);
+}
+
+/* 更多操作下拉菜单 */
+.more-actions {
+  position: relative;
+}
+.more-actions-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.more-actions-summary::-webkit-details-marker {
+  display: none;
+}
+.more-actions-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 140px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 20px rgba(var(--shadow-rgb), 0.4);
+  z-index: 10;
+  padding: 4px 0;
+}
+.more-actions-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--parch);
+  font-size: calc(12px * var(--global-scale));
+  cursor: pointer;
+  white-space: nowrap;
+}
+.more-actions-menu button:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--gold-text);
+}
+.more-actions-menu button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 辅助操作行统一间距 */
+.dv-action-secondary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.translate-note-row {
+  margin-top: 4px;
+}
+.translate-note {
+  font-size: calc(11px * var(--global-scale));
+  color: var(--muted);
 }
 </style>

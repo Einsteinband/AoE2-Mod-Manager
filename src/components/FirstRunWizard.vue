@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { detectRootCandidates, pickFolder, setModRoot } from "../api";
+import { translateBackendMessage } from "../format";
 import type { RootCandidate, ScanReport } from "../types";
 
 const emit = defineEmits<{
@@ -150,7 +151,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
           </div>
         </div>
 
-        <div v-if="error" class="preset-alert error">{{ error }}</div>
+        <div v-if="error" class="preset-alert error">{{ translateBackendMessage(error) }}</div>
 
         <div class="wizard-actions">
           <button type="button" class="primary" :disabled="browseBusy || busyPath !== null" @click="browse">
@@ -165,3 +166,143 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
     </div>
   </div>
 </template>
+
+<style scoped>
+.modal.wizard-modal {
+  width: min(720px, 100%);
+}
+.wizard-intro {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--gold-dim);
+  border-radius: 4px;
+  padding: 10px 14px;
+  background: var(--panel-lo);
+}
+.wizard-intro p {
+  margin: 0 0 6px;
+  font-size: calc(12.5px * var(--global-scale));
+  line-height: 1.8;
+  color: var(--parch-dim);
+}
+.wizard-intro p:last-child {
+  margin-bottom: 0;
+}
+.wizard-intro strong {
+  color: var(--gold-text);
+  font-weight: var(--ui-font-weight-strong);
+}
+.wizard-intro code,
+.wizard-state code {
+  font-family: var(--font-mono);
+  font-size: calc(11.5px * var(--global-scale));
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text-soft);
+}
+
+.wizard-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  font-size: calc(12px * var(--global-scale));
+  line-height: 1.8;
+  color: var(--muted);
+}
+.wizard-state .actions {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.wizard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wizard-list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wizard-list-head h3 {
+  margin: 0;
+  font-size: calc(13px * var(--global-scale));
+  letter-spacing: calc(0.8px * var(--ui-tracking));
+  color: var(--gold);
+  font-weight: var(--ui-font-weight-strong);
+}
+
+.wizard-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-grad-bottom));
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.wizard-card:hover {
+  border-color: var(--gold-dim);
+}
+.wizard-card.recommended {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.08);
+}
+.wizard-card-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.wizard-path {
+  font-family: var(--font-mono);
+  font-size: calc(11.5px * var(--global-scale));
+  color: var(--parch);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: ltr;
+}
+.wizard-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.wizard-card > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.chip {
+  font-family: var(--app-font-family);
+  font-size: calc(10px * var(--global-scale));
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+}
+.chip.on {
+  border-color: var(--ok-border);
+  color: var(--ok-text);
+  background: rgba(var(--ok-rgb), 0.12);
+}
+
+.wizard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line-soft);
+}
+.wizard-actions .note {
+  margin-left: auto;
+}
+</style>

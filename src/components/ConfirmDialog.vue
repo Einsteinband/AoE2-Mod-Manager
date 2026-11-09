@@ -60,3 +60,36 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
     </div>
   </div>
 </template>
+
+<style scoped>
+.modal.confirm-modal {
+  width: min(460px, 100%);
+}
+.confirm-text {
+  margin: 0;
+  font-size: calc(12.5px * var(--global-scale));
+  line-height: 1.9;
+  color: var(--parch-dim);
+  white-space: pre-line;
+}
+.confirm-detail {
+  margin: 0;
+  padding: 7px 9px;
+  font-size: calc(11px * var(--global-scale));
+  color: var(--muted);
+  background: var(--bg-canvas);
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+.confirm-actions button {
+  padding: 5px 15px;
+  font-size: calc(11.5px * var(--global-scale));
+  letter-spacing: calc(1px * var(--ui-tracking));
+}
+</style>

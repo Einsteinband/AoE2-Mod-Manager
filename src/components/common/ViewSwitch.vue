@@ -38,7 +38,8 @@ function setView(next: "grid" | "list") {
       :aria-pressed="viewMode === 'grid'"
       @click="setView('grid')"
     >
-      {{ t("viewSwitch.grid") }}
+      <span class="view-icon">▦</span>
+      <span class="view-text">{{ t("viewSwitch.grid") }}</span>
     </button>
     <button
       type="button"
@@ -48,7 +49,8 @@ function setView(next: "grid" | "list") {
       :aria-pressed="viewMode === 'list'"
       @click="setView('list')"
     >
-      {{ t("viewSwitch.list") }}
+      <span class="view-icon">☰</span>
+      <span class="view-text">{{ t("viewSwitch.list") }}</span>
     </button>
   </div>
 </template>
@@ -67,9 +69,14 @@ function setView(next: "grid" | "list") {
   background: var(--bg-panel-deep);
 }
 .view-switch .view-btn {
-  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 10px;
+  height: 32px;
   font-size: 11.5px;
-  line-height: 1.45;
+  line-height: 1;
   letter-spacing: calc(0.8px * var(--ui-tracking));
   white-space: nowrap;
   border: none;
@@ -77,6 +84,12 @@ function setView(next: "grid" | "list") {
   background: transparent;
   color: var(--muted);
   box-shadow: none;
+}
+.view-switch .view-icon {
+  font-size: 14px;
+}
+.view-switch .view-text {
+  display: inline;
 }
 .view-switch .view-btn + .view-btn {
   border-left: 1px solid var(--line);
@@ -92,5 +105,16 @@ function setView(next: "grid" | "list") {
 }
 .view-switch .view-btn:active {
   transform: none;
+}
+
+/* 窄窗口：只显示图标，隐藏文字 */
+@media (max-width: 920px) {
+  .view-switch .view-text {
+    display: none;
+  }
+  .view-switch .view-btn {
+    width: 28px;
+    padding: 0;
+  }
 }
 </style>

@@ -11,15 +11,18 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { detectRootCandidates, pickFolder, scanMods, setModRoot } from "../../api";
-import { formatDateTime, normalizeBackendError } from "../../format";
+import { formatDateTime, translateBackendMessage, normalizeError } from "../../format";
 import type { ModEntry, ScanReport } from "../../types";
 
+/** 提取原始错误串（不翻译），存进 ref，渲染时再翻译。 */
 export function useLocalScan() {
   const { t } = useI18n();
 
   const report = ref<ScanReport | null>(null);
   const loading = ref(false);
-  const error = ref<string | null>(null);
+  const errorRaw = ref<string | null>(null);
+  /** 存 raw 错误串，渲染时再翻译，切语言即时跟随。 */
+  const error = computed(() => errorRaw.value ? translateBackendMessage(errorRaw.value) : null);
   const candidates = ref<string[]>([]);
   const choosingRoot = ref(false);
   /** 首次启动引导：没有可用根目录时自动弹出 */
@@ -27,7 +30,7 @@ export function useLocalScan() {
   const selectedId = ref<string | null>(null);
 
   const mods = computed<ModEntry[]>(() => report.value?.mods ?? []);
-  const warnings = computed<string[]>(() => report.value?.warnings ?? []);
+  const warnings = computed<string[]>(() => (report.value?.warnings ?? []).map(translateBackendMessage));
   const selected = computed<ModEntry | null>(
     () => mods.value.find((m) => m.id === selectedId.value) ?? null,
   );
@@ -35,8 +38,8 @@ export function useLocalScan() {
     report.value ? formatDateTime(report.value.scannedAtMs) : t("rootbar.neverScanned"),
   );
 
-  /** 后端异常 → 可展示文案（本地页所有错误提示的唯一出口） */
-  const normalizeError = normalizeBackendError;
+  /** 后端异常 → raw 错误串（本地页所有错误提示的唯一出口） */
+  // normalizeError 已抽离到 format.ts，全局通用
 
   /** 探测候选根目录（只读注册表 / 常见路径，不走网络） */
   async function loadCandidates(): Promise<void> {
@@ -49,7 +52,7 @@ export function useLocalScan() {
    */
   async function refresh(root?: string | null): Promise<void> {
     loading.value = true;
-    error.value = null;
+    errorRaw.value = null;
     try {
       const next = await scanMods(root);
       report.value = next;
@@ -57,7 +60,7 @@ export function useLocalScan() {
         selectedId.value = next.mods[0]?.id ?? null;
       }
     } catch (e) {
-      error.value = normalizeError(e);
+      errorRaw.value = normalizeError(e);
     } finally {
       loading.value = false;
     }
@@ -71,13 +74,13 @@ export function useLocalScan() {
       const picked = await pickFolder(report.value?.root ?? candidates.value[0] ?? null);
       if (!picked) return;
       loading.value = true;
-      error.value = null;
+      errorRaw.value = null;
       const next = await setModRoot(picked);
       report.value = next;
       selectedId.value = next.mods[0]?.id ?? null;
       if (!candidates.value.includes(picked)) candidates.value.unshift(picked);
     } catch (e) {
-      error.value = normalizeError(e);
+      errorRaw.value = normalizeError(e);
     } finally {
       choosingRoot.value = false;
       loading.value = false;
@@ -95,7 +98,7 @@ export function useLocalScan() {
     if (!mod) return;
     mod.enabled = enabled;
     mod.issues = mod.issues.filter(
-      (issue) => !issue.startsWith("mod-status.json 中没有该模组的记录"),
+      (issue) => !issue.startsWith("aoe2mm:err:scan.notInStatus"),
     );
   }
 
@@ -103,7 +106,7 @@ export function useLocalScan() {
   function handleWizardDone(next: ScanReport): void {
     report.value = next;
     selectedId.value = next.mods[0]?.id ?? null;
-    error.value = null;
+    errorRaw.value = null;
     showWizard.value = false;
     if (next.root && !candidates.value.includes(next.root)) candidates.value.unshift(next.root);
   }
@@ -114,6 +117,7 @@ export function useLocalScan() {
     warnings,
     loading,
     error,
+    errorRaw: errorRaw,
     candidates,
     choosingRoot,
     showWizard,

@@ -1,7 +1,7 @@
 {
   "name": "aoe2-mod-manager",
   "private": true,
-  "version": "0.4.8",
+  "version": "0.5.0",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
-    "icons": "node scripts/gen-icons.mjs"
+    "icons": "node scripts/gen-icons.mjs",
+    "test": "vitest run",
+    "check:ui": "npm run test && npx vue-tsc --noEmit && npm run build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
@@ -23,8 +25,11 @@
     "@tauri-apps/cli": "^2.12.4",
     "@types/sortablejs": "^1.15.8",
     "@vitejs/plugin-vue": "^6.0.10",
+    "@vue/test-utils": "^2.5.1",
+    "jsdom": "^31.0.0",
     "typescript": "^5.9.3",
     "vite": "^8.3.5",
+    "vitest": "^5.1.0",
     "vue-tsc": "^3.3.13"
   }
 }

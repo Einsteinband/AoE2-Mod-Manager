@@ -62,3 +62,19 @@ defineExpose({ scrollEl, gridEl });
     <slot name="foot" />
   </div>
 </template>
+
+<style scoped>
+.grid-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+  padding: 6px var(--layout-page-pad-x, 18px) 26px;
+}
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(var(--card-size, 200px), 100%), 1fr));
+  gap: 12px;
+}
+</style>

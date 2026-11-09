@@ -43,7 +43,7 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 
 ### Online mods (official service)
 - Search, browse and install mods from `api.ageofempires.com`, with the official categories, sort options and pagination.
-- Sign-in happens in an embedded WebView2 window on the official Microsoft / Steam / PlayStation pages. **This app never asks for or stores your password.** The session cookie can optionally be cached locally with Windows DPAPI (remember-me).
+- Sign-in happens in an embedded WebView2 window on the official Microsoft / Xbox page. **This app never asks for or stores your password.** The session cookie can optionally be cached locally with Windows DPAPI (remember-me).
 - Installed mods are placed in `local/` so the game can enable them immediately.
 - Network settings: follow the Windows system proxy automatically, or set a manual proxy (useful for players behind a proxy).
 
@@ -71,9 +71,9 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 
 ## Install
 
-**Installer** — run `AoE2 Mod Manager_0.1.0_x64-setup.exe`, choose *all users* or *current user*, then pick any install folder (any drive works).
+**Installer** — run `AoE2 Mod Manager_<version>_x64-setup.exe`, choose *all users* or *current user*, then pick any install folder (any drive works).
 
-**Portable** — extract `AoE2ModManager-0.1.0-win-x64-portable.zip` anywhere and run `aoe2-mod-manager.exe`. Keep `WebView2Loader.dll` next to the executable.
+**Portable** — extract `AoE2ModManager-<version>-win-x64-portable.zip` anywhere and run `aoe2-mod-manager.exe`. Keep `WebView2Loader.dll` next to the executable.
 
 Settings, presets and the optional login cache are stored in `%APPDATA%\com.aoe2.modmanager` in both cases.
 
@@ -129,37 +129,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-toolchain.ps1
 
 ## Project structure
 
-```
-F:\AoE2ModManager
-├─ src/                          frontend
-│  ├─ App.vue                    three-column layout, top bar, filters, wizard host
-│  ├─ components/
-│  │  ├─ ModCard.vue             local mod card
-│  │  ├─ ModDetail.vue           local mod detail panel
-│  │  ├─ OnlineBrowser.vue       online tab (search / list / detail / install)
-│  │  ├─ OnlineModCard.vue       online mod card
-│  │  ├─ PresetManager.vue       preset modal
-│  │  ├─ FirstRunWizard.vue      first-run mod-root wizard
-│  │  └─ ConfirmDialog.vue       parchment confirmation dialog
-│  ├─ i18n/
-│  │  ├─ index.ts                auto-loading locale registry
-│  │  └─ locales/{en,zh}.ts      language packs (one file per language)
-│  ├─ online/                    official API client, types, tag localization
-│  ├─ api.ts / types.ts / format.ts
-│  └─ style.css                  dark parchment theme
-├─ src-tauri/
-│  ├─ src/scan.rs                mod scanning, info.json / mod-status.json parsing
-│  ├─ src/settings.rs            settings, mod-root auto-detection (registry + Steam VDF)
-│  ├─ src/presets.rs             presets and batch restore with backup / rollback
-│  ├─ src/install.rs             download → extract → install → write mod-status.json
-│  ├─ src/online/                official service client, session (WebView2 + DPAPI)
-│  ├─ src/net.rs                 proxy resolution (manual / system registry / env)
-│  ├─ src/metadata.rs            own mod metadata (official tags)
-│  ├─ src/lib.rs                 Tauri commands
-│  └─ build.rs                   manifest injection, WebView2Loader.dll staging
-├─ scripts/                      icons, portable packaging, screenshot, toolchain patch
-└─ docs/
-```
+See [`PROJECT_STRUCTURE.md`](./PROJECT_STRUCTURE.md) for the current directory layout, module responsibilities, and data flow between the Vue frontend and the Rust backend.
 
 ---
 

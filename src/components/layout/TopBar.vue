@@ -30,7 +30,12 @@ const { t } = useI18n();
     <div class="brand">
       <span class="crest">⚔</span>
       <div>
-        <h1>{{ t("app.name") }}</h1>
+        <h1>
+          <span class="name-full">{{ t("app.name") }}</span>
+          <span class="name-2">{{ t("app.nameShort2") }}</span>
+          <span class="name-3">{{ t("app.mediumName") }}</span>
+          <span class="name-4">{{ t("app.shortName") }}</span>
+        </h1>
         <p class="tagline">
           {{ t("app.taglinePrefix") }}<a
             class="author-link"
@@ -45,10 +50,12 @@ const { t } = useI18n();
 
     <nav class="mode-tabs">
       <button type="button" :class="{ active: mode === 'local' }" @click="mode = 'local'">
-        {{ t("nav.local") }}
+        <span class="nav-full">{{ t("nav.local") }}</span>
+        <span class="nav-short">{{ t("nav.localShort") }}</span>
       </button>
       <button type="button" :class="{ active: mode === 'online' }" @click="mode = 'online'">
-        {{ t("nav.online") }}
+        <span class="nav-full">{{ t("nav.online") }}</span>
+        <span class="nav-short">{{ t("nav.onlineShort") }}</span>
       </button>
     </nav>
 

@@ -103,10 +103,14 @@ const networkDownHint = computed(() => {
 });
 
 const accountText = computed(() => {
-  if (isNetworkError.value) return networkDownLabel.value;
-  if (sessionPhase.value === "online") return t("statusbar.onlineShort");
+  // 已登录：网络错误优先显示网络提示
+  if (sessionPhase.value === "online") {
+    if (isNetworkError.value) return networkDownLabel.value;
+    return t("statusbar.onlineShort");
+  }
   if (sessionPhase.value === "checking") return t("statusbar.checkingShort");
-  return t("statusbar.offline");
+  // 未登录：不管网络通不通，只显示"离线 · 未登录"，不再提网络问题（误导用户）
+  return t("statusbar.offlineNotLoggedIn");
 });
 
 /** 悬停显示来源 + Cookie 数（按需求不抓 Xbox 名字，避免官网改版失效） */
@@ -219,7 +223,7 @@ async function probeNetworkNow(): Promise<boolean> {
   } catch (e) {
     // 失败已由 service 的 tracked() 记进全局标志；这里只补记超时（tracked 收不到 race 的超时）
     if (e instanceof Error && e.message === "__probe_timeout__") {
-      noteRequestFailure({ kind: "timeout", message: `校验连接超时（${PROBE_TIMEOUT_MS / 1000}s）` });
+      noteRequestFailure({ kind: "timeout", message: t("statusbar.probeTimeout", { seconds: PROBE_TIMEOUT_MS / 1000 }) });
     }
     lastProbeOk.value = false;
     return false;

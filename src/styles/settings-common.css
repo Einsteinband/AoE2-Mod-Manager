@@ -1,0 +1,243 @@
+/**
+ * Settings 弹窗公共基础样式
+ * 所有 Tab 共用的行/按钮/滑块/标签等基础样式
+ * 从 SettingsModal.vue 抽离，供各 Tab 子组件复用
+ */
+
+.settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-lo);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.06);
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  min-width: 0;
+  font-size: calc(11px * var(--global-scale));
+  font-weight: var(--ui-font-weight-strong);
+  letter-spacing: calc(2px * var(--ui-tracking));
+  text-transform: uppercase;
+  color: var(--gold-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.settings-group-title::after {
+  content: "";
+  flex: 1 1 auto;
+  min-width: 12px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line), transparent);
+}
+
+.row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.row-title {
+  font-size: calc(12.5px * var(--global-scale));
+  letter-spacing: calc(0.8px * var(--ui-tracking));
+  color: var(--parch);
+}
+.row-note {
+  font-size: calc(11px * var(--global-scale));
+  color: var(--muted);
+  line-height: 1.6;
+}
+.row-note.mono {
+  font-family: var(--font-mono);
+  font-size: calc(10.5px * var(--global-scale));
+  word-break: break-all;
+  color: var(--parch-dim);
+}
+
+.settings-select,
+.settings-input {
+  padding: 7px 9px;
+  font-size: calc(12px * var(--global-scale));
+}
+.settings-select {
+  min-width: 120px;
+}
+.settings-input {
+  width: 100%;
+}
+.typography-select {
+  min-width: 108px;
+  max-width: 132px;
+}
+
+.settings-sep {
+  height: 1px;
+  background: var(--line-soft);
+  margin: 2px 0;
+}
+
+.settings-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
+  cursor: pointer;
+}
+.settings-check:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-segment {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel-lo);
+}
+.settings-segment-btn {
+  min-width: 74px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--parch-dim);
+  letter-spacing: calc(0.8px * var(--ui-tracking));
+  cursor: pointer;
+}
+.settings-segment-btn:hover:not(.active) {
+  color: var(--parch);
+  background: var(--bg-hover);
+}
+.settings-segment-btn.active {
+  color: var(--text-on-accent);
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  border-color: var(--gold-dim);
+  font-weight: var(--ui-font-weight-strong);
+}
+
+.settings-range-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.settings-range {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 1 150px;
+  width: 150px;
+  min-width: 90px;
+  height: 4px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--gold-dim), var(--gold));
+  cursor: pointer;
+}
+.settings-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1px solid var(--gold-bright);
+  background: var(--bg-panel-deep);
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.7);
+}
+.settings-range::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.95);
+}
+.settings-range-value {
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: right;
+  font-size: calc(11.5px * var(--global-scale));
+  color: var(--gold-text);
+  letter-spacing: calc(0.6px * var(--ui-tracking));
+}
+
+.settings-status {
+  margin: 0;
+  font-size: calc(11.5px * var(--global-scale));
+  line-height: 1.7;
+  color: var(--muted);
+  letter-spacing: calc(0.4px * var(--ui-tracking));
+}
+.settings-status.ok {
+  color: var(--ok-text);
+}
+.settings-status.bad {
+  color: var(--danger-text);
+}
+
+.settings-summary {
+  margin: 0;
+  font-size: calc(11.5px * var(--global-scale));
+  line-height: 1.7;
+  color: var(--gold-text);
+}
+
+.settings-check-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: calc(12px * var(--global-scale));
+  color: var(--parch-dim);
+  cursor: pointer;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+}
+.settings-actions button {
+  padding: 7px 14px;
+  letter-spacing: calc(0.8px * var(--ui-tracking));
+  cursor: pointer;
+}
+
+.settings-msg {
+  font-size: calc(11.5px * var(--global-scale));
+}
+.settings-msg.error {
+  color: var(--danger-text);
+}
+
+.settings-hint {
+  font-size: calc(11px * var(--global-scale));
+  opacity: 0.7;
+  margin: 0;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(0, 0, 0, 0.2);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: aoe2-spin 0.8s linear infinite;
+}
+@keyframes aoe2-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

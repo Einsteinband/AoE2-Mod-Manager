@@ -43,7 +43,7 @@
 
 ### 在线模组（官方服务）
 - 搜索、浏览、安装 `api.ageofempires.com` 上的模组，支持官方分类、排序与分页。
-- 登录在内置 WebView2 窗口里走微软 / Steam / PlayStation 官方页面，**本应用不会索取也不会看到密码**；会话 Cookie 可选用 Windows DPAPI 加密缓存（记住登录）。
+- 登录在内置 WebView2 窗口里走微软 / Xbox 官方页面，**本应用不会索取也不会看到密码**；会话 Cookie 可选用 Windows DPAPI 加密缓存（记住登录）。
 - 安装完成后模组落在 `local/`，可直接在游戏内启用。
 - 网络设置：默认自动跟随 Windows 系统代理，也可手动指定代理。
 
@@ -71,9 +71,9 @@
 
 ## 安装
 
-**安装包** —— 运行 `AoE2 Mod Manager_0.1.0_x64-setup.exe`，选择"所有用户 / 仅当前用户"，再选择安装目录（任意盘符均可）。
+**安装包** —— 运行 `AoE2 Mod Manager_<version>_x64-setup.exe`，选择"所有用户 / 仅当前用户"，再选择安装目录（任意盘符均可）。
 
-**免安装版** —— 解压 `AoE2ModManager-0.1.0-win-x64-portable.zip` 到任意位置，运行 `aoe2-mod-manager.exe`；`WebView2Loader.dll` 必须与 exe 放在同一目录。
+**免安装版** —— 解压 `AoE2ModManager-<version>-win-x64-portable.zip` 到任意位置，运行 `aoe2-mod-manager.exe`；`WebView2Loader.dll` 必须与 exe 放在同一目录。
 
 两种方式的配置、预设与登录缓存都保存在 `%APPDATA%\com.aoe2.modmanager`。
 
@@ -129,37 +129,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup-toolchain.ps1
 
 ## 目录结构
 
-```
-F:\AoE2ModManager
-├─ src/                          前端
-│  ├─ App.vue                    三栏布局、顶栏、筛选与向导承载
-│  ├─ components/
-│  │  ├─ ModCard.vue             本地模组卡片
-│  │  ├─ ModDetail.vue           本地模组详情面板
-│  │  ├─ OnlineBrowser.vue       在线页（搜索 / 列表 / 详情 / 安装）
-│  │  ├─ OnlineModCard.vue       在线模组卡片
-│  │  ├─ PresetManager.vue       预设管理弹窗
-│  │  ├─ FirstRunWizard.vue      首次启动根目录向导
-│  │  └─ ConfirmDialog.vue       羊皮纸风二次确认
-│  ├─ i18n/
-│  │  ├─ index.ts                语言包自动加载器
-│  │  └─ locales/{en,zh}.ts      语言包（每种语言一个文件）
-│  ├─ online/                    官方接口客户端、类型、分类本地化
-│  ├─ api.ts / types.ts / format.ts
-│  └─ style.css                  深色羊皮纸主题
-├─ src-tauri/
-│  ├─ src/scan.rs                模组扫描、info.json / mod-status.json 解析
-│  ├─ src/settings.rs            配置持久化、根目录自动探测（注册表 + Steam VDF）
-│  ├─ src/presets.rs             预设与批量恢复（备份 / 回滚）
-│  ├─ src/install.rs             下载 → 解压 → 安装 → 写 mod-status.json
-│  ├─ src/online/                官方服务客户端、会话（WebView2 + DPAPI）
-│  ├─ src/net.rs                 代理解析（手动 / 系统注册表 / 环境变量）
-│  ├─ src/metadata.rs            自有元数据（官方 Tag）
-│  ├─ src/lib.rs                 Tauri 命令
-│  └─ build.rs                   manifest 注入、WebView2Loader.dll 复制
-├─ scripts/                      图标、免安装打包、截图、工具链补丁
-└─ docs/
-```
+详见 [`PROJECT_STRUCTURE.md`](./PROJECT_STRUCTURE.md)，包含当前目录布局、各模块职责以及 Vue 前端与 Rust 后端之间的数据流。
 
 ---
 

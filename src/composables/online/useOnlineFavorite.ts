@@ -6,7 +6,8 @@
  */
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { messageOf } from "../../online/errors";
+import { rawMessageOf } from "../../online/errors";
+import { translateBackendMessage } from "../../format";
 import { customNameOf, isFavorite, setCustomName, setFavorite } from "../../userData";
 import { rememberOnlineMeta } from "../../favoriteMeta";
 import type { OnlineSelection } from "./useOnlineSelection";
@@ -19,10 +20,16 @@ export function useOnlineFavorite(deps: {
   const { selection } = deps;
 
   const favBusy = ref(false);
-  const favError = ref<string | null>(null);
+  const favErrorRaw = ref<string | null>(null);
+  const favError = computed(() =>
+    favErrorRaw.value ? translateBackendMessage(favErrorRaw.value) : null,
+  );
   const renameOpen = ref(false);
   const renameBusy = ref(false);
-  const renameError = ref<string | null>(null);
+  const renameErrorRaw = ref<string | null>(null);
+  const renameError = computed(() =>
+    renameErrorRaw.value ? translateBackendMessage(renameErrorRaw.value) : null,
+  );
 
   const canFavorite = computed(() => (selection.selected.value?.modId ?? 0) > 0);
   const favorited = computed(() => isFavorite(selection.selected.value?.modId));
@@ -32,7 +39,7 @@ export function useOnlineFavorite(deps: {
     const mod = selection.selected.value;
     if (!mod || favBusy.value) return;
     favBusy.value = true;
-    favError.value = null;
+    favErrorRaw.value = null;
     try {
       const next = await setFavorite(mod.modId, !favorited.value);
       // v0.6：收藏那一刻就把标题 / 作者 / 分类 / 封面记进本地元数据缓存，
@@ -40,7 +47,7 @@ export function useOnlineFavorite(deps: {
       if (next) rememberOnlineMeta(mod);
       deps.showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
     } catch (e) {
-      favError.value = messageOf(e);
+      favErrorRaw.value = rawMessageOf(e);
     } finally {
       favBusy.value = false;
     }
@@ -48,7 +55,7 @@ export function useOnlineFavorite(deps: {
 
   function openRename(): void {
     if (!selection.selected.value) return;
-    renameError.value = null;
+    renameErrorRaw.value = null;
     renameOpen.value = true;
   }
 
@@ -60,13 +67,13 @@ export function useOnlineFavorite(deps: {
     const mod = selection.selected.value;
     if (!mod || renameBusy.value) return;
     renameBusy.value = true;
-    renameError.value = null;
+    renameErrorRaw.value = null;
     try {
       await setCustomName(mod.modId, name);
       renameOpen.value = false;
       deps.showToast(t("favorites.savedToast"));
     } catch (e) {
-      renameError.value = messageOf(e);
+      renameErrorRaw.value = rawMessageOf(e);
     } finally {
       renameBusy.value = false;
     }
@@ -74,7 +81,7 @@ export function useOnlineFavorite(deps: {
 
   /** 切换到另一个模组时收起备注名弹窗（与旧实现一致：只在切换时重置） */
   function resetForSwitch(): void {
-    favError.value = null;
+    favErrorRaw.value = null;
     renameOpen.value = false;
   }
 

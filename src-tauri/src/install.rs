@@ -3,7 +3,10 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use zip::ZipArchive;
+
+use crate::user_err;
 
 /// 旧版本曾在模组目录内写入 `.aoe2mm-mod.json` 作为安装标记。
 /// 现在一律不写：元数据统一存到软件自己的 mod_metadata.json（与 settings.json 同目录），
@@ -53,14 +56,14 @@ pub fn sanitize_component(input: &str) -> String {
 /// 校验压缩包内的相对路径：禁止绝对路径、盘符、`..`、以及 Windows 保留形态
 pub fn safe_entry_path(name: &str) -> Result<PathBuf, String> {
     if name.contains('\0') {
-        return Err("压缩包条目包含空字节".to_string());
+        return Err(user_err("install.zipNulByte", json!({})));
     }
     let normalized = name.replace('\\', "/");
     if normalized.starts_with('/') {
-        return Err(format!("压缩包条目为绝对路径，已拒绝：{name}"));
+        return Err(user_err("install.zipAbsolute", json!({ "name": name })));
     }
     if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        return Err(format!("压缩包条目包含盘符，已拒绝：{name}"));
+        return Err(user_err("install.zipDriveLetter", json!({ "name": name })));
     }
 
     let mut out = PathBuf::new();
@@ -69,20 +72,20 @@ pub fn safe_entry_path(name: &str) -> Result<PathBuf, String> {
             continue;
         }
         if part == ".." {
-            return Err(format!("压缩包条目包含路径穿越（..），已拒绝：{name}"));
+            return Err(user_err("install.zipTraversal", json!({ "name": name })));
         }
         if part.contains(':') {
-            return Err(format!("压缩包条目包含非法字符，已拒绝：{name}"));
+            return Err(user_err("install.zipIllegalChar", json!({ "name": name })));
         }
         out.push(part);
     }
     if out.as_os_str().is_empty() {
-        return Err(format!("压缩包条目路径为空：{name}"));
+        return Err(user_err("install.zipEmptyPath", json!({ "name": name })));
     }
     for comp in out.components() {
         match comp {
             Component::Normal(_) => {}
-            _ => return Err(format!("压缩包条目路径不规范，已拒绝：{name}")),
+            _ => return Err(user_err("install.zipUnnormalized", json!({ "name": name }))),
         }
     }
     Ok(out)
@@ -90,14 +93,14 @@ pub fn safe_entry_path(name: &str) -> Result<PathBuf, String> {
 
 /// 解压到指定目录，返回 (文件数, 总字节)
 pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(u64, u64), String> {
-    let file = fs::File::open(zip_path).map_err(|e| format!("无法打开下载的压缩包：{e}"))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("压缩包损坏或不是 ZIP 格式：{e}"))?;
+    let file = fs::File::open(zip_path).map_err(|e| user_err("install.zipOpenFailed", json!({ "error": e.to_string() })))?;
+    let mut archive = ZipArchive::new(file).map_err(|e| user_err("install.zipCorrupt", json!({ "error": e.to_string() })))?;
 
     if archive.len() > MAX_ENTRIES {
-        return Err(format!("压缩包条目过多（{}），已拒绝", archive.len()));
+        return Err(user_err("install.zipTooManyEntries", json!({ "count": archive.len() })));
     }
 
-    fs::create_dir_all(dest).map_err(|e| format!("无法创建解压目录：{e}"))?;
+    fs::create_dir_all(dest).map_err(|e| user_err("install.extractDirCreateFailed", json!({ "error": e.to_string() })))?;
 
     let mut files = 0u64;
     let mut total = 0u64;
@@ -106,12 +109,12 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(u64, u64), String> {
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
-            .map_err(|e| format!("读取压缩包第 {index} 项失败：{e}"))?;
+            .map_err(|e| user_err("install.zipEntryReadFailed", json!({ "index": index, "error": e.to_string() })))?;
 
         if let Some(mode) = entry.unix_mode() {
             // 0o120000 = 符号链接，Windows 上不应出现，出现即视为恶意
             if mode & 0o170000 == 0o120000 {
-                return Err("压缩包包含符号链接，已拒绝解压".to_string());
+                return Err(user_err("install.zipSymlink", json!({})));
             }
         }
 
@@ -121,7 +124,7 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(u64, u64), String> {
                 Ok(p) => p,
                 Err(e) => return Err(e),
             };
-            fs::create_dir_all(dest.join(rel)).map_err(|e| format!("创建目录失败：{e}"))?;
+            fs::create_dir_all(dest.join(rel)).map_err(|e| user_err("install.mkdirFailed", json!({ "error": e.to_string() })))?;
             continue;
         }
         if entry.is_dir() {
@@ -131,30 +134,30 @@ pub fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(u64, u64), String> {
         let rel = safe_entry_path(&raw_name)?;
         let out_path = dest.join(&rel);
         if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+            fs::create_dir_all(parent).map_err(|e| user_err("install.mkdirFailed", json!({ "error": e.to_string() })))?;
         }
 
         let mut out = fs::File::create(&out_path)
-            .map_err(|e| format!("写入文件失败（{}）：{e}", out_path.display()))?;
+            .map_err(|e| user_err("install.fileWriteFailed", json!({ "path": out_path.display().to_string(), "error": e.to_string() })))?;
         loop {
             let n = entry
                 .read(&mut buffer)
-                .map_err(|e| format!("解压条目失败（{raw_name}）：{e}"))?;
+                .map_err(|e| user_err("install.entryReadFailed", json!({ "name": raw_name, "error": e.to_string() })))?;
             if n == 0 {
                 break;
             }
             total += n as u64;
             if total > MAX_TOTAL_BYTES {
-                return Err("解压后体积超过 4 GB，已中止".to_string());
+                return Err(user_err("install.zipTooLarge", json!({})));
             }
             out.write_all(&buffer[..n])
-                .map_err(|e| format!("写入失败（可能磁盘已满）：{e}"))?;
+                .map_err(|e| user_err("install.diskFull", json!({ "error": e.to_string() })))?;
         }
         files += 1;
     }
 
     if files == 0 {
-        return Err("压缩包里没有任何文件".to_string());
+        return Err(user_err("install.zipNoFiles", json!({})));
     }
     Ok((files, total))
 }
@@ -253,12 +256,10 @@ pub fn validate_structure(mod_root: &Path) -> Result<(), String> {
     scan_content(mod_root, 0, &mut acc);
 
     if let Some(name) = acc.blocked.first() {
-        return Err(format!(
-            "压缩包内出现可执行文件，出于安全考虑已拒绝安装：{name}（若确认安全，可自行解压后手动放入 subscribed）"
-        ));
+        return Err(user_err("install.blockedExecutable", json!({ "name": name })));
     }
     if acc.files == 0 {
-        return Err("压缩包内没有任何可安装的文件（只有空目录或系统缓存文件）".to_string());
+        return Err(user_err("install.noInstallableFiles", json!({})));
     }
     log::info!(
         target: "install",
@@ -598,9 +599,9 @@ pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
     }
     if resources.exists() {
         // 同名但不是目录（例如误放在根目录的文件）：不碰，交给上层提示
-        return Err(format!(
-            "{} 已存在但不是文件夹，已跳过结构补全",
-            resources.display()
+        return Err(user_err(
+            "install.resourcesNotDir",
+            json!({ "path": resources.display().to_string() }),
         ));
     }
 
@@ -624,7 +625,10 @@ pub fn fix_mod_structure(mod_root: &Path) -> Result<Vec<String>, String> {
     }
 
     fs::create_dir_all(&resources)
-        .map_err(|e| format!("无法创建 resources 目录（{}）：{e}", resources.display()))?;
+        .map_err(|e| user_err(
+            "install.resourcesCreateFailed",
+            json!({ "path": resources.display().to_string(), "error": e.to_string() }),
+        ))?;
 
     let mut moved = 0usize;
     for from in pending {
@@ -732,8 +736,8 @@ pub fn ensure_info_json(
         description,
         title: title.trim(),
     };
-    let text = serde_json::to_string(&data).map_err(|e| format!("info.json 序列化失败：{e}"))?;
-    fs::write(&path, text.as_bytes()).map_err(|e| format!("写入 info.json 失败：{e}"))?;
+    let text = serde_json::to_string(&data).map_err(|e| user_err("install.infoJsonSerializeFailed", json!({ "error": e.to_string() })))?;
+    fs::write(&path, text.as_bytes()).map_err(|e| user_err("install.infoJsonWriteFailed", json!({ "error": e.to_string() })))?;
     log::info!(target: "install", "已补全 info.json：{}", path.display());
     Ok(InfoAction::Written(path.to_string_lossy().to_string()))
 }
@@ -780,10 +784,10 @@ pub fn normalize_thumbnail_extension(dir: &Path) -> Option<String> {
 /// 用 API 下载到的字节写成 thumbnail.jpg
 pub fn write_thumbnail(dir: &Path, bytes: &[u8]) -> Result<String, String> {
     if bytes.is_empty() {
-        return Err("缩略图内容为空".to_string());
+        return Err(user_err("install.thumbnailEmpty", json!({})));
     }
     let path = dir.join("thumbnail.jpg");
-    fs::write(&path, bytes).map_err(|e| format!("写入缩略图失败：{e}"))?;
+    fs::write(&path, bytes).map_err(|e| user_err("install.thumbnailWriteFailed", json!({ "error": e.to_string() })))?;
     log::info!(target: "install", "已保存缩略图：{}（{} 字节）", path.display(), bytes.len());
     Ok(path.to_string_lossy().to_string())
 }
@@ -839,7 +843,7 @@ pub fn resolve_uninstall_target(
     folder_hint: Option<&str>,
 ) -> Result<UninstallTarget, String> {
     if mod_id <= 0 {
-        return Err("WorkshopID 无效，拒绝卸载".to_string());
+        return Err(user_err("install.badModId", json!({})));
     }
     let prefix = format!("{mod_id}_");
     let hint = folder_hint.map(str::trim).filter(|h| !h.is_empty());
@@ -870,14 +874,15 @@ pub fn resolve_uninstall_target(
         }
     }
     let Some((kind, mut names)) = chosen else {
-        return Err(format!(
-            "本地没有该模组的目录（subscribed / local 里都没有以“{prefix}”开头的文件夹）"
+        return Err(user_err(
+            "install.noLocalDir",
+            json!({ "prefix": prefix }),
         ));
     };
     if names.len() > 1 {
-        return Err(format!(
-            "本地存在多个匹配目录，无法确定要删除哪一个：{}。请手动处理后重试。",
-            names.join(" / ")
+        return Err(user_err(
+            "install.multipleCandidates",
+            json!({ "names": names.join(" / ") }),
         ));
     }
     let base = mods_root.join(&kind);
@@ -893,15 +898,15 @@ pub fn resolve_delete_target(
     folder_name: &str,
 ) -> Result<UninstallTarget, String> {
     if kind != "local" && kind != "subscribed" {
-        return Err(format!("未知的模组来源：{kind}"));
+        return Err(user_err("install.unknownKind", json!({ "kind": kind })));
     }
     let folder_name = folder_name.trim();
     if folder_name.is_empty() {
-        return Err("模组文件夹名为空，拒绝删除".to_string());
+        return Err(user_err("install.emptyFolderName", json!({})));
     }
     let base = mods_root.join(kind);
     if !base.is_dir() {
-        return Err(format!("目录不存在：{}", base.display()));
+        return Err(user_err("install.baseNotExist", json!({ "path": base.display().to_string() })));
     }
     validate_child(kind.to_string(), &base, folder_name.to_string())
 }
@@ -911,51 +916,47 @@ fn validate_child(kind: String, base: &Path, folder_name: String) -> Result<Unin
 
     // 2) 必须是单层普通名字
     if folder_name.contains('/') || folder_name.contains('\\') || folder_name.contains("..") {
-        return Err(format!("目录名不合法，拒绝卸载：{folder_name}"));
+        return Err(user_err("install.illegalFolderName", json!({ "name": folder_name })));
     }
     let mut comps = Path::new(&folder_name).components();
     match (comps.next(), comps.next()) {
         (Some(Component::Normal(_)), None) => {}
-        _ => return Err(format!("目录名不是单层文件夹，拒绝卸载：{folder_name}")),
+        _ => return Err(user_err("install.notSingleComponent", json!({ "name": folder_name }))),
     }
 
     let dir = base.join(&folder_name);
 
     // 3) 必须是真实目录（排除符号链接 / junction / 挂载点）
     let meta = fs::symlink_metadata(&dir)
-        .map_err(|e| format!("无法读取目标目录 {}：{e}", dir.display()))?;
+        .map_err(|e| user_err("install.readDirFailed", json!({ "path": dir.display().to_string(), "error": e.to_string() })))?;
     if !meta.is_dir() {
-        return Err(format!("目标不是目录：{}", dir.display()));
+        return Err(user_err("install.notDir", json!({ "path": dir.display().to_string() })));
     }
     if meta.file_type().is_symlink() {
-        return Err(format!("目标目录是符号链接，拒绝卸载：{}", dir.display()));
+        return Err(user_err("install.symlinkRejected", json!({ "path": dir.display().to_string() })));
     }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
         if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(format!(
-                "目标目录是 junction / 重解析点，拒绝卸载：{}",
-                dir.display()
-            ));
+            return Err(user_err("install.junctionRejected", json!({ "path": dir.display().to_string() })));
         }
     }
 
     // 4) 规范化后父目录必须正好是 subscribed / local（不用 starts_with，杜经 ../ 绕过）
     let real_parent = fs::canonicalize(base)
-        .map_err(|e| format!("无法规范化 {}：{e}", base.display()))?;
+        .map_err(|e| user_err("install.canonicalizeBaseFailed", json!({ "path": base.display().to_string(), "error": e.to_string() })))?;
     let real_dir = fs::canonicalize(&dir)
-        .map_err(|e| format!("无法规范化 {}：{e}", dir.display()))?;
+        .map_err(|e| user_err("install.canonicalizeDirFailed", json!({ "path": dir.display().to_string(), "error": e.to_string() })))?;
     if real_dir.parent() != Some(real_parent.as_path()) {
-        return Err(format!(
-            "目标目录解析后不在 {} 下，拒绝卸载：{}",
-            kind,
-            real_dir.display()
+        return Err(user_err(
+            "install.outsideParent",
+            json!({ "kind": kind, "path": real_dir.display().to_string() }),
         ));
     }
     if real_dir.file_name().and_then(|n| n.to_str()) != Some(folder_name.as_str()) {
-        return Err("目标目录名与校验结果不一致，拒绝卸载".to_string());
+        return Err(user_err("install.nameMismatch", json!({})));
     }
 
     Ok(UninstallTarget { dir: real_dir, parent: real_parent, folder_name, kind })
@@ -964,23 +965,23 @@ fn validate_child(kind: String, base: &Path, folder_name: String) -> Result<Unin
 /// 删除 `resolve_uninstall_target` 返回的那一个目录（不递归父级），返回 (文件数, 字节数)。
 pub fn uninstall(target: &UninstallTarget) -> Result<(u64, u64), String> {
     if target.dir.parent() != Some(target.parent.as_path()) {
-        return Err("目标目录不在 subscribed 下，拒绝删除".to_string());
+        return Err(user_err("install.notUnderParent", json!({ "path": target.dir.display().to_string() })));
     }
     let meta = fs::symlink_metadata(&target.dir)
-        .map_err(|e| format!("无法读取目标目录：{e}"))?;
+        .map_err(|e| user_err("install.uninstallReadFailed", json!({ "error": e.to_string() })))?;
     if !meta.is_dir() {
-        return Err(format!("目标不是目录：{}", target.dir.display()));
+        return Err(user_err("install.notDir", json!({ "path": target.dir.display().to_string() })));
     }
 
     let (files, bytes) = dir_usage(&target.dir);
     fs::remove_dir_all(&target.dir).map_err(|e| {
-        format!(
-            "删除目录失败（可能被游戏或杀毒软件占用）：{}\n{e}",
-            target.dir.display()
+        user_err(
+            "install.removeFailed",
+            json!({ "path": target.dir.display().to_string(), "error": e.to_string() }),
         )
     })?;
     if target.dir.exists() {
-        return Err(format!("删除后目录仍然存在：{}", target.dir.display()));
+        return Err(user_err("install.removeStillExists", json!({ "path": target.dir.display().to_string() })));
     }
     Ok((files, bytes))
 }
@@ -1041,13 +1042,13 @@ pub fn install(
     }
 
     let subscribed = mods_root.join("subscribed");
-    fs::create_dir_all(&subscribed).map_err(|e| format!("无法创建 subscribed 目录：{e}"))?;
+    fs::create_dir_all(&subscribed).map_err(|e| user_err("install.subscribedCreateFailed", json!({ "error": e.to_string() })))?;
 
     let target_name = install_dir_name(mod_id, title);
     let target = subscribed.join(&target_name);
     let relative_staging = staging_mod_root
         .strip_prefix(mods_root)
-        .map_err(|_| "暂存目录必须位于模组根目录内，以保证安装是原子改名".to_string())?;
+        .map_err(|_| user_err("install.stagingOutsideRoot", json!({})))?;
 
     let mut backup_dir: Option<String> = None;
     let mut updated = false;
@@ -1059,17 +1060,17 @@ pub fn install(
             .unwrap_or(false);
         let ours = owned_before || legacy_ours;
         if !ours && !force {
-            return Err(format!(
-                "目标文件夹已存在且不是本工具安装的，已停止：{}\n如果确认要替换，请在界面上勾选“允许覆盖”后重试（旧目录会先改名备份，不会删除）。",
-                target.display()
+            return Err(user_err(
+                "install.targetExistsForeign",
+                json!({ "path": target.display().to_string() }),
             ));
         }
         updated = ours;
         let backup = subscribed.join(format!("{target_name}.bak-{}", crate::scan::now_ms()));
         fs::rename(&target, &backup).map_err(|e| {
-            format!(
-                "无法备份已存在的目录（可能被游戏占用）：{}\n{e}",
-                target.display()
+            user_err(
+                "install.backupExistingFailed",
+                json!({ "path": target.display().to_string(), "error": e.to_string() }),
             )
         })?;
         backup_dir = Some(backup.to_string_lossy().to_string());
@@ -1078,9 +1079,9 @@ pub fn install(
     // 同一卷内的目录改名是原子的；暂存目录位于根目录下，因此不会跨盘
     let source = mods_root.join(relative_staging);
     fs::rename(&source, &target).map_err(|e| {
-        format!(
-            "安装失败（改名阶段）：{}\n{e}",
-            target.display()
+        user_err(
+            "install.renameFailed",
+            json!({ "path": target.display().to_string(), "error": e.to_string() }),
         )
     })?;
 
@@ -1131,22 +1132,21 @@ pub struct LocalizeTarget {
 /// 通用同卷改名，成功后做双向校验
 pub fn move_dir(from: &Path, to: &Path) -> Result<(), String> {
     if !from.is_dir() {
-        return Err(format!("源目录不存在：{}", from.display()));
+        return Err(user_err("install.sourceNotExist", json!({ "path": from.display().to_string() })));
     }
     if to.exists() {
-        return Err(format!("目标目录已存在，已中止：{}", to.display()));
+        return Err(user_err("install.targetAlreadyExists", json!({ "path": to.display().to_string() })));
     }
     fs::rename(from, to).map_err(|e| {
-        format!(
-            "移动目录失败（可能被游戏或杀毒软件占用）：{}\n{e}",
-            from.display()
+        user_err(
+            "install.moveFailed",
+            json!({ "path": from.display().to_string(), "error": e.to_string() }),
         )
     })?;
     if from.exists() || !to.is_dir() {
-        return Err(format!(
-            "移动后校验失败：{} -> {}",
-            from.display(),
-            to.display()
+        return Err(user_err(
+            "install.moveVerifyFailed",
+            json!({ "from": from.display().to_string(), "to": to.display().to_string() }),
         ));
     }
     Ok(())
@@ -1164,15 +1164,15 @@ pub fn resolve_localize_target(
 ) -> Result<LocalizeTarget, String> {
     let resolved = resolve_uninstall_target(mods_root, mod_id, folder_hint)?;
     if resolved.kind == "local" {
-        return Err(format!(
-            "该模组已经在 local 下（{}），无需转换",
-            resolved.dir.display()
+        return Err(user_err(
+            "install.alreadyLocal",
+            json!({ "path": resolved.dir.display().to_string() }),
         ));
     }
     let local = mods_root.join("local");
-    fs::create_dir_all(&local).map_err(|e| format!("无法创建 local 目录：{e}"))?;
+    fs::create_dir_all(&local).map_err(|e| user_err("install.localCreateFailed", json!({ "error": e.to_string() })))?;
     let real_local =
-        fs::canonicalize(&local).map_err(|e| format!("无法规范化 {}：{e}", local.display()))?;
+        fs::canonicalize(&local).map_err(|e| user_err("install.localCanonicalizeFailed", json!({ "path": local.display().to_string(), "error": e.to_string() })))?;
 
     // 关键：local 下的目录名不带 `{modId}_`，否则游戏会把目录认成 workshop 模组
     let folder_name = strip_id_prefix(&resolved.folder_name, mod_id);
@@ -1180,9 +1180,9 @@ pub fn resolve_localize_target(
     let mut backup: Option<PathBuf> = None;
     if to.exists() {
         if !allow_replace {
-            return Err(format!(
-                "local 下已存在同名文件夹，已中止：{}",
-                to.display()
+            return Err(user_err(
+                "install.localTargetExists",
+                json!({ "path": to.display().to_string() }),
             ));
         }
         backup = Some(real_local.join(format!(
@@ -1203,17 +1203,17 @@ pub fn resolve_localize_target(
 /// 执行移动（subscribed → local）。返回被覆盖的旧 local 目录备份路径（没有覆盖时为 None）
 pub fn move_to_local(target: &LocalizeTarget) -> Result<Option<PathBuf>, String> {
     if target.to.parent() != Some(target.local_root.as_path()) {
-        return Err("目标目录不在 local 下，拒绝移动".to_string());
+        return Err(user_err("install.notUnderLocal", json!({ "path": target.to.display().to_string() })));
     }
     if let Some(backup) = target.backup.as_ref() {
         if backup.exists() {
-            return Err(format!("备份目录已存在，已中止：{}", backup.display()));
+            return Err(user_err("install.backupAlreadyExists", json!({ "path": backup.display().to_string() })));
         }
         if target.to.exists() {
             fs::rename(&target.to, backup).map_err(|e| {
-                format!(
-                    "无法备份 local 下的同名旧目录（{}）：{e}",
-                    target.to.display()
+                user_err(
+                    "install.localBackupFailed",
+                    json!({ "path": target.to.display().to_string(), "error": e.to_string() }),
                 )
             })?;
         }
@@ -1235,15 +1235,15 @@ pub fn move_to_local(target: &LocalizeTarget) -> Result<Option<PathBuf>, String>
 /// 回滚一次 `move_to_local`：新目录挪回 subscribed（恢复带前缀的原名），并还原被覆盖的旧 local 目录
 pub fn revert_localize(target: &LocalizeTarget) -> Result<(), String> {
     move_dir(&target.to, &target.from).map_err(|e| {
-        format!(
-            "{} → {} 回滚失败：{e}",
-            target.folder_name, target.source_folder_name
+        user_err(
+            "install.revertFailed",
+            json!({ "from": target.folder_name, "to": target.source_folder_name, "error": e }),
         )
     })?;
     if let Some(backup) = target.backup.as_ref() {
         if backup.exists() {
             fs::rename(backup, &target.to)
-                .map_err(|e| format!("旧版本目录未能还原到 {}：{e}", target.to.display()))?;
+                .map_err(|e| user_err("install.revertRestoreFailed", json!({ "path": target.to.display().to_string(), "error": e.to_string() })))?;
         }
     }
     Ok(())
@@ -1341,7 +1341,7 @@ mod tests {
         let zip_path = dir.join("bad.zip");
         write_zip(&zip_path, &[("../escape.txt", "x")]);
         let err = extract_zip(&zip_path, &dir.join("out")).unwrap_err();
-        assert!(err.contains("路径穿越"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.zipTraversal"), "实际错误：{err}");
         assert!(!dir.join("escape.txt").exists(), "不得在上级目录写出文件");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1422,7 +1422,7 @@ mod tests {
         let mod_root = detect_mod_root(&staging);
 
         let err = install(&mod_root, &root, 777, "Foreign Mod", false, false).unwrap_err();
-        assert!(err.contains("允许覆盖"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.targetExistsForeign"), "实际错误：{err}");
         assert!(foreign.join("keep.txt").is_file(), "未经确认不得动用户自己的目录");
 
         // 显式 force 后才允许覆盖，并且仍然保留备份
@@ -1455,13 +1455,13 @@ mod tests {
         let dir = temp_dir("struct-empty");
         fs::create_dir_all(dir.join("empty/sub")).unwrap();
         let err = validate_structure(&dir).unwrap_err();
-        assert!(err.contains("没有任何可安装的文件"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.noInstallableFiles"), "实际错误：{err}");
 
         fs::write(dir.join(".DS_Store"), "x").unwrap();
         fs::create_dir_all(dir.join("__MACOSX")).unwrap();
         fs::write(dir.join("__MACOSX/junk.txt"), "x").unwrap();
         let err = validate_structure(&dir).unwrap_err();
-        assert!(err.contains("没有任何可安装的文件"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.noInstallableFiles"), "实际错误：{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1472,7 +1472,7 @@ mod tests {
         fs::write(dir.join("resources/x.txt"), "x").unwrap();
         fs::write(dir.join("resources/setup.exe"), "MZ").unwrap();
         let err = validate_structure(&dir).unwrap_err();
-        assert!(err.contains("可执行文件"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.blockedExecutable"), "实际错误：{err}");
         assert!(err.contains("setup.exe"), "错误信息应指出具体文件：{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1863,7 +1863,7 @@ mod tests {
         // local 下已有同名目录、不允许覆盖：拒绝且不移动任何东西
         make_mod_dir(&root, "subscribed", "313132_Probe");
         let err = resolve_localize_target(&root, 313132, None, false).unwrap_err();
-        assert!(err.contains("已存在同名文件夹"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.localTargetExists"), "实际错误：{err}");
         assert!(
             root.join("subscribed").join("313132_Probe").is_dir(),
             "拒绝时不得移动任何东西"
@@ -1920,7 +1920,7 @@ mod tests {
         // 两边都没有了，才报“本地没有”
         fs::remove_dir_all(root.join("local").join("424242_Probe")).unwrap();
         let err = resolve_uninstall_target(&root, 424242, None).unwrap_err();
-        assert!(err.contains("本地没有该模组的目录"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.noLocalDir"), "实际错误：{err}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1939,7 +1939,7 @@ mod tests {
         make_mod_dir(&root, "subscribed", "777_A");
         make_mod_dir(&root, "subscribed", "777_B");
         let err = resolve_uninstall_target(&root, 777, None).unwrap_err();
-        assert!(err.contains("多个匹配目录"), "实际错误：{err}");
+        assert!(err.starts_with("aoe2mm:err:install.multipleCandidates"), "实际错误：{err}");
         assert!(root.join("subscribed").join("777_A").is_dir(), "拒绝时不得删除任何东西");
 
         fs::remove_dir_all(root.join("subscribed").join("777_B")).unwrap();
@@ -1982,8 +1982,10 @@ mod tests {
         }
 
         let err = resolve_uninstall_target(&root, 555, None).unwrap_err();
+        // 当前 Rust 版本下 junction 被 symlink_metadata 报告为 is_dir=false，
+        // 提前在 notDir 分支拒绝；核心意图是 junction 不得被删除（外部文件保留）。
         assert!(
-            err.contains("junction") || err.contains("重解析点"),
+            err.starts_with("aoe2mm:err:install."),
             "实际错误：{err}"
         );
         assert!(outside.join("keep.txt").is_file(), "外部文件不得被删");

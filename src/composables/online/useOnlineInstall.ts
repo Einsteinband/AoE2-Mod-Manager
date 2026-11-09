@@ -85,7 +85,9 @@ export function useOnlineInstall(deps: {
   );
 
   const progress = computed<DownloadProgress | null>(() => modTask.value?.progress ?? null);
-  const installError = computed<string | null>(() => modTask.value?.error ?? null);
+  const installError = computed<string | null>(() =>
+    modTask.value?.error ? translateBackendMessage(modTask.value.error) : null,
+  );
   const actionMessage = computed<string | null>(() => {
     const message = modTask.value?.message;
     // 队列里已结束的任务才显示结果提示，避免排队中就冒出「安装失败」

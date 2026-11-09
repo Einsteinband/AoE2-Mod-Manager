@@ -5,12 +5,17 @@
  * 与本地页共用 `translateBackendMessage`，保证中英两边口径一致。
  */
 import { translateBackendMessage } from "../format";
-import { translate } from "../i18n";
 import { isApiFailure } from "./types";
 
+/** 提取原始错误串（不翻译），存进 ref，渲染时再 translateBackendMessage。 */
+export function rawMessageOf(e: unknown): string {
+  if (isApiFailure(e)) return e.message;
+  if (typeof e === "string") return e;
+  if (e instanceof Error) return e.message;
+  return "aoe2mm:err:labels.unknown";
+}
+
+/** 即时翻译（事件回调里弹 toast 用，不进 ref）。 */
 export function messageOf(e: unknown): string {
-  if (isApiFailure(e)) return translateBackendMessage(e.message);
-  if (typeof e === "string") return translateBackendMessage(e);
-  if (e instanceof Error) return translateBackendMessage(e.message);
-  return translate("labels.unknown");
+  return translateBackendMessage(rawMessageOf(e));
 }

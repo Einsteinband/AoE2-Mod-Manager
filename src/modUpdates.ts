@@ -7,10 +7,13 @@
  *
  * 触发方式是唯一的：用户点设置里的按钮 → runModUpdateCheck()。
  * 绝不在后台轮询。
+ *
+ * v0.7：支持 Tauri 事件实时进度和增量结果。
  */
 import { computed, ref } from "vue";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { checkModUpdates } from "./api";
-import { translateBackendMessage } from "./format";
+import { normalizeBackendError } from "./format";
 import type { ModUpdateItem, ModUpdateReport } from "./types";
 
 /** 冷却时长：15 秒内禁止再次请求 /Installed */
@@ -22,6 +25,9 @@ export const report = ref<ModUpdateReport | null>(null);
 export const checking = ref(false);
 export const error = ref<string | null>(null);
 export const cooldownLeft = ref(0);
+
+/** v0.7：实时检测进度 */
+export const checkProgress = ref<{ completed: number; total: number; phase: string } | null>(null);
 
 export const canCheck = computed(() => !checking.value && cooldownLeft.value === 0);
 
@@ -40,16 +46,6 @@ export const itemsById = computed<Map<string, ModUpdateItem>>(() => {
   for (const item of report.value?.items ?? []) map.set(item.entryId, item);
   return map;
 });
-
-export function describeError(e: unknown): string {
-  if (typeof e === "string") return translateBackendMessage(e);
-  if (e instanceof Error) return translateBackendMessage(e.message);
-  try {
-    return translateBackendMessage(JSON.stringify(e));
-  } catch {
-    return String(e);
-  }
-}
 
 function stopTimer() {
   if (timer !== null) {
@@ -79,22 +75,108 @@ export function resumeCooldown() {
   if (lastCheckMs > 0 && Date.now() - lastCheckMs < COOLDOWN_MS) startTimer();
 }
 
+// ---------------- v0.7：Tauri 事件监听（实时进度 + 增量结果） ----------------
+
+let unlistenStarted: UnlistenFn | null = null;
+let unlistenItem: UnlistenFn | null = null;
+let unlistenProgress: UnlistenFn | null = null;
+let unlistenFinished: UnlistenFn | null = null;
+
+async function setupEventListeners() {
+  await cleanupEventListeners();
+
+  unlistenStarted = await listen<{ total: number }>("mod-update://started", (e) => {
+    // 初始化空 report，开始累积增量结果
+    report.value = {
+      checkedAtMs: Date.now(),
+      totalLocal: e.payload.total,
+      updateCount: 0,
+      unknownCount: 0,
+      serverTotal: null,
+      pages: 0,
+      items: [],
+    };
+    checkProgress.value = { completed: 0, total: e.payload.total, phase: "installed" };
+  });
+
+  unlistenItem = await listen<ModUpdateItem>("mod-update://item", (e) => {
+    if (!report.value) return;
+    const idx = report.value.items.findIndex((i) => i.entryId === e.payload.entryId);
+    if (idx >= 0) {
+      // 更新已有项
+      report.value.items[idx] = e.payload;
+    } else {
+      // 新增项
+      report.value.items.push(e.payload);
+    }
+    // 重新统计 updateCount
+    report.value.updateCount = report.value.items.filter((i) => i.hasUpdate).length;
+  });
+
+  unlistenProgress = await listen<{ completed: number; total: number; phase: string }>(
+    "mod-update://progress",
+    (e) => {
+      checkProgress.value = {
+        completed: e.payload.completed,
+        total: e.payload.total,
+        phase: e.payload.phase,
+      };
+    },
+  );
+
+  unlistenFinished = await listen<{
+    total: number;
+    updateCount: number;
+    detailRequested: number;
+    detailSucceeded: number;
+    detailFailed: number;
+  }>("mod-update://finished", (e) => {
+    if (report.value) {
+      report.value.updateCount = e.payload.updateCount;
+      report.value.detailRequested = e.payload.detailRequested;
+      report.value.detailSucceeded = e.payload.detailSucceeded;
+      report.value.detailFailed = e.payload.detailFailed;
+    }
+    checkProgress.value = null;
+  });
+}
+
+async function cleanupEventListeners() {
+  await unlistenStarted?.();
+  await unlistenItem?.();
+  await unlistenProgress?.();
+  await unlistenFinished?.();
+  unlistenStarted = null;
+  unlistenItem = null;
+  unlistenProgress = null;
+  unlistenFinished = null;
+}
+
 /** 用户点击「检查本地模组更新」：成功或失败都会进入 15 秒冷却 */
 export async function runModUpdateCheck(): Promise<ModUpdateReport | null> {
   if (!canCheck.value) return null;
   checking.value = true;
   error.value = null;
+  checkProgress.value = null;
+
+  // 设置事件监听（started 事件会初始化 report）
+  await setupEventListeners();
+
   try {
     const next = await checkModUpdates();
+    // 最终结果覆盖事件累积的结果
     report.value = next;
     return next;
   } catch (e) {
-    error.value = describeError(e);
+    error.value = normalizeBackendError(e);
     return null;
   } finally {
     checking.value = false;
+    checkProgress.value = null;
     lastCheckMs = Date.now();
     startTimer();
+    // 延迟清理监听，让 finished 事件有机会被处理
+    window.setTimeout(() => void cleanupEventListeners(), 500);
   }
 }
 

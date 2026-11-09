@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::user_err;
 
 /// 软件自己的元数据文件，和 settings.json 放在同一个配置目录。
 /// 绝不写入游戏目录（local / subscribed），避免游戏扫描到未知文件。
@@ -167,10 +170,10 @@ pub fn load_for_app(app: &tauri::AppHandle) -> Store {
 pub fn save(path: &Path, store: &Store) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+            .map_err(|e| user_err("metadata.createDirFailed", json!({ "path": parent.display().to_string(), "error": e.to_string() })))?;
     }
-    let text = serde_json::to_string_pretty(store).map_err(|e| format!("元数据序列化失败：{e}"))?;
-    fs::write(path, text).map_err(|e| format!("无法写入元数据 {}：{e}", path.display()))
+    let text = serde_json::to_string_pretty(store).map_err(|e| user_err("metadata.serializeFailed", json!({ "error": e.to_string() })))?;
+    fs::write(path, text).map_err(|e| user_err("metadata.writeFailed", json!({ "path": path.display().to_string(), "error": e.to_string() })))
 }
 
 /// 记录一次成功安装（合并写入，不覆盖其他模组的条目）
@@ -193,6 +196,52 @@ pub fn remove_for_app(app: &tauri::AppHandle, mod_id: i64) -> Result<bool, Strin
     store.version = default_version();
     save(&path, &store)?;
     log::info!(target: "metadata", "已删除模组元数据：modId={mod_id}");
+    Ok(true)
+}
+
+/// 本地模组 key 前缀：区分 WorkshopID=0 的多条本地记录，避免互相覆盖
+pub fn local_key(folder_name: &str) -> String {
+    format!("local::{}", folder_name)
+}
+
+/// 记录第三方导入的本地模组（按文件夹名唯一，不与订阅模组的 mod_id key 冲突）
+pub fn upsert_local_for_app(
+    app: &tauri::AppHandle,
+    folder_name: &str,
+    title: &str,
+    source: &str,
+) -> Result<PathBuf, String> {
+    let path = path_for(app)?;
+    let mut store = load(&path);
+    store.version = default_version();
+    let key = local_key(folder_name);
+    store.mods.insert(
+        key,
+        ModMeta {
+            mod_id: 0,
+            title: title.to_string(),
+            tag_ids: vec![],
+            tag_names: vec![],
+            folder_name: Some(folder_name.to_string()),
+            installed_at_ms: crate::scan::now_ms(),
+            source: source.to_string(),
+        },
+    );
+    save(&path, &store)?;
+    Ok(path)
+}
+
+/// 卸载本地模组后按文件夹名删除元数据（覆盖 local:: key）
+pub fn remove_local_for_app(app: &tauri::AppHandle, folder_name: &str) -> Result<bool, String> {
+    let path = path_for(app)?;
+    let mut store = load(&path);
+    let key = local_key(folder_name);
+    if store.mods.remove(&key).is_none() {
+        return Ok(false);
+    }
+    store.version = default_version();
+    save(&path, &store)?;
+    log::info!(target: "metadata", "已删除本地模组元数据：folder={folder_name}");
     Ok(true)
 }
 

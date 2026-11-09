@@ -5,6 +5,12 @@
 # 本地仍会 commit + 打 tag 留档，但不会 git push main / git push tag；
 # 远端 tag 由 gh release create 用 --target main 在默认分支上创建，只发布安装包资产。
 # 如确需连源码一起推送，显式加 -PushSource。
+#
+# 文件范围规则（2026-11）：
+#   暂存时用 pathspec 显式排除 AI 协作文档、个人开发环境配置、临时文件和本地交接目录。
+#   推送前做两道校验：
+#     1. 暂存区必须在开始时为空（避免混入用户手动暂存的无关修改）；
+#     2. 暂存完成后再次扫描，出现任何被排除的文件立即中止，不 commit 不 push。
 
 # 注意：用 Continue + 显式 $LASTEXITCODE 校验，避免 git 的 "LF will be replaced by CRLF"
 # 之类 stderr 警告在 PS 5.1 下被当成终止性异常，导致脚本实际成功却返回 exit 1。
@@ -31,9 +37,60 @@ if ($cmd) {
 if (-not $gh) { throw "找不到 gh cli，请安装 GitHub CLI 或把 gh.exe 加入 PATH。" }
 Write-Host "使用 gh: $gh" -ForegroundColor DarkGray
 
-# ---- 1. Git 提交并打标签（默认推送源码）----
+# ---- 1. Git 提交并打标签 ----
+# 排除策略：
+#   第 1 层：.gitignore 挡住 AGENTS.md / DEVELOPMENT.md / PROJECT_STRUCTURE.md /
+#            errors.txt / docs/v0.3-summary.md / docs/ddd/* / docs/handoff/*。
+#   第 2 层：git add pathspec 额外排除 docs/ddd/ 与 docs/handoff/ 两个目录，
+#            即使 .gitignore 被误改也不会把交接文档推送出去。
+#            （不在 pathspec 里列具体文件名，否则 git 会因 "文件已被 .gitignore 忽略"
+#             而输出 hint 并返回非 0，导致误判为失败。）
+#   第 3 层：add 完成后扫描暂存区文件名，命中任何排除项立即中止。
+$excludePathspecs = @(
+  ':(exclude)AGENTS.md',
+  ':(exclude)docs/v0.3-summary.md',
+  ':(exclude)docs/ddd/',
+  ':(exclude)docs/handoff/'
+)
+# 校验用的正则：覆盖所有不允许推送的文件/目录。
+$excludePatterns = @(
+  '^AGENTS\.md$',
+  '^DEVELOPMENT\.md$',
+  '^PROJECT_STRUCTURE\.md$',
+  '^errors\.txt$',
+  '^docs/v0\.3-summary\.md$',
+  '^docs/ddd/',
+  '^docs/handoff/'
+)
+
+# 1a. 发布前校验：开始时暂存区必须为空。
+$stagedBefore = git diff --cached --name-only
+if ($stagedBefore) {
+  Write-Host "发布中止：暂存区已有未提交内容，疑似混入手动暂存的无关修改：" -ForegroundColor Red
+  $stagedBefore | ForEach-Object { Write-Host "  $_" }
+  Write-Host "请先 commit 或 git reset 清空暂存区后再执行发布。" -ForegroundColor Red
+  exit 1
+}
+
 Write-Host "正在本地提交代码并打标签..." -ForegroundColor Yellow
-git add .
+git add . @excludePathspecs
+if ($LASTEXITCODE -ne 0) { throw "git add 失败 (exit $LASTEXITCODE)" }
+
+# 1b. 二次校验：扫描暂存区，出现被排除的文件立即中止。
+$stagedAfter = git diff --cached --name-only
+$badFiles = @()
+foreach ($f in $stagedAfter) {
+  foreach ($pat in $excludePatterns) {
+    if ($f -match $pat) { $badFiles += $f; break }
+  }
+}
+if ($badFiles) {
+  Write-Host "发布中止：暂存区检测到不应推送的文件：" -ForegroundColor Red
+  $badFiles | ForEach-Object { Write-Host "  $_" }
+  Write-Host "未执行 commit/push。请用 git reset HEAD <file> 取消暂存后重试。" -ForegroundColor Red
+  exit 1
+}
+
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
   git commit -m "chore: release $tag"

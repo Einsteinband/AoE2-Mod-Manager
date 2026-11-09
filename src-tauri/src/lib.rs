@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+use tauri_plugin_window_state::{AppHandleExt, WindowExt};
+
+use serde_json::json;
 
 mod cache;
 mod data_dir;
@@ -9,6 +12,7 @@ mod download;
 mod download_queue;
 mod images;
 mod install;
+mod import;
 mod metadata;
 mod models;
 mod modupdate;
@@ -29,6 +33,23 @@ use online::ApiFailure;
 /// 数据与缓存总目录的统一入口（图片/在线数据/索引/译文/收藏/预设/队列/会话凭证）
 pub use data_dir::data_root;
 
+/// 生成 `aoe2mm:err:<code>[:<json>]` 格式的用户可见错误串。
+///
+/// 前端 `src/format.ts#translateBackendMessage` 识别此前缀后，按
+/// `backendErrors.code.<code>` 查三语文案，`json` 里的字段用 `{name}` 占位符注入。
+/// params 为空对象时省略 `:<json>` 段，与历史 `aoe2mm:err:account.notLoggedIn` 兼容。
+pub fn user_err(code: &str, params: serde_json::Value) -> String {
+    let is_empty = params
+        .as_object()
+        .map(|o| o.is_empty())
+        .unwrap_or(params.is_null());
+    if is_empty {
+        format!("aoe2mm:err:{code}")
+    } else {
+        format!("aoe2mm:err:{code}:{}", params)
+    }
+}
+
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     settings::path_for(app)
 }
@@ -41,7 +62,7 @@ fn mod_root(app: &tauri::AppHandle) -> Result<PathBuf, ApiFailure> {
         .ok_or_else(|| {
             ApiFailure::new(
                 "no_root",
-                "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录",
+                user_err("lib.modRootNotSet", json!({})),
                 None,
             )
         })?;
@@ -49,22 +70,16 @@ fn mod_root(app: &tauri::AppHandle) -> Result<PathBuf, ApiFailure> {
 }
 
 fn client(app: &tauri::AppHandle) -> Result<ApiClient, ApiFailure> {
+    // v0.4.9：probe_session 失败的 e 已经是 aoe2mm:err 错误码协议字符串，
+    // 直接塞进 ApiFailure.message，前端 translateBackendMessage 自动按 i18n 三语展示。
     let cookie = online::session::current_cookie_header(app).map_err(|e| {
-        ApiFailure::new(
-            "unauthenticated",
-            if e.contains("尚未登录") {
-                "尚未登录《帝国时代》账号".to_string()
-            } else {
-                e
-            },
-            Some(401),
-        )
+        ApiFailure::new("unauthenticated", e, Some(401))
     })?;
 
     // 代理统一由 net 模块决定：手动 > 系统注册表 > 环境变量 > 直连
     let settings = settings::load_for_app(app);
     let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
-        .map_err(|e| ApiFailure::new("network", format!("网络配置无效：{e}"), None))?;
+        .map_err(|e| ApiFailure::new("network", user_err("net.configInvalid", json!({ "error": e.to_string() })), None))?;
     let proxy = net::ureq_proxy(&resolved).map_err(|e| ApiFailure::new("network", e, None))?;
 
     Ok(ApiClient::new(cookie, proxy))
@@ -97,7 +112,7 @@ fn set_locale(app: tauri::AppHandle, locale: String) -> Result<String, String> {
         let valid_len = (2..=5).contains(&normalized.len());
         let ascii_alpha = normalized.chars().all(|c| c.is_ascii_alphabetic());
         if !valid_len || !ascii_alpha {
-            return Err(format!("不支持的语言代码：{locale}"));
+            return Err(user_err("lib.unsupportedLocale", json!({ "locale": locale })));
         }
     }
     let path = settings_path(&app)?;
@@ -121,8 +136,9 @@ fn app_version() -> String {
 async fn check_update(app: tauri::AppHandle) -> Result<update::UpdateInfo, String> {
     let settings = settings::load_for_app(&app);
     let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
-        .map_err(|e| format!("网络配置无效：{e}"))?;
-    let proxy = net::ureq_proxy(&resolved).map_err(|e| format!("代理配置无效：{e}"))?;
+        .map_err(|e| user_err("net.configInvalid", json!({ "error": e.to_string() })))?;
+    let proxy_url = resolved.proxy_url.clone().unwrap_or_default();
+    let proxy = net::ureq_proxy(&resolved).map_err(move |e| user_err("net.proxyClientRejected", json!({ "url": proxy_url, "error": e.to_string() })))?;
 
     tauri::async_runtime::spawn_blocking(move || update::fetch_latest(proxy))
         .await
@@ -135,8 +151,9 @@ async fn check_update(app: tauri::AppHandle) -> Result<update::UpdateInfo, Strin
 async fn check_update_auto(app: tauri::AppHandle) -> Result<Option<update::UpdateInfo>, String> {
     let settings = settings::load_for_app(&app);
     let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
-        .map_err(|e| format!("网络配置无效：{e}"))?;
-    let proxy = net::ureq_proxy(&resolved).map_err(|e| format!("代理配置无效：{e}"))?;
+        .map_err(|e| user_err("net.configInvalid", json!({ "error": e.to_string() })))?;
+    let proxy_url = resolved.proxy_url.clone().unwrap_or_default();
+    let proxy = net::ureq_proxy(&resolved).map_err(move |e| user_err("net.proxyClientRejected", json!({ "url": proxy_url, "error": e.to_string() })))?;
 
     tauri::async_runtime::spawn_blocking(move || update::fetch_latest_auto(&app, proxy))
         .await
@@ -180,12 +197,12 @@ fn fetch_releases_blocking(proxy: Option<ureq::Proxy>) -> Result<Vec<GithubRelea
     // 与软件更新检查共用 update::fetch_with_mirrors。
     // User-Agent / 代理 / 镜像顺序与超时都在那一层统一处理，这里只管解析。
     let (_reached, result) = update::fetch_with_mirrors(proxy, RELEASES_LIST_URL);
-    let raw = result.map_err(|e| format!("获取更新历史失败：{e}"))?;
+    let raw = result.map_err(|e| user_err("update.fetchFailed", json!({ "error": e.to_string() })))?;
     let value: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("GitHub 响应不是合法 JSON：{e}"))?;
+        serde_json::from_str(&raw).map_err(|e| user_err("update.invalidJson", json!({ "error": e.to_string() })))?;
     let items = value
         .as_array()
-        .ok_or_else(|| "GitHub 响应不是 Release 数组".to_string())?;
+        .ok_or_else(|| user_err("update.invalidJson", json!({ "error": "expected Release array" })))?;
 
     let current = normalize_version_tag(&update::current_version());
     let mut releases: Vec<GithubRelease> = items
@@ -243,8 +260,9 @@ fn fetch_releases_blocking(proxy: Option<ureq::Proxy>) -> Result<Vec<GithubRelea
 async fn fetch_github_releases(app: tauri::AppHandle) -> Result<Vec<GithubRelease>, String> {
     let settings = settings::load_for_app(&app);
     let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
-        .map_err(|e| format!("网络配置无效：{e}"))?;
-    let proxy = net::ureq_proxy(&resolved).map_err(|e| format!("代理配置无效：{e}"))?;
+        .map_err(|e| user_err("net.configInvalid", json!({ "error": e.to_string() })))?;
+    let proxy_url = resolved.proxy_url.clone().unwrap_or_default();
+    let proxy = net::ureq_proxy(&resolved).map_err(move |e| user_err("net.proxyClientRejected", json!({ "url": proxy_url, "error": e.to_string() })))?;
 
     tauri::async_runtime::spawn_blocking(move || fetch_releases_blocking(proxy))
         .await
@@ -262,6 +280,7 @@ async fn check_mod_updates(app: tauri::AppHandle) -> Result<modupdate::ModUpdate
     let root = mod_root(&app)?;
     let store = metadata::load_for_app(&app);
     let client = client(&app)?;
+    let app_for_events = app.clone();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<modupdate::ModUpdateReport, ApiFailure> {
         let locals = modupdate::local_mods(&root, &store);
@@ -273,6 +292,13 @@ async fn check_mod_updates(app: tauri::AppHandle) -> Result<modupdate::ModUpdate
                 0,
             ));
         }
+
+        let total = locals.len();
+
+        // 发送开始事件
+        let _ = app_for_events.emit("mod-update://started", serde_json::json!({
+            "total": total,
+        }));
 
         let mut server: std::collections::HashMap<i64, modupdate::ServerMod> =
             std::collections::HashMap::new();
@@ -310,10 +336,107 @@ async fn check_mod_updates(app: tauri::AppHandle) -> Result<modupdate::ModUpdate
             server_total,
             pages
         );
-        Ok(modupdate::build_report(&locals, &server, server_total, pages))
+
+        let mut report = modupdate::build_report(&locals, &server, server_total, pages);
+
+        // 阶段1：发送 /Installed 匹配结果（所有非 known_not_in_installed 的项）
+        // 同时计算 Detail 补充检测阶段的进度基数
+        for (i, item) in report.items.iter().enumerate() {
+            let _ = app_for_events.emit("mod-update://item", item);
+            let _ = app_for_events.emit("mod-update://progress", serde_json::json!({
+                "completed": i + 1,
+                "total": total,
+                "phase": "installed",
+            }));
+        }
+
+        // Detail 补充检测：缓存优先 + 5 路并发
+        let pending_count = report
+            .items
+            .iter()
+            .filter(|i| i.category == "known_not_in_installed" && i.workshop_id > 0)
+            .count();
+        if pending_count > 0 {
+            log::info!(
+                target: "modupdate",
+                "Detail 补充检测开始：{} 个待查询，并发上限 {}",
+                pending_count,
+                modupdate::DETAIL_CONCURRENCY
+            );
+
+            // Detail 阶段进度 = 阶段1已完成 + 当前 Detail 序号
+            let base_progress = total - pending_count;
+            let app_cb = app_for_events.clone();
+            let app_for_cache = app_for_events.clone();
+
+            // 缓存优先闭包：先查 24h 内的 detail 缓存，未命中才发网络请求
+            let detail_with_cache = |ws_id: i64| -> modupdate::DetailResult {
+                let cache_key = cache::detail_key(ws_id);
+
+                // 1. 查缓存
+                if let Some(hit) = cache::get_for_app(&app_for_cache, &cache_key) {
+                    let age_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                        .saturating_sub(hit.saved_at_ms);
+                    if age_ms < modupdate::DETAIL_CACHE_TTL_MS {
+                        return match modupdate::parse_server_ms(hit.value.get("lastUpdate")) {
+                            Some(ms) => modupdate::DetailResult::CacheHit(ms),
+                            None => modupdate::DetailResult::CacheNoTime,
+                        };
+                    }
+                }
+
+                // 2. 缓存未命中或过期，发网络请求
+                match client.detail(ws_id) {
+                    Ok(value) => {
+                        cache::put_for_app(&app_for_cache, &cache_key, "detail", value.clone());
+                        match modupdate::parse_server_ms(value.get("lastUpdate")) {
+                            Some(ms) => modupdate::DetailResult::NetworkTime(ms),
+                            None => modupdate::DetailResult::NetworkNoTime,
+                        }
+                    }
+                    Err(_) => modupdate::DetailResult::NetworkFailed,
+                }
+            };
+
+            modupdate::supplement_with_detail(&mut report, detail_with_cache, Some(&move |detail_done: usize, _detail_total: usize, item: &modupdate::ModUpdateItem| {
+                let _ = app_cb.emit("mod-update://item", item);
+                let _ = app_cb.emit("mod-update://progress", serde_json::json!({
+                    "completed": base_progress + detail_done,
+                    "total": total,
+                    "phase": "detail",
+                }));
+            }));
+            log::info!(
+                target: "modupdate",
+                "Detail 检测完成：总计 {}，缓存命中 {}，网络成功 {}，网络失败 {}，有效时间 {}，缺少时间 {}",
+                report.detail_requested,
+                report.detail_cache_hit,
+                report.detail_network_ok,
+                report.detail_network_failed,
+                report.detail_succeeded - report.items.iter().filter(|i| i.category == "data_incomplete" && i.server_last_update_ms.is_none()).count(),
+                report.detail_requested.saturating_sub(report.detail_succeeded),
+            );
+        }
+
+        // 发送完成事件
+        let _ = app_for_events.emit("mod-update://finished", serde_json::json!({
+            "total": total,
+            "updateCount": report.update_count,
+            "detailRequested": report.detail_requested,
+            "detailSucceeded": report.detail_succeeded,
+            "detailFailed": report.detail_failed,
+            "detailCacheHit": report.detail_cache_hit,
+            "detailNetworkOk": report.detail_network_ok,
+            "detailNetworkFailed": report.detail_network_failed,
+        }));
+
+        Ok(report)
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("批量检查任务失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("lib.batchCheckFailed", json!({ "error": e.to_string() })), None))?
 }
 /// 首次启动引导用：本机真实存在、含 local/subscribed 的候选路径（只有路径）
 #[tauri::command]
@@ -358,7 +481,7 @@ async fn scan_mods(
         _ => match settings_path(&app).map(|p| settings::load(&p)) {
             Ok(saved) => match saved.mod_root {
                 Some(raw) if !raw.trim().is_empty() => PathBuf::from(raw),
-                _ => return Err("尚未设置《帝国时代 II：决定版》的模组根目录".to_string()),
+                _ => return Err(user_err("lib.modRootNotSet", json!({}))),
             },
             Err(e) => return Err(e),
         },
@@ -373,19 +496,17 @@ async fn set_mod_root(
 ) -> Result<models::ScanReport, String> {
     let trimmed = root.trim().to_string();
     if trimmed.is_empty() {
-        return Err("路径为空".to_string());
+        return Err(user_err("lib.pathEmpty", json!({})));
     }
     let path = PathBuf::from(&trimmed);
     if !path.exists() {
-        return Err(format!("路径不存在：{trimmed}"));
+        return Err(user_err("lib.pathNotExist", json!({ "path": trimmed })));
     }
     if !path.is_dir() {
-        return Err(format!("该路径不是文件夹：{trimmed}"));
+        return Err(user_err("lib.pathNotDir", json!({ "path": trimmed })));
     }
     if !settings::is_mod_root(&path) {
-        return Err(format!(
-            "该目录下没有 local 或 subscribed 子目录，看起来不是 AoE2DE 的模组根目录：{trimmed}"
-        ));
+        return Err(user_err("lib.notModRoot", json!({ "path": trimmed })));
     }
 
     let report = run_scan(app.clone(), path).await?;
@@ -404,17 +525,17 @@ async fn mod_stats(app: tauri::AppHandle, path: String) -> Result<models::ModSta
         .map(|p| settings::load(&p))
         .ok()
         .and_then(|s| s.mod_root)
-        .ok_or_else(|| "尚未设置模组根目录".to_string())?;
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
 
-    let root_canon = fs::canonicalize(&root).map_err(|e| format!("根目录不可访问：{e}"))?;
-    let target_canon = fs::canonicalize(&path).map_err(|e| format!("目标路径不可访问：{e}"))?;
+    let root_canon = fs::canonicalize(&root).map_err(|e| user_err("lib.rootInaccessible", json!({ "error": e.to_string() })))?;
+    let target_canon = fs::canonicalize(&path).map_err(|e| user_err("lib.targetInaccessible", json!({ "error": e.to_string() })))?;
     if !target_canon.starts_with(&root_canon) {
-        return Err("拒绝访问：目标路径不在模组根目录内".to_string());
+        return Err(user_err("lib.outsideRoot", json!({})));
     }
 
     tauri::async_runtime::spawn_blocking(move || scan::dir_stats(&target_canon))
         .await
-        .map_err(|e| format!("统计任务执行失败：{e}"))?
+        .map_err(|e| user_err("lib.statsFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- 官网账号与会话 ----------------
@@ -435,10 +556,10 @@ struct SessionStatus {
 fn storage_note(source: online::session::SessionSource) -> String {
     match source {
         online::session::SessionSource::Webview => {
-            "WebView2 会话 Cookie（数据目录已持久化）".to_string()
+            user_err("session.storageWebview", json!({}))
         }
         online::session::SessionSource::Cache => {
-            "本地加密缓存（DPAPI，仅当前 Windows 用户可解密）".to_string()
+            user_err("session.storageCache", json!({}))
         }
     }
 }
@@ -448,7 +569,7 @@ fn session_status_logged_out(error: Option<String>) -> SessionStatus {
         logged_in: false,
         cookie_count: 0,
         window_ready: false,
-        storage: "未登录".to_string(),
+        storage: user_err("session.notLoggedIn", json!({})),
         cookie_source: None,
         error,
     }
@@ -490,7 +611,8 @@ async fn online_session_status(app: tauri::AppHandle) -> SessionStatus {
             }
         }
         Ok(Err(e)) => {
-            if e.contains("尚未登录") {
+            // v0.4.9：probe_session 失败返回错误码协议字符串，"未登录"是预期分支（无 cookie），不打 error 文案
+            if e.contains("account.notLoggedIn") {
                 session_status_logged_out(None)
             } else {
                 session_status_logged_out(Some(format!("读取会话 Cookie 失败：{e}")))
@@ -808,15 +930,15 @@ async fn reveal_mod_folder(app: tauri::AppHandle, path: String) -> Result<(), St
     let settings = settings::load_for_app(&app);
     let root = settings
         .mod_root
-        .ok_or_else(|| "尚未设置游戏模组目录".to_string())?;
-    let target = std::fs::canonicalize(&path).map_err(|e| format!("模组目录不可访问：{e}"))?;
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
+    let target = std::fs::canonicalize(&path).map_err(|e| user_err("lib.targetInaccessible", json!({ "error": e.to_string() })))?;
     let root_dir =
-        std::fs::canonicalize(&root).map_err(|e| format!("模组根目录不可访问：{e}"))?;
+        std::fs::canonicalize(&root).map_err(|e| user_err("lib.rootInaccessible", json!({ "error": e.to_string() })))?;
     if !target.starts_with(&root_dir) {
-        return Err("拒绝打开模组根目录之外的路径".to_string());
+        return Err(user_err("lib.outsideRoot", json!({})));
     }
     if !target.is_dir() {
-        return Err("目标不是一个文件夹".to_string());
+        return Err(user_err("lib.targetNotDir", json!({})));
     }
     #[cfg(windows)]
     {
@@ -826,12 +948,12 @@ async fn reveal_mod_folder(app: tauri::AppHandle, path: String) -> Result<(), St
         std::process::Command::new("explorer.exe")
             .raw_arg(arg)
             .spawn()
-            .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+            .map_err(|e| user_err("lib.explorerFailed", json!({ "error": e.to_string() })))?;
         Ok(())
     }
     #[cfg(not(windows))]
     {
-        Err("仅支持 Windows".to_string())
+        Err(user_err("lib.windowsOnly", json!({})))
     }
 }
 
@@ -846,7 +968,7 @@ async fn online_tags(app: tauri::AppHandle) -> Result<Vec<online::models::ModTag
         })
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("请求任务失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("lib.taskRequestFailed", json!({ "error": e.to_string() })), None))?
 }
 
 #[tauri::command]
@@ -874,7 +996,7 @@ async fn online_find(
         Ok(result)
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("查询任务失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("lib.taskQueryFailed", json!({ "error": e.to_string() })), None))?
 }
 
 #[tauri::command]
@@ -896,7 +1018,7 @@ async fn online_installed(
         Ok(result)
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("查询任务失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("lib.taskQueryFailed", json!({ "error": e.to_string() })), None))?
 }
 
 #[tauri::command]
@@ -915,7 +1037,7 @@ async fn online_detail(
         Ok(value)
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("请求任务失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("lib.taskRequestFailed", json!({ "error": e.to_string() })), None))?
 }
 
 // ---------------- 在线数据离线缓存（SWR 秒开） ----------------
@@ -1101,7 +1223,7 @@ async fn online_index_status(app: tauri::AppHandle) -> online_index::IndexStatus
 async fn online_index_sync(app: tauri::AppHandle) -> Result<online_index::SyncReport, ApiFailure> {
     tauri::async_runtime::spawn_blocking(move || online_index::sync_blocking(&app, "manual"))
         .await
-        .map_err(|e| ApiFailure::new("internal", format!("索引任务失败：{e}"), None))?
+        .map_err(|e| ApiFailure::new("internal", user_err("index.taskFailed", json!({ "error": e.to_string() })), None))?
 }
 
 /// 暂停 / 继续本地索引。
@@ -1399,17 +1521,17 @@ fn write_final_status(
         let _ = presets::touch_last_update(status_path, backup_dir, &sel, skip_process_check);
         let mut parts: Vec<String> = Vec::new();
         if o.record_added {
-            parts.push("已新建 local// 记录并置为启用".to_string());
+            parts.push(user_err("install.recordAdded", json!({})));
         } else if o.path_updated {
-            parts.push("已把记录 Path 改为 local// 并置为启用".to_string());
+            parts.push(user_err("install.recordPathUpdated", json!({})));
         } else {
-            parts.push("local// 记录已是最新状态".to_string());
+            parts.push(user_err("install.recordAlreadyLatest", json!({})));
         }
         if o.workshop_id_cleared {
-            parts.push("已把该记录的 WorkshopID 置 0（游戏不会再把它反向同步为订阅）".to_string());
+            parts.push(user_err("install.workshopIdCleared", json!({})));
         }
         if o.unsub_cleared {
-            parts.push("已从 Unsub 列表移除该 WorkshopID".to_string());
+            parts.push(user_err("install.unsubRemoved", json!({})));
         }
         Ok((parts.join("；"), o.backup_path))
     } else {
@@ -1417,6 +1539,7 @@ fn write_final_status(
             workshop_id: u64::try_from(mod_id).unwrap_or(0),
             title: title.to_string(),
             path: install::status_rel_path("subscribed", folder_name),
+            enabled: true,
         };
         let o = presets::register_mod(status_path, backup_dir, &rec, skip_process_check)?;
         Ok((o.message, o.backup_path))
@@ -1498,14 +1621,14 @@ async fn online_install(
             Ok(v) => v,
             Err(e) => {
                 cleanup_paths();
-                return Err(ApiFailure::new("invalid", format!("压缩包校验失败：{e}"), None));
+                return Err(ApiFailure::new("invalid", user_err("install.verifyFailed", json!({ "error": e.to_string() })), None));
             }
         };
 
         let mod_root_dir = install::detect_mod_root(&extract_dir);
         if let Err(e) = install::validate_structure(&mod_root_dir) {
             cleanup_paths();
-            return Err(ApiFailure::new("invalid", format!("内容检查未通过：{e}"), None));
+            return Err(ApiFailure::new("invalid", user_err("install.contentCheckFailed", json!({ "error": e.to_string() })), None));
         }
 
         let install_result = install::install(&mod_root_dir, &root_for_task, mod_id, &title, force, owned_before);
@@ -1532,8 +1655,8 @@ async fn online_install(
         );
         let mut thumbnail_name = install::normalize_thumbnail_extension(target_dir);
         let mut thumb_note = match &thumbnail_name {
-            Some(name) => format!("缩略图：{name}"),
-            None => "缩略图：没有".to_string(),
+            Some(name) => user_err("install.thumbnailPresent", json!({ "name": name })),
+            None => user_err("install.thumbnailNone", json!({})),
         };
         if !install::has_thumbnail(target_dir) {
             if let Some(url) = thumbnail_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
@@ -1541,11 +1664,11 @@ async fn online_install(
                     Ok(bytes) => match install::write_thumbnail(target_dir, &bytes) {
                         Ok(path) => {
                             thumbnail_name = Some("thumbnail.jpg".to_string());
-                            thumb_note = format!("缩略图：已从官网下载（{path}）");
+                            thumb_note = user_err("install.thumbnailDownloaded", json!({ "path": path }));
                         }
-                        Err(e) => thumb_note = format!("缩略图已下载但写入失败：{e}"),
+                        Err(e) => thumb_note = user_err("install.thumbnailWriteFailed", json!({ "error": e })),
                     },
-                    Err(e) => thumb_note = format!("缩略图下载失败：{}", e.message),
+                    Err(e) => thumb_note = user_err("install.thumbnailDownloadFailed", json!({ "error": e.message })),
                 }
             }
         }
@@ -1553,14 +1676,14 @@ async fn online_install(
             Ok(install::InfoAction::Written(path)) => (
                 true,
                 Some(path.clone()),
-                format!("已按游戏格式补全 info.json（{path}）"),
+                user_err("install.infoJsonWritten", json!({ "path": path })),
             ),
             Ok(install::InfoAction::AlreadyExists) => {
-                (false, None, "info.json 已存在，未改动".to_string())
+                (false, None, user_err("install.infoJsonExists", json!({})))
             }
             Err(e) => {
                 log::warn!(target: "install", "生成 info.json 失败（模组可能不被游戏识别）：{e}");
-                (false, None, format!("info.json 生成失败：{e}"))
+                (false, None, user_err("install.infoJsonFailed", json!({ "error": e })))
             }
         };
         let assets = InstallAssets {
@@ -1638,12 +1761,12 @@ async fn online_install(
                             final_dir = target.from.display().to_string();
                             final_folder = folder_name.clone();
                             final_path = install::status_rel_path("subscribed", &folder_name);
-                            "已把目录挪回 subscribed".to_string()
+                            user_err("install.rolledBackToSubscribed", json!({}))
                         }
-                        Err(back) => format!("回滚失败，请手动把目录挪回 subscribed：{back}"),
+                        Err(back) => user_err("install.rollbackFailed", json!({ "error": back })),
                     }
                 } else {
-                    "目录本来就在 subscribed".to_string()
+                    user_err("install.alreadyInSubscribed", json!({}))
                 };
                 match write_final_status(
                     &status_path,
@@ -1727,7 +1850,7 @@ async fn online_install(
         })
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("安装任务失败：{e}"), None))?;
+    .map_err(|e| ApiFailure::new("internal", user_err("install.taskFailed", json!({ "error": e.to_string() })), None))?;
 
     result
 }
@@ -1774,7 +1897,7 @@ async fn online_uninstall(
                 .map_err(|e| ApiFailure::new("install", e, None))
         })
         .await
-        .map_err(|e| ApiFailure::new("internal", format!("卸载校验失败：{e}"), None))??;
+        .map_err(|e| ApiFailure::new("internal", user_err("uninstall.verifyFailed", json!({ "error": e.to_string() })), None))??;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<UninstallReport, ApiFailure> {
         // ② 只删这一个目录
@@ -1793,9 +1916,9 @@ async fn online_uninstall(
                     r.removed,
                     r.backup_path,
                     if r.removed {
-                        "已从 mod-status.json 移除该记录".to_string()
+                        user_err("uninstall.recordRemoved", json!({}))
                     } else {
-                        "mod-status.json 里本来就没有该记录".to_string()
+                        user_err("uninstall.recordNotPresent", json!({}))
                     },
                 ),
                 Err(e) => {
@@ -1803,7 +1926,7 @@ async fn online_uninstall(
                     (
                         false,
                         None,
-                        format!("本地文件已删除，但 mod-status.json 记录未清理：{e}"),
+                        user_err("uninstall.recordCleanupFailed", json!({ "error": e })),
                     )
                 }
             };
@@ -1819,25 +1942,16 @@ async fn online_uninstall(
 
         let version_backups = install::list_version_backups(&target.parent, &target.folder_name);
 
-        let mut parts = vec![format!(
-            "已删除本地目录 {}（{} 个文件 / {} 字节）",
-            target.dir.display(),
-            file_count,
-            bytes
-        )];
+        let mut parts = vec![user_err("uninstall.deletedDir", json!({ "dir": target.dir.display().to_string(), "files": file_count, "bytes": bytes }))];
         parts.push(status_note);
         if metadata_removed {
-            parts.push("已清理模组分类元数据".to_string());
+            parts.push(user_err("uninstall.metadataCleaned", json!({})));
         }
         if !version_backups.is_empty() {
-            parts.push(format!(
-                "保留了 {} 个旧版本备份：{}",
-                version_backups.len(),
-                version_backups.join(" / ")
-            ));
+            parts.push(user_err("uninstall.keptBackups", json!({ "count": version_backups.len(), "backups": version_backups.join(" / ") })));
         }
         if let Some(backup) = &status_backup_path {
-            parts.push(format!("mod-status.json 备份：{backup}"));
+            parts.push(user_err("uninstall.statusBackup", json!({ "path": backup })));
         }
         let message = parts.join("；");
         log::info!(target: "install", "modId={mod_id} 卸载完成：{message}");
@@ -1856,7 +1970,7 @@ async fn online_uninstall(
         })
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("卸载任务执行失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("uninstall.taskFailed", json!({ "error": e.to_string() })), None))?
 }
 
 // ---------------- 本地页：删除任意来源的模组 + 在线页安装索引 ----------------
@@ -1889,7 +2003,7 @@ async fn delete_mod_files(
                 .map_err(|e| ApiFailure::new("install", e, None))
         })
         .await
-        .map_err(|e| ApiFailure::new("internal", format!("删除校验失败：{e}"), None))??;
+        .map_err(|e| ApiFailure::new("internal", user_err("uninstall.deleteVerifyFailed", json!({ "error": e.to_string() })), None))??;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<UninstallReport, ApiFailure> {
         // ② 只删这一个目录
@@ -1908,9 +2022,9 @@ async fn delete_mod_files(
                     r.removed,
                     r.backup_path,
                     if r.removed {
-                        "已从 mod-status.json 移除该记录".to_string()
+                        user_err("uninstall.recordRemoved", json!({}))
                     } else {
-                        "mod-status.json 里本来就没有该记录".to_string()
+                        user_err("uninstall.recordNotPresent", json!({}))
                     },
                 ),
                 Err(e) => {
@@ -1918,15 +2032,21 @@ async fn delete_mod_files(
                     (
                         false,
                         None,
-                        format!("本地文件已删除，但 mod-status.json 记录未清理：{e}"),
+                        user_err("uninstall.recordCleanupFailed", json!({ "error": e })),
                     )
                 }
             };
 
-        // ④ 清软件自己的分类元数据（无 WorkshopID 的记录本就不存在）
+        // ④ 清软件自己的分类元数据
+        // 订阅模组：按 mod_id 删除；第三方本地模组：按 folder_name 删除 local:: key
         let metadata_removed = if mod_id > 0 {
             metadata::remove_for_app(&handle, mod_id).unwrap_or_else(|e| {
                 log::warn!(target: "metadata", "modId={mod_id} 元数据删除失败：{e}");
+                false
+            })
+        } else if target.kind == "local" {
+            metadata::remove_local_for_app(&handle, &target.folder_name).unwrap_or_else(|e| {
+                log::warn!(target: "metadata", "local/{} 元数据删除失败：{e}", target.folder_name);
                 false
             })
         } else {
@@ -1935,25 +2055,16 @@ async fn delete_mod_files(
 
         let version_backups = install::list_version_backups(&target.parent, &target.folder_name);
 
-        let mut parts = vec![format!(
-            "已删除本地目录 {}（{} 个文件 / {} 字节）",
-            target.dir.display(),
-            file_count,
-            bytes
-        )];
+        let mut parts = vec![user_err("uninstall.deletedDir", json!({ "dir": target.dir.display().to_string(), "files": file_count, "bytes": bytes }))];
         parts.push(status_note);
         if metadata_removed {
-            parts.push("已清理模组分类元数据".to_string());
+            parts.push(user_err("uninstall.metadataCleaned", json!({})));
         }
         if !version_backups.is_empty() {
-            parts.push(format!(
-                "保留了 {} 个旧版本备份：{}",
-                version_backups.len(),
-                version_backups.join(" / ")
-            ));
+            parts.push(user_err("uninstall.keptBackups", json!({ "count": version_backups.len(), "backups": version_backups.join(" / ") })));
         }
         if let Some(backup) = &status_backup_path {
-            parts.push(format!("mod-status.json 备份：{backup}"));
+            parts.push(user_err("uninstall.statusBackup", json!({ "path": backup })));
         }
         let message = parts.join("；");
         log::info!(target: "install", "删除完成：{message}");
@@ -1972,7 +2083,7 @@ async fn delete_mod_files(
         })
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("删除任务执行失败：{e}"), None))?
+    .map_err(|e| ApiFailure::new("internal", user_err("uninstall.deleteTaskFailed", json!({ "error": e.to_string() })), None))?
 }
 
 /// 在线页用：本机已安装索引（WorkshopID → 目录/来源）。只读目录名与元数据，不做特征扫描。
@@ -1983,7 +2094,7 @@ async fn installed_local_index(
     let root = settings::load_for_app(&app)
         .mod_root
         .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
     let meta = metadata::load_for_app(&app);
     tauri::async_runtime::spawn_blocking(move || {
         scan::installed_index(PathBuf::from(root).as_path(), &meta)
@@ -1999,7 +2110,7 @@ async fn installed_local_index(
 #[tauri::command]
 fn open_mod_webpage(mod_id: i64) -> Result<String, String> {
     if mod_id <= 0 {
-        return Err("WorkshopID 无效，无法打开网页".to_string());
+        return Err(user_err("webpage.invalidModId", json!({})));
     }
     let url = format!("{}/mods/details/{mod_id}/", online::api::WEBSITE_ORIGIN);
     #[cfg(windows)]
@@ -2008,12 +2119,12 @@ fn open_mod_webpage(mod_id: i64) -> Result<String, String> {
         std::process::Command::new("explorer.exe")
             .raw_arg(&url)
             .spawn()
-            .map_err(|e| format!("无法打开默认浏览器：{e}"))?;
+            .map_err(|e| user_err("webpage.openFailed", json!({ "error": e.to_string() })))?;
         Ok(url)
     }
     #[cfg(not(windows))]
     {
-        Err(format!("仅支持 Windows（目标地址：{url}）"))
+        Err(user_err("webpage.windowsOnly", json!({ "url": url })))
     }
 }
 
@@ -2042,7 +2153,7 @@ fn open_external(url: String) -> Result<String, String> {
     let trimmed = url.trim();
     let lower = trimmed.to_ascii_lowercase();
     if !lower.starts_with("https://") {
-        return Err(format!("只允许 https 外链（收到：{trimmed}）"));
+        return Err(user_err("external.notHttps", json!({ "url": trimmed })));
     }
     let host = lower
         .trim_start_matches("https://")
@@ -2051,14 +2162,14 @@ fn open_external(url: String) -> Result<String, String> {
         .unwrap_or("")
         .to_string();
     if host.is_empty() {
-        return Err(format!("不在白名单内的域名（{host}），已拒绝打开"));
+        return Err(user_err("external.hostEmpty", json!({})));
     }
     let allowed = ALLOWED_HOSTS.contains(&host.as_str())
         || ALLOWED_HOST_SUFFIXES
             .iter()
             .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")));
     if !allowed {
-        return Err(format!("不在白名单内的域名（{host}），已拒绝打开"));
+        return Err(user_err("external.hostNotAllowed", json!({ "host": host })));
     }
 
     #[cfg(windows)]
@@ -2067,12 +2178,12 @@ fn open_external(url: String) -> Result<String, String> {
         std::process::Command::new("explorer.exe")
             .raw_arg(trimmed)
             .spawn()
-            .map_err(|e| format!("无法打开默认浏览器：{e}"))?;
+            .map_err(|e| user_err("webpage.openFailed", json!({ "error": e.to_string() })))?;
         Ok(trimmed.to_string())
     }
     #[cfg(not(windows))]
     {
-        Err(format!("仅支持 Windows（目标地址：{trimmed}）"))
+        Err(user_err("webpage.windowsOnly", json!({ "url": trimmed })))
     }
 }
 
@@ -2135,10 +2246,10 @@ async fn toggle_mod_enabled(
     let root = settings::load_for_app(&app)
         .mod_root
         .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
 
     if kind != "local" && kind != "subscribed" {
-        return Err(format!("未知的模组来源：{kind}"));
+        return Err(user_err("modOps.unknownKind", json!({ "kind": kind })));
     }
     let folder = folder_name.trim();
     if folder.is_empty()
@@ -2146,13 +2257,13 @@ async fn toggle_mod_enabled(
         || folder.contains('\\')
         || folder.contains("..")
     {
-        return Err("模组文件夹名不合法".to_string());
+        return Err(user_err("modOps.illegalFolder", json!({})));
     }
 
     let root_path = PathBuf::from(&root);
     let mod_dir = root_path.join(&kind).join(folder);
     if !mod_dir.is_dir() {
-        return Err(format!("模组目录不存在：{}", mod_dir.display()));
+        return Err(user_err("modOps.dirNotExist", json!({ "path": mod_dir.display().to_string() })));
     }
 
     let status_path = root_path.join(presets::STATUS_FILE);
@@ -2166,7 +2277,7 @@ async fn toggle_mod_enabled(
         presets::set_enabled(&status_path, &backup_dir, &sel, enabled, false)
     })
     .await
-    .map_err(|e| format!("切换任务执行失败：{e}"))?
+    .map_err(|e| user_err("modOps.toggleFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- 卡片快捷开关 / 工具栏批量启用停用 ----------------
@@ -2183,14 +2294,14 @@ async fn batch_toggle_mods(
     let root = settings::load_for_app(&app)
         .mod_root
         .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
 
     if targets.is_empty() {
-        return Err("当前列表没有可操作的模组".to_string());
+        return Err(user_err("modOps.noTargets", json!({})));
     }
     for target in &targets {
         if target.kind != "local" && target.kind != "subscribed" {
-            return Err(format!("未知的模组来源：{}", target.kind));
+            return Err(user_err("modOps.unknownKind", json!({ "kind": target.kind })));
         }
         let folder = target.folder_name.trim();
         if folder.is_empty()
@@ -2198,7 +2309,7 @@ async fn batch_toggle_mods(
             || folder.contains('\\')
             || folder.contains("..")
         {
-            return Err(format!("模组文件夹名不合法：{}", target.folder_name));
+            return Err(user_err("modOps.illegalFolderNamed", json!({ "name": target.folder_name })));
         }
     }
 
@@ -2209,7 +2320,7 @@ async fn batch_toggle_mods(
         presets::batch_set_enabled(&status_path, &backup_dir, &targets, enable, false)
     })
     .await
-    .map_err(|e| format!("批量切换任务执行失败：{e}"))?
+    .map_err(|e| user_err("modOps.batchFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- v0.2：手动拖拽排序 ----------------
@@ -2226,7 +2337,7 @@ async fn update_mod_priority(
     let root = settings::load_for_app(&app)
         .mod_root
         .filter(|r| !r.trim().is_empty())
-        .ok_or_else(|| "尚未设置模组根目录，请先在“本地模组”页选择游戏模组目录".to_string())?;
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
 
     let status_path = PathBuf::from(&root).join(presets::STATUS_FILE);
     let backup_dir = presets::backups_dir_for(&app)?;
@@ -2235,7 +2346,7 @@ async fn update_mod_priority(
         presets::reorder_priority(&status_path, &backup_dir, &ordered, false)
     })
     .await
-    .map_err(|e| format!("排序任务执行失败：{e}"))?
+    .map_err(|e| user_err("modOps.reorderFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- v0.5：模组收藏与自定义备注（user_data.json） ----------------
@@ -2304,7 +2415,7 @@ fn cache_kind_index(kind: &str) -> Result<usize, String> {
         "image" => Ok(CACHE_KIND_IMAGE),
         "modinfo" => Ok(CACHE_KIND_MODINFO),
         "translation" => Ok(CACHE_KIND_TRANSLATION),
-        other => Err(format!("未知的缓存类型：{other}")),
+        other => Err(user_err("cache.unknownKind", json!({ "kind": other }))),
     }
 }
 
@@ -2452,20 +2563,20 @@ async fn cache_dirs(app: tauri::AppHandle) -> CacheDirsView {
 fn prepare_cache_dir(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim().trim_end_matches(['\\', '/']);
     if trimmed.is_empty() {
-        return Err("目录路径不能为空".to_string());
+        return Err(user_err("cache.dirEmpty", json!({})));
     }
     let path = PathBuf::from(trimmed);
     if !path.is_absolute() {
-        return Err(format!("请选择完整路径（如 D:\\AoE2Cache）：{}", path.display()));
+        return Err(user_err("cache.dirNotAbsolute", json!({ "path": path.display().to_string() })));
     }
     if path.is_file() {
-        return Err(format!("这个路径是一个文件，不是文件夹：{}", path.display()));
+        return Err(user_err("cache.dirIsFile", json!({ "path": path.display().to_string() })));
     }
-    fs::create_dir_all(&path).map_err(|e| format!("无法创建目录 {}：{e}", path.display()))?;
+    fs::create_dir_all(&path).map_err(|e| user_err("cache.createDirFailed", json!({ "path": path.display().to_string(), "error": e.to_string() })))?;
     let probe = path.join(format!(".aoe2-write-test-{}.tmp", std::process::id()));
     let written = fs::write(&probe, b"ok");
     let _ = fs::remove_file(&probe);
-    written.map_err(|e| format!("目标目录不可写（{}）：{e}", path.display()))?;
+    written.map_err(|e| user_err("cache.dirNotWritable", json!({ "path": path.display().to_string(), "error": e.to_string() })))?;
     Ok(path)
 }
 
@@ -2555,7 +2666,7 @@ async fn open_cache_dir(app: tauri::AppHandle, kind: String) -> Result<String, S
         #[cfg(not(windows))]
         {
             let _ = shown;
-            Err("仅支持 Windows".to_string())
+            Err(user_err("lib.windowsOnly", json!({})))
         }
     })
     .await
@@ -2607,7 +2718,7 @@ async fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
         #[cfg(not(windows))]
         {
             let _ = shown;
-            Err("仅支持 Windows".to_string())
+            Err(user_err("lib.windowsOnly", json!({})))
         }
     })
     .await
@@ -2776,7 +2887,7 @@ async fn open_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
         #[cfg(not(windows))]
         {
             let _ = &dir;
-            Err("仅支持 Windows".to_string())
+            Err(user_err("lib.windowsOnly", json!({})))
         }
     })
     .await
@@ -2879,7 +2990,7 @@ fn open_steam_protocol(url: &str) -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("无法唤起 Steam：{e}（请确认已安装并登录 Steam）"))
+        .map_err(|e| user_err("game.steamLaunchFailed", json!({ "error": e.to_string() })))
 }
 
 #[cfg(target_os = "macos")]
@@ -2888,7 +2999,7 @@ fn open_steam_protocol(url: &str) -> Result<(), String> {
         .arg(url)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("无法唤起 Steam：{e}（请确认已安装并登录 Steam）"))
+        .map_err(|e| user_err("game.steamLaunchFailed", json!({ "error": e.to_string() })))
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -2897,7 +3008,7 @@ fn open_steam_protocol(url: &str) -> Result<(), String> {
         .arg(url)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("无法唤起 Steam：{e}（请确认已安装并登录 Steam）"))
+        .map_err(|e| user_err("game.steamLaunchFailed", json!({ "error": e.to_string() })))
 }
 
 /// 启动游戏：校验游戏根目录 → 通过 Steam 协议拉起游戏。
@@ -2925,10 +3036,7 @@ async fn launch_game(app: tauri::AppHandle, exe_path: Option<String>) -> Result<
             .map(std::path::PathBuf::from);
         if let Some(picked) = from_frontend.as_ref() {
             if !is_game_exe(picked) {
-                return Err(format!(
-                    "选择的文件不是 AoE2 决定版主程序（需要 AoE2DE_s.exe）：{}",
-                    picked.display()
-                ));
+                return Err(user_err("settings.gameRootNoExe", json!({ "path": picked.display().to_string() })));
             }
         }
 
@@ -3049,6 +3157,22 @@ pub fn run() {
                 None => log::error!(target: "app-exit", "重复启动回调里找不到 label=main 的主窗口"),
             }
         }))
+        // 主窗口状态持久化：只记忆 SIZE/POSITION/MAXIMIZED，移动或缩放后 debounce 自动落盘。
+        // 不记 VISIBLE，避免异常退出后下次启动主窗口变成隐藏状态。
+        // with_filter 只跟踪 main 窗口，账号登录弹窗(ACCOUNT_WINDOW)不参与。
+        // skip_initial_state("main")：插件不自动恢复 main，改由 setup 里手动 restore_state + show()，
+        // 避免默认位置先显示再跳位置的闪现。
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .with_filter(|label| label == "main")
+                .skip_initial_state("main")
+                .build(),
+        )
         // 日志插件紧随其后：Stdout + 落盘双路输出。
         // v3.2：release 构建的 GUI 没有终端可看，只写 Stdout 等于没有日志；
         // 现在同时写 %LOCALAPPDATA%\<bundleId>\logs\ 下的 aoe2mm-<启动时间>.log，
@@ -3079,11 +3203,16 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
+        .manage(import::ImportTaskRegistry::default())
         // 封面图缓存在 %APPDATA% 下的 image_cache 目录；
         // tauri.conf.json 的 assetProtocol.scope 是空的，必须在运行时显式放行，
         // 否则前端 asset: URL 读本地 jpg 会被拒绝。
         .setup(|app| {
             images::allow_scope(app.handle());
+            // 启动时清理上次崩溃/取消遗留的 import-* 暂存目录（>1 小时）
+            if let Ok(root) = mod_root(app.handle()) {
+                import::cleanup_stale_staging(&root);
+            }
             // v0.4.7：每次运行一个日志文件，这里清理超出的历史文件（保留 20 份）。
             // 放在 setup 而不是插件构建期：那时 AppHandle 可用，能拿到准确的日志目录。
             match logs_dir_for(app.handle()) {
@@ -3098,6 +3227,19 @@ pub fn run() {
             // 反复开关就会堆出一串僵尸 aoe2-mod-manager.exe。
             match app.get_webview_window("main") {
                 Some(main) => {
+                    // 启动闪现消除：tauri.conf.json 里 visible=false，窗口创建后先不显示。
+                    // 这里手动恢复位置/尺寸/最大化，完成后再 show()，避免默认位置先闪现。
+                    // restore_state 失败（无状态文件/文件损坏）不阻断显示，兜底 show()。
+                    let restore_flags = tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED;
+                    match main.restore_state(restore_flags) {
+                        Ok(()) => log::info!(target: "window-state", "启动时主窗口状态已恢复"),
+                        Err(e) => log::warn!(target: "window-state", "启动时主窗口状态恢复失败，按默认尺寸显示：{e}"),
+                    }
+                    let _ = main.show();
+                    let _ = main.set_focus();
+
                     let handle = app.handle().clone();
                     main.on_window_event(move |event| {
                         if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
@@ -3105,6 +3247,15 @@ pub fn run() {
                                 return;
                             }
                             log::info!(target: "app-exit", "收到关闭请求：优雅退出 + 强杀兜底");
+                            // 主动同步保存主窗口状态：不依赖 RunEvent::Exit 钩子，
+                            // 避免 1.2s watchdog 强杀时插件还没来得及写 .window-state.json。
+                            let flags = tauri_plugin_window_state::StateFlags::SIZE
+                                | tauri_plugin_window_state::StateFlags::POSITION
+                                | tauri_plugin_window_state::StateFlags::MAXIMIZED;
+                            match handle.save_window_state(flags) {
+                                Ok(()) => log::info!(target: "window-state", "关闭时主窗口状态已写入磁盘"),
+                                Err(e) => log::warn!(target: "window-state", "关闭时主窗口状态保存失败：{e}"),
+                            }
                             // 先走正常退出：让 RunEvent::Exit / 插件清理有机会执行
                             handle.exit(0);
                             // 再挂 OS 级强杀：1.2 秒内没退干净就直接终结进程
@@ -3192,6 +3343,9 @@ pub fn run() {
             online_cancel_install,
             online_uninstall,
             delete_mod_files,
+            import::analyze_local_zip,
+            import::install_local_zip,
+            import::cancel_import_task,
             installed_local_index,
             open_mod_webpage,
             presets_list,

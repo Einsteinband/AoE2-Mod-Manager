@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::metadata::{self, Store};
 use crate::models::{InstalledIndexEntry, ModEntry, ModSource, ModStats, ScanReport};
+use crate::user_err;
+use serde_json::json;
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -25,8 +27,8 @@ pub(crate) fn normalize_key(raw: &str) -> String {
 
 fn friendly_io_error(err: &std::io::Error) -> String {
     match err.kind() {
-        std::io::ErrorKind::PermissionDenied => "权限不足，Windows 拒绝访问该目录".to_string(),
-        std::io::ErrorKind::NotFound => "路径不存在".to_string(),
+        std::io::ErrorKind::PermissionDenied => user_err("scan.permissionDenied", json!({})),
+        std::io::ErrorKind::NotFound => user_err("scan.pathNotFound", json!({})),
         _ => err.to_string(),
     }
 }
@@ -449,10 +451,7 @@ fn load_status_map(root: &Path, warnings: &mut Vec<String>) -> HashMap<String, S
     let mut map = HashMap::new();
     let path = root.join("mod-status.json");
     if !path.is_file() {
-        warnings.push(format!(
-            "未找到 mod-status.json，模组的启用状态将显示为“未知”（路径：{}）",
-            path.display()
-        ));
+        warnings.push(user_err("scan.statusNotFound", json!({ "path": path.display().to_string() })));
         return map;
     }
     match fs::read(&path).map(|b| String::from_utf8_lossy(&b).to_string()) {
@@ -480,12 +479,9 @@ fn load_status_map(root: &Path, warnings: &mut Vec<String>) -> HashMap<String, S
                     }
                 }
             }
-            Err(e) => warnings.push(format!("mod-status.json 解析失败（{e}），启用状态显示为“未知”")),
+            Err(e) => warnings.push(user_err("scan.statusInvalidJson", json!({ "error": e.to_string() }))),
         },
-        Err(e) => warnings.push(format!(
-            "无法读取 mod-status.json（{}），启用状态显示为“未知”",
-            friendly_io_error(&e)
-        )),
+        Err(e) => warnings.push(user_err("scan.statusReadFailed", json!({ "error": friendly_io_error(&e) }))),
     }
     map
 }
@@ -516,10 +512,10 @@ fn collect_entry(
         match &info_read.error {
             Some(err) => {
                 issues.push(err.clone());
-                issues.push("名称暂用文件夹名，作者与描述标记为“未提供”".to_string());
+                issues.push(user_err("scan.nameFallbackFolder", json!({})));
             }
             None => issues.push(
-                "缺少 info.json：名称取文件夹名，作者与描述标记为“未提供”".to_string(),
+                user_err("scan.noInfoJson", json!({})),
             ),
         }
     }
@@ -554,7 +550,7 @@ fn collect_entry(
     let mut entry_count = 0usize;
     match fs::read_dir(dir) {
         Ok(entries) => entry_count = entries.flatten().count(),
-        Err(e) => issues.push(format!("无法读取模组文件夹：{}", friendly_io_error(&e))),
+        Err(e) => issues.push(user_err("scan.folderUnreadable", json!({ "error": friendly_io_error(&e) }))),
     }
 
     let (mut content_tags, categories, category_source): (Vec<String>, Vec<String>, String) =
@@ -564,8 +560,8 @@ fn collect_entry(
             let probe = probe_dir(dir);
             (probe.tags.clone(), probe.categories(), "heuristic".to_string())
         };
-    if entry_count == 0 && !issues.iter().any(|i| i.starts_with("无法读取")) {
-        issues.push("模组文件夹为空（没有任何文件）".to_string());
+    if entry_count == 0 && !issues.iter().any(|i| i.starts_with("aoe2mm:err:scan.")) {
+        issues.push(user_err("scan.emptyFolder", json!({})));
     }
     // 官方标签是左侧“官方分类”的数据源，必须完整保留（最多 17 项）；
     // 推断标签只做兜底展示，截断到 6 个，且必须非空，否则该模组在左侧无法被筛到
@@ -573,7 +569,7 @@ fn collect_entry(
         // 不截断
     } else {
         if content_tags.is_empty() {
-            content_tags.push("其他".to_string());
+            content_tags.push(user_err("scan.tagOther", json!({})));
         }
         content_tags.truncate(6);
     }
@@ -581,11 +577,11 @@ fn collect_entry(
     let key = normalize_key(&format!("{kind}/{folder_name}"));
     let status = status.get(&key).cloned().unwrap_or_default();
     if status.enabled.is_none() {
-        issues.push("mod-status.json 中没有该模组的记录：启用状态/优先级未知".to_string());
+        issues.push(user_err("scan.notInStatus", json!({})));
     }
 
-    if issues.iter().any(|i| i.starts_with("无法读取模组文件夹")) {
-        parent_warnings.push(format!("{kind}/{folder_name}：读取受限，详情可能不完整"));
+    if issues.iter().any(|i| i.starts_with("aoe2mm:err:scan.folderUnreadable")) {
+        parent_warnings.push(user_err("scan.parentReadLimited", json!({ "path": format!("{kind}/{folder_name}") })));
     }
 
     // 数据模组判定：与分类来源无关，必须每次都做（官方标签里也可能有 Data Mod）
@@ -629,11 +625,7 @@ fn scan_dir(
     warnings: &mut Vec<String>,
 ) -> bool {
     if !dir.is_dir() {
-        warnings.push(format!(
-            "{} 目录不存在：{}",
-            if kind == "local" { "本地模组" } else { "已订阅模组" },
-            dir.display()
-        ));
+        warnings.push(user_err("scan.dirNotExist", json!({ "kind": kind, "path": dir.display().to_string() })));
         return false;
     }
     match fs::read_dir(dir) {
@@ -649,7 +641,7 @@ fn scan_dir(
                             continue;
                         }
                         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                            warnings.push(format!("跳过无法解析名称的文件夹：{}", path.display()));
+                            warnings.push(user_err("scan.unreadableFolderName", json!({ "path": path.display().to_string() })));
                             continue;
                         };
                         if name.starts_with('.') {
@@ -658,19 +650,15 @@ fn scan_dir(
                         found += 1;
                         mods.push(collect_entry(kind, &path, name, status, meta, warnings));
                     }
-                    Err(e) => warnings.push(format!(
-                        "读取 {} 中的条目失败：{}",
-                        dir.display(),
-                        friendly_io_error(&e)
-                    )),
+                    Err(e) => warnings.push(user_err("scan.readEntryFailed", json!({ "dir": dir.display().to_string(), "error": friendly_io_error(&e) }))),
                 }
             }
             if found == 0 {
-                warnings.push(format!("{} 目录中没有模组文件夹：{}", kind, dir.display()));
+                warnings.push(user_err("scan.emptyDir", json!({ "kind": kind, "path": dir.display().to_string() })));
             }
         }
         Err(e) => {
-            warnings.push(format!("无法打开 {} 目录：{}", dir.display(), friendly_io_error(&e)));
+            warnings.push(user_err("scan.openDirFailed", json!({ "dir": dir.display().to_string(), "error": friendly_io_error(&e) })));
             return false;
         }
     }
@@ -775,7 +763,10 @@ pub fn dir_stats(root: &Path) -> Result<ModStats, String> {
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) if dir == root => {
-                return Err(format!("无法读取该模组文件夹（可能是权限问题）：{}", dir.display()))
+                return Err(user_err(
+                    "scan.cannotReadFolder",
+                    serde_json::json!({ "path": dir.display().to_string() }),
+                ))
             }
             Err(_) => continue,
         };
@@ -1108,7 +1099,8 @@ mod tests {
             &mut Vec::new(),
         );
         assert_eq!(entry.category_source, "heuristic");
-        assert_eq!(entry.content_tags, vec!["其他".to_string()]);
+        assert_eq!(entry.content_tags.len(), 1);
+        assert!(entry.content_tags[0].starts_with("aoe2mm:err:scan.tagOther"));
         assert_eq!(entry.categories, vec!["data".to_string()]);
         assert!(entry.official_tags.is_empty());
         let _ = fs::remove_dir_all(&dir);

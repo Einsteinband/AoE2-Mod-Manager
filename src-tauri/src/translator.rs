@@ -18,7 +18,7 @@
 //!    前端每次调用都显式传 `targetLang`，Rust 读设置兜底，不写死任何语言。
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::net;
 use crate::online::ApiFailure;
 use crate::settings;
+use crate::user_err;
 
 pub const FILE_NAME: &str = "translation_cache.json";
 /// 可选配置（不存在 = 自动选择接口）；与其它配置同目录，**不动 settings.rs**
@@ -378,7 +379,7 @@ impl Inflight {
     fn acquire(mod_id: i64) -> Result<Inflight, ApiFailure> {
         let mut list = INFLIGHT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if list.contains(&mod_id) {
-            return Err(ApiFailure::new("busy", "该模组正在翻译，请稍候", None));
+            return Err(ApiFailure::new("busy", user_err("translate.busy", json!({})), None));
         }
         list.push(mod_id);
         Ok(Inflight { mod_id })
@@ -820,7 +821,7 @@ pub fn search_titles(app: &tauri::AppHandle, lang: &str) -> std::collections::Ha
 pub fn put(app: &tauri::AppHandle, mod_id: i64, lang: &str, entry: Entry) -> Result<PathBuf, String> {
     let mut guard = ensure_loaded(app)?;
     let Some(mem) = guard.as_mut() else {
-        return Err("译文缓存未初始化".to_string());
+        return Err(user_err("translate.cacheNotReady", json!({})));
     };
     mem.store
         .entries
@@ -901,7 +902,11 @@ fn status_failure(provider: Provider, code: u16, body: &str) -> ApiFailure {
     };
     ApiFailure::new(
         kind,
-        format!("{} 返回 HTTP {code}：{}", provider.label(), snippet(body, 120)),
+        user_err("translate.providerHttpError", json!({
+            "provider": provider.label(),
+            "code": code,
+            "body": snippet(body, 120),
+        })),
         Some(code),
     )
 }
@@ -911,24 +916,24 @@ fn status_failure(provider: Provider, code: u16, body: &str) -> ApiFailure {
 fn transport_failure(provider: Provider, error: ureq::Transport) -> ApiFailure {
     let msg = error.to_string();
     let lower = msg.to_lowercase();
-    let hint = if lower.contains("dns")
+    let code = if lower.contains("dns")
         || lower.contains("lookup")
         || lower.contains("resolve")
         || lower.contains("name or service")
     {
-        "域名解析失败（该接口可能需要代理）"
+        "translate.dnsFailed"
     } else if lower.contains("timed out") || lower.contains("timeout") {
-        "连接超时"
+        "translate.timeout"
     } else if lower.contains("refused") || lower.contains("unreachable") {
-        "连接被拒绝"
+        "translate.connectionRefused"
     } else if lower.contains("reset") {
-        "连接被重置"
+        "translate.connectionReset"
     } else {
-        "网络请求失败"
+        "translate.networkFailed"
     };
     ApiFailure::new(
         "network",
-        format!("{} 请求失败：{hint}（{msg}）", provider.label()),
+        user_err(code, json!({ "provider": provider.label(), "error": msg })),
         None,
     )
 }
@@ -988,7 +993,7 @@ fn google(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, ApiFa
         let body = match call {
             Ok(resp) => resp
                 .into_string()
-                .map_err(|e| ApiFailure::parse(format!("读取 Google 译文失败：{e}")))?,
+                .map_err(|e| ApiFailure::parse(user_err("translate.readGoogleFailed", json!({ "error": e.to_string() }))))?,
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 log::warn!(target: "translate", "Google {url} 返回 HTTP {code}，尝试下一个端点");
@@ -1004,14 +1009,13 @@ fn google(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, ApiFa
         match parse_google_body(&body) {
             Some(text) => return Ok(text),
             None => {
-                last = Some(ApiFailure::parse(format!(
-                    "Google 返回了空译文（{}）",
-                    snippet(&body, 120)
-                )));
+                last = Some(ApiFailure::parse(user_err("translate.googleEmpty", json!({
+                    "body": snippet(&body, 120),
+                }))));
             }
         }
     }
-    Err(last.unwrap_or_else(|| ApiFailure::parse("Google 翻译不可用")))
+    Err(last.unwrap_or_else(|| ApiFailure::parse(user_err("translate.googleUnavailable", json!({})))))
 }
 
 /// MyMemory 免费接口：返回 `{responseData:{translatedText}, responseStatus, responseDetails}`
@@ -1030,7 +1034,7 @@ fn mymemory(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, Api
     let body = match call {
         Ok(resp) => resp
             .into_string()
-            .map_err(|e| ApiFailure::parse(format!("读取 MyMemory 译文失败：{e}")))?,
+            .map_err(|e| ApiFailure::parse(user_err("translate.readMyMemoryFailed", json!({ "error": e.to_string() }))))?,
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
             return Err(status_failure(Provider::MyMemory, code, &body));
@@ -1039,7 +1043,7 @@ fn mymemory(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, Api
     };
 
     let value: Value = serde_json::from_str(&body)
-        .map_err(|e| ApiFailure::parse(format!("MyMemory 译文不是合法 JSON：{e}")))?;
+        .map_err(|e| ApiFailure::parse(user_err("translate.myMemoryInvalidJson", json!({ "error": e.to_string() }))))?;
     let translated = value
         .get("responseData")
         .and_then(|d| d.get("translatedText"))
@@ -1053,7 +1057,7 @@ fn mymemory(agent: &ureq::Agent, text: &str, target: &str) -> Result<String, Api
         let detail = value
             .get("responseDetails")
             .and_then(|v| v.as_str())
-            .unwrap_or("接口未返回译文")
+            .unwrap_or("aoe2mm:err:translate.noTranslationReturned")
             .to_string();
         let kind = if status == Some(429) || detail.to_ascii_uppercase().contains("QUOTA") {
             "quota"
@@ -1133,10 +1137,10 @@ fn translate_text(
                 log::info!(target: "translate", "{} 翻译完成：{} 块", provider.name(), chunks.len());
                 return Ok((joined, *provider));
             }
-            last = Some(ApiFailure::parse(format!("{} 返回了空译文", provider.label())));
+            last = Some(ApiFailure::parse(user_err("translate.providerEmpty", json!({ "provider": provider.label() }))));
         }
     }
-    Err(last.unwrap_or_else(|| ApiFailure::new("network", "翻译失败：没有可用的翻译接口", None)))
+    Err(last.unwrap_or_else(|| ApiFailure::new("network", user_err("translate.noProvider", json!({})), None)))
 }
 
 // ---------------- 主流程 ----------------
@@ -1155,7 +1159,7 @@ fn run_translation(
 
     let settings = settings::load_for_app(app);
     let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
-        .map_err(|e| ApiFailure::new("network", format!("网络配置无效：{e}"), None))?;
+        .map_err(|e| ApiFailure::new("network", user_err("net.configInvalid", json!({ "error": e.to_string() })), None))?;
     let proxy = net::ureq_proxy(&resolved).map_err(|e| ApiFailure::new("network", e, None))?;
     let config = load_config(app);
     let providers = plan(&settings.translate_provider, &config, &resolved);
@@ -1229,13 +1233,13 @@ pub async fn translate_mod_text(
     target_lang: Option<String>,
 ) -> Result<Translation, ApiFailure> {
     if mod_id <= 0 {
-        return Err(ApiFailure::new("invalid", "模组 ID 无效，无法翻译", None));
+        return Err(ApiFailure::new("invalid", user_err("translate.invalidModId", json!({})), None));
     }
     let lang = resolve_lang(&app, target_lang.as_deref());
     let title = title.trim().to_string();
     let description = description.trim().to_string();
     if title.is_empty() {
-        return Err(ApiFailure::new("invalid", "该模组没有可翻译的标题", None));
+        return Err(ApiFailure::new("invalid", user_err("translate.noTitle", json!({})), None));
     }
     // 硬拦截：描述为空/过短说明详情还没加载完，绝不能拿空文本去翻译并写缓存
     // （否则 hash 被空描述占位，之后详情加载出来也永远不会再翻译）
@@ -1247,7 +1251,7 @@ pub async fn translate_mod_text(
         );
         return Err(ApiFailure::new(
             "not_ready",
-            "模组描述还没加载完成，请稍候再点翻译",
+            user_err("translate.descriptionNotLoaded", json!({})),
             None,
         ));
     }
@@ -1289,7 +1293,7 @@ pub async fn translate_mod_text(
         )
     })
     .await
-    .map_err(|e| ApiFailure::new("internal", format!("翻译任务失败：{e}"), None))?;
+    .map_err(|e| ApiFailure::new("internal", user_err("translate.taskFailed", json!({ "error": e.to_string() })), None))?;
 
     joined
 }
@@ -1456,7 +1460,7 @@ pub fn set_translate_settings(
         } else {
             let normalized = normalize_lang(&trimmed);
             if normalized.is_empty() {
-                return Err(format!("不支持的目标语言：{trimmed}"));
+                return Err(user_err("translate.unsupportedLang", json!({ "lang": trimmed })));
             }
             if !SUPPORTED_LANGS.contains(&normalized.as_str()) {
                 log::warn!(
@@ -1472,7 +1476,7 @@ pub fn set_translate_settings(
         let normalized = provider.trim().to_ascii_lowercase();
         let allowed = ["auto", "google", "mymemory"];
         if !allowed.contains(&normalized.as_str()) {
-            return Err(format!("不支持的翻译引擎：{provider}"));
+            return Err(user_err("translate.unsupportedProvider", json!({ "provider": provider })));
         }
         settings.translate_provider = normalized;
     }
@@ -1787,7 +1791,7 @@ fn write_title_store(path: &Path, store: &TitleStore) -> Result<(), String> {
             }
             Err(second) => {
                 let _ = fs::remove_file(&tmp);
-                Err(format!("写入标题译文表失败：rename={first} copy={second}"))
+                Err(user_err("translate.titleWriteFailed", json!({ "rename": first.to_string(), "copy": second.to_string() })))
             }
         },
     }
@@ -1832,7 +1836,7 @@ fn flush_titles(app: &tauri::AppHandle) {
 
 fn put_title(app: &tauri::AppHandle, mod_id: i64, entry: TitleEntry) -> Result<(), String> {
     let mut guard = ensure_title_loaded(app)?;
-    let mem = guard.as_mut().ok_or_else(|| "标题译文表未初始化".to_string())?;
+    let mem = guard.as_mut().ok_or_else(|| user_err("translate.titleNotReady", json!({})))?;
     mem.store.entries.insert(mod_id.to_string(), entry);
     mem.dirty = true;
     Ok(())
@@ -1841,7 +1845,7 @@ fn put_title(app: &tauri::AppHandle, mod_id: i64, entry: TitleEntry) -> Result<(
 /// 换语言 → 旧译文全部作废（译文是语言相关的，留着只会把中文当日语用）
 fn reset_title_lang(app: &tauri::AppHandle, lang: &str) -> Result<(), String> {
     let mut guard = ensure_title_loaded(app)?;
-    let mem = guard.as_mut().ok_or_else(|| "标题译文表未初始化".to_string())?;
+    let mem = guard.as_mut().ok_or_else(|| user_err("translate.titleNotReady", json!({})))?;
     if mem.store.target_lang == lang {
         return Ok(());
     }
@@ -1905,7 +1909,7 @@ pub fn start_title_job(
     {
         let mut job = lock_title_job();
         if job.running {
-            return Err(ApiFailure::new("busy", "标题翻译已在进行中", None));
+            return Err(ApiFailure::new("busy", user_err("translate.titleBusy", json!({})), None));
         }
         job.running = true;
         job.stop = false;
@@ -1913,7 +1917,7 @@ pub fn start_title_job(
         job.total = 0;
         job.done = 0;
         job.failed = 0;
-        job.message = "正在准备标题翻译".to_string();
+        job.message = user_err("translate.jobPreparing", json!({}));
         job.started_at_ms = now_ms();
         job.finished_at_ms = 0;
     }
@@ -1928,7 +1932,7 @@ pub fn stop_title_job(app: &tauri::AppHandle) -> TitleJobStatus {
         let mut job = lock_title_job();
         if job.running {
             job.stop = true;
-            job.message = "正在停止…".to_string();
+            job.message = user_err("translate.jobStopping", json!({}));
         }
     }
     title_job_status(app)
@@ -1972,9 +1976,9 @@ pub fn title_job_status(app: &tauri::AppHandle) -> TitleJobStatus {
         remaining: total.saturating_sub(done),
         message: if message.trim().is_empty() {
             if index_ready {
-                "空闲：可随时开始批量翻译标题".to_string()
+                user_err("translate.jobIdle", json!({}))
             } else {
-                "在线索引还没建立，暂时没有可翻译的标题".to_string()
+                user_err("translate.jobNoIndex", json!({}))
             }
         } else {
             message
@@ -2016,13 +2020,13 @@ fn run_title_job_inner(app: &tauri::AppHandle, lang: &str) -> Result<String, Api
         .collect();
     let total = pending.len();
     if total == 0 {
-        title_update_progress(0, 0, 0, "所有标题都已翻译");
-        return Ok("所有标题都已翻译".to_string());
+        title_update_progress(0, 0, 0, &user_err("translate.allDone", json!({})));
+        return Ok(user_err("translate.allDone", json!({})));
     }
 
     let settings = settings::load_for_app(app);
     let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
-        .map_err(|e| ApiFailure::new("network", format!("网络配置无效：{e}"), None))?;
+        .map_err(|e| ApiFailure::new("network", user_err("net.configInvalid", json!({ "error": e.to_string() })), None))?;
     let proxy = net::ureq_proxy(&resolved).map_err(|e| ApiFailure::new("network", e, None))?;
     let config = load_config(app);
     let providers = plan(&settings.translate_provider, &config, &resolved);
@@ -2119,21 +2123,21 @@ fn run_title_job_inner(app: &tauri::AppHandle, lang: &str) -> Result<String, Api
             if translated > 0 && translated % TITLE_FLUSH_EVERY == 0 {
                 flush_titles(app);
             }
-            title_update_progress(translated, failed, total, "正在翻译标题");
+            title_update_progress(translated, failed, total, &user_err("translate.jobTranslating", json!({})));
             if outcome.is_none() {
                 if title_stop_requested() {
                     abort.store(true, Ordering::Relaxed);
-                    outcome = Some(Ok(format!("已停止：本次翻译 {translated} 条")));
+                    outcome = Some(Ok(user_err("translate.jobStopped", json!({ "translated": translated }))));
                 } else if translated >= TITLE_MAX_PER_RUN {
                     abort.store(true, Ordering::Relaxed);
-                    outcome = Some(Ok(format!("已达单次上限 {TITLE_MAX_PER_RUN} 条，下次继续")));
+                    outcome = Some(Ok(user_err("translate.jobReachedLimit", json!({ "limit": TITLE_MAX_PER_RUN }))));
                 }
             }
         }
     });
 
     flush_titles(app);
-    outcome.unwrap_or_else(|| Ok(format!("本次翻译 {translated} 条，失败 {failed} 条")))
+    outcome.unwrap_or_else(|| Ok(user_err("translate.jobFinished", json!({ "translated": translated, "failed": failed }))))
 }
 
 #[cfg(test)]

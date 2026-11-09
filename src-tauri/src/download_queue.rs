@@ -14,8 +14,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::scan::now_ms;
+use crate::user_err;
 
 pub const FILE_NAME: &str = "download_queue.json";
 
@@ -92,20 +94,21 @@ pub fn save(path: &Path, snap: &Snapshot) -> Result<String, String> {
     }
 
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| {
+            user_err("queue.createDirFailed", json!({ "path": parent.display().to_string(), "error": e.to_string() }))
+        })?;
     }
 
     let text =
-        serde_json::to_string_pretty(&clean).map_err(|e| format!("下载队列序列化失败：{e}"))?;
+        serde_json::to_string_pretty(&clean).map_err(|e| user_err("queue.serializeFailed", json!({ "error": e.to_string() })))?;
     let tmp_path = path.with_file_name(format!("{FILE_NAME}.aoe2mm-{}.tmp", now_ms()));
     if let Err(e) = fs::write(&tmp_path, text.as_bytes()) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("写入临时文件失败：{e}"));
+        return Err(user_err("queue.writeTmpFailed", json!({ "error": e.to_string() })));
     }
     if let Err(e) = fs::rename(&tmp_path, path) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("替换 download_queue.json 失败：{e}"));
+        return Err(user_err("queue.renameFailed", json!({ "error": e.to_string() })));
     }
 
     log::info!(target: "downloader", "已写入下载队列：{} 条任务", clean.tasks.len());

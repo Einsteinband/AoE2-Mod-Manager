@@ -12,6 +12,7 @@ import { computed, ref, watch, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { customNameOf, displayTitle, isFavorite } from "../../userData";
 import { TAG_ZH } from "../../online/types";
+import { updateIds } from "../../modUpdates";
 import type { ModEntry, SortKey, SourceFilter, StatusFilter } from "../../types";
 
 interface TagOption {
@@ -27,6 +28,7 @@ export interface FilterSnapshot {
   activeTag: string | null;
   sortKey: SortKey;
   favoritesOnly: boolean;
+  updatesOnly: boolean;
 }
 
 /** 官方 17 项分类的固定顺序（直接复用在线页的 TAG_ZH，保证两侧排列一致） */
@@ -52,6 +54,8 @@ export function useLocalFilters(deps: {
   const status = ref<StatusFilter>("all");
   /** v0.5：只看收藏（只过滤 isFavorite === true，按 WorkshopID 匹配） */
   const favoritesOnly = ref(false);
+  /** v0.7：只看有更新的模组（matched && has_update=true） */
+  const updatesOnly = ref(false);
   const sortKey = ref<SortKey>("name");
   /** 左侧选中的官方/推断标签；null = 全部内容 */
   const activeTag = ref<string | null>(null);
@@ -82,12 +86,13 @@ export function useLocalFilters(deps: {
     const fav = favoritesOnly.value;
     /**
      * 收藏视图的数据源 = 已安装条目 ∪ 已卸载/未安装占位条目。
-     * 这是“卸载后卡片不消失”的唯一改动点：占位条目同样按 isFavorite 过滤，天然就在结果里。
+     * 这是”卸载后卡片不消失”的唯一改动点：占位条目同样按 isFavorite 过滤，天然就在结果里。
      */
     const base = fav ? [...mods.value, ...ghostMods.value] : mods.value;
     return base.filter((m) => {
       if (fav && !isFavorite(m.workshopId)) return false;
       if (!fav) {
+        if (updatesOnly.value && !updateIds.value.has(m.id)) return false;
         if (source.value !== "all" && m.kind !== source.value) return false;
         if (status.value === "enabled" && m.enabled !== true) return false;
         if (status.value === "disabled" && m.enabled !== false) return false;
@@ -192,6 +197,7 @@ export function useLocalFilters(deps: {
   const activeTagLabel = computed(() => activeTag.value ?? t("sidebar.allContent"));
 
   const heading = computed(() => {
+    if (updatesOnly.value) return t("updates.heading");
     if (favoritesOnly.value) return t("favorites.heading");
     if (source.value === "local") return t("content.localMods");
     if (source.value === "subscribed") return t("content.subscribedMods");
@@ -202,6 +208,9 @@ export function useLocalFilters(deps: {
   const favoriteLocalCount = computed(
     () => mods.value.filter((m) => isFavorite(m.workshopId)).length + ghostMods.value.length,
   );
+
+  /** v0.7：有更新的模组数量（侧栏计数） */
+  const updatesAvailableCount = computed(() => updateIds.value.size);
 
   /** 内容区副标题右侧的状态文案 */
   const statusText = computed(() => {
@@ -223,6 +232,17 @@ export function useLocalFilters(deps: {
   function toggleFavorites(): void {
     favoritesOnly.value = !favoritesOnly.value;
     if (!favoritesOnly.value) return;
+    updatesOnly.value = false;
+    source.value = "all";
+    status.value = "all";
+    activeTag.value = null;
+  }
+
+  /** v0.7：切换「只看可更新」视图 */
+  function pickUpdatesOnly(): void {
+    updatesOnly.value = !updatesOnly.value;
+    if (!updatesOnly.value) return;
+    favoritesOnly.value = false;
     source.value = "all";
     status.value = "all";
     activeTag.value = null;
@@ -231,16 +251,19 @@ export function useLocalFilters(deps: {
   /** 点来源 / 状态 / 分类：先退出收藏视图，否则条件叠加又会出现计数错位 */
   function pickSource(next: SourceFilter): void {
     favoritesOnly.value = false;
+    updatesOnly.value = false;
     source.value = next;
   }
 
   function pickStatus(next: StatusFilter): void {
     favoritesOnly.value = false;
+    updatesOnly.value = false;
     status.value = next;
   }
 
   function pickTag(next: string | null): void {
     favoritesOnly.value = false;
+    updatesOnly.value = false;
     activeTag.value = next;
   }
 
@@ -251,6 +274,7 @@ export function useLocalFilters(deps: {
     status.value = "all";
     activeTag.value = null;
     favoritesOnly.value = false;
+    updatesOnly.value = false;
   }
 
   /** 排序模式：进入前快照，退出时还原（排序只对全量列表有意义） */
@@ -262,6 +286,7 @@ export function useLocalFilters(deps: {
       activeTag: activeTag.value,
       sortKey: sortKey.value,
       favoritesOnly: favoritesOnly.value,
+      updatesOnly: updatesOnly.value,
     };
   }
 
@@ -272,6 +297,7 @@ export function useLocalFilters(deps: {
     activeTag.value = snap.activeTag;
     sortKey.value = snap.sortKey;
     favoritesOnly.value = snap.favoritesOnly;
+    updatesOnly.value = snap.updatesOnly;
   }
 
   // 重新扫描/卸装后选中的标签可能消失：自动退回“全部内容”，避免莫名空列表
@@ -288,6 +314,7 @@ export function useLocalFilters(deps: {
     source,
     status,
     favoritesOnly,
+    updatesOnly,
     sortKey,
     activeTag,
     sourceCounts,
@@ -298,7 +325,9 @@ export function useLocalFilters(deps: {
     heading,
     contentHint,
     favoriteLocalCount,
+    updatesAvailableCount,
     toggleFavorites,
+    pickUpdatesOnly,
     pickSource,
     pickStatus,
     pickTag,

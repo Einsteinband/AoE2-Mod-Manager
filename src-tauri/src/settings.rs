@@ -1,17 +1,22 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
+use serde_json::json;
 use tauri::Manager;
 
 use crate::models::{RootCandidate, Settings};
 use crate::net;
+use crate::user_err;
 
 /// 配置目录下的 settings.json（首次启动引导、网络设置等共用同一个路径）
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map(|dir| dir.join("settings.json"))
-        .map_err(|e| format!("无法定位应用配置目录：{e}"))
+        .map_err(|e| user_err("settings.configDirNotFound", json!({ "error": e.to_string() })))
 }
 
 /// DPAPI 加密的会话 Cookie 缓存文件（不属于 settings 明文）
@@ -69,13 +74,58 @@ pub fn load(path: &Path) -> Settings {
     }
 }
 
+/// 写入串行锁：同一进程内不会有两个线程同时动 tmp / target。
+static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
+/// 临时文件名序号：避免并发写撞名。
+static SETTINGS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 覆盖式写入 settings.json：写临时文件 → fsync → rename 原子替换。
+///
+/// 失败保护：
+/// - 临时文件写入/fsync 失败：删除 tmp，原 settings.json 不动。
+/// - rename 失败（目标被占用/权限不足）：删除 tmp，原 settings.json 不动。
+/// - 不做 copy 兜底：copy 是覆盖写，中途失败会截断旧配置，不如保留原文件让用户重试。
+/// - 临时文件与正式文件同目录，rename 不会跨卷。
 pub fn save(path: &Path, settings: &Settings) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("无法创建配置目录 {}：{e}", parent.display()))?;
+            .map_err(|e| user_err("settings.createDirFailed", json!({ "path": parent.display().to_string(), "error": e.to_string() })))?;
     }
-    let text = serde_json::to_string_pretty(settings).map_err(|e| format!("配置序列化失败：{e}"))?;
-    fs::write(path, text).map_err(|e| format!("无法写入配置文件 {}：{e}", path.display()))
+    let text = serde_json::to_string_pretty(settings)
+        .map_err(|e| user_err("settings.serializeFailed", json!({ "error": e.to_string() })))?;
+
+    let _io = SETTINGS_IO_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    let seq = SETTINGS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "settings.json".to_string());
+    let tmp = path.with_file_name(format!("{file_name}.{}-{seq}.tmp", std::process::id()));
+
+    let mut file = fs::File::create(&tmp).map_err(|e| {
+        user_err("settings.writeTmpFailed", json!({ "path": tmp.display().to_string(), "error": e.to_string() }))
+    })?;
+    if let Err(e) = file.write_all(text.as_bytes()) {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(user_err("settings.writeTmpFailed", json!({ "path": tmp.display().to_string(), "error": e.to_string() })));
+    }
+    if let Err(e) = file.sync_all() {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(user_err("settings.syncTmpFailed", json!({ "path": tmp.display().to_string(), "error": e.to_string() })));
+    }
+    drop(file);
+
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(user_err("settings.renameFailed", json!({
+            "path": path.display().to_string(),
+            "error": e.to_string(),
+        })));
+    }
+    Ok(())
 }
 
 // ---------------- 首次启动：自动探测游戏模组根目录 ----------------
@@ -317,21 +367,17 @@ pub fn game_root_of_exe(exe: &Path) -> PathBuf {
 pub fn validate_game_root(raw: &str) -> Result<PathBuf, String> {
     let trimmed = raw.trim().trim_end_matches(['\\', '/']);
     if trimmed.is_empty() {
-        return Err("游戏根目录不能为空".to_string());
+        return Err(user_err("settings.gameRootEmpty", json!({})));
     }
     let dir = PathBuf::from(trimmed);
     if !dir.is_absolute() {
-        return Err(format!(
-            "请选择完整的游戏根目录（如 D:\\SteamLibrary\\steamapps\\common\\AoE2DE）：{trimmed}"
-        ));
+        return Err(user_err("settings.gameRootNotAbsolute", json!({ "path": trimmed })));
     }
     if !dir.is_dir() {
-        return Err(format!("游戏根目录配置有误：目录不存在（{trimmed}）"));
+        return Err(user_err("settings.gameRootNotDir", json!({ "path": trimmed })));
     }
     if game_exe_in(&dir).is_none() {
-        return Err(format!(
-            "游戏根目录配置有误：目录里没有 AoE2DE_s.exe（{trimmed}）"
-        ));
+        return Err(user_err("settings.gameRootNoExe", json!({ "path": trimmed })));
     }
     Ok(dir)
 }
@@ -446,4 +492,74 @@ pub fn detect_roots() -> Vec<String> {
 /// 合法的模组根目录：含 local/subscribed，或本身是游戏安装目录（首次启动时 last 两个目录可能还没生成）
 pub fn is_mod_root(dir: &Path) -> bool {
     looks_like_mod_root(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aoe2mm-settings-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample_settings(data_dir: &str) -> Settings {
+        let mut s = Settings::default();
+        s.data_dir = Some(data_dir.to_string());
+        s
+    }
+
+    #[test]
+    fn save_creates_file_when_missing() {
+        let dir = temp_dir("create");
+        let path = dir.join("settings.json");
+        save(&path, &sample_settings("D:/AoE2Data")).unwrap();
+        assert!(path.is_file());
+        let loaded = load(&path);
+        assert_eq!(loaded.data_dir.as_deref(), Some("D:/AoE2Data"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_replaces_existing_content() {
+        let dir = temp_dir("replace");
+        let path = dir.join("settings.json");
+        // 先写一份旧配置
+        save(&path, &sample_settings("C:/OldPath")).unwrap();
+        // 再写新配置
+        save(&path, &sample_settings("D:/NewPath")).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.data_dir.as_deref(), Some("D:/NewPath"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_leaves_no_tmp_behind() {
+        let dir = temp_dir("notmp");
+        let path = dir.join("settings.json");
+        save(&path, &sample_settings("D:/X")).unwrap();
+        let tmp_count = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(tmp_count, 0, "save 成功后不应残留 .tmp 文件");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_preserves_original_when_parent_is_file() {
+        // parent 路径是一个已存在的文件 → create_dir_all 失败 → 原文件不动
+        let dir = temp_dir("parentfile");
+        let blocker = dir.join("blocker");
+        fs::write(&blocker, b"not a dir").unwrap();
+        let path = blocker.join("settings.json");
+        let result = save(&path, &sample_settings("D:/Y"));
+        assert!(result.is_err(), "parent 是文件时 save 应失败");
+        // blocker 文件内容未被破坏
+        assert_eq!(fs::read(&blocker).unwrap(), b"not a dir");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

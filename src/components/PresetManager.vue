@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ApplyReport, ModEntry, Preset, PresetItem } from "../types";
 import { applyPreset, deletePreset, listPresets, savePreset } from "../api";
-import { formatDateTime, translateBackendMessage } from "../format";
+import { formatDateTime, msgText, normalizeBackendError, translateBackendMessage, type Msg } from "../format";
 import ConfirmDialog from "./ConfirmDialog.vue";
 
 const props = defineProps<{ mods: ModEntry[]; appliedId: string | null }>();
@@ -14,8 +14,8 @@ const { t } = useI18n();
 const presets = ref<Preset[]>([]);
 const loading = ref(true);
 const busy = ref<"" | "save" | "apply" | "delete">("");
-const error = ref<string | null>(null);
-const notice = ref<string | null>(null);
+const error = ref<Msg | null>(null);
+const notice = ref<Msg | null>(null);
 const name = ref("");
 const result = ref<ApplyReport | null>(null);
 const resultName = ref("");
@@ -35,16 +35,6 @@ const defaultName = computed(() => {
 
 const effectiveName = computed(() => name.value.trim() || defaultName.value);
 
-function normalizeError(e: unknown): string {
-  if (typeof e === "string") return translateBackendMessage(e);
-  if (e instanceof Error) return translateBackendMessage(e.message);
-  try {
-    return translateBackendMessage(JSON.stringify(e));
-  } catch {
-    return t("labels.unknown");
-  }
-}
-
 /** 与 mod-status.json 的 Path 保持同一形状：local//9_xxx / subscribed//20505_xxx */
 function toItems(mods: ModEntry[]): PresetItem[] {
   return mods.map((m) => ({
@@ -62,7 +52,7 @@ async function load() {
   try {
     presets.value = await listPresets();
   } catch (e) {
-    error.value = normalizeError(e);
+    error.value = normalizeBackendError(e);
   } finally {
     loading.value = false;
   }
@@ -72,7 +62,7 @@ async function doSave() {
   if (busy.value) return;
   const items = toItems(enabled.value);
   if (!items.length) {
-    error.value = t("preset.noEnabled");
+    error.value = { key: "preset.noEnabled" };
     return;
   }
   busy.value = "save";
@@ -83,9 +73,9 @@ async function doSave() {
     const preset = await savePreset(effectiveName.value, items);
     presets.value = await listPresets();
     name.value = "";
-    notice.value = t("preset.saved", { name: preset.name, n: preset.items.length });
+    notice.value = { key: "preset.saved", params: { name: preset.name, n: preset.items.length } };
   } catch (e) {
-    error.value = normalizeError(e);
+    error.value = normalizeBackendError(e);
   } finally {
     busy.value = "";
   }
@@ -121,7 +111,7 @@ async function confirmApply() {
     // 交给 App.vue：重扫 + 记录指纹 + 标记“当前已应用”
     emit("applied", preset.id);
   } catch (e) {
-    applyError.value = normalizeError(e);
+    applyError.value = normalizeBackendError(e);
     error.value = applyError.value;
   } finally {
     busy.value = "";
@@ -139,9 +129,9 @@ async function doDelete(preset: Preset) {
   try {
     presets.value = await deletePreset(preset.id);
     pendingDelete.value = null;
-    notice.value = t("preset.deleted", { name: preset.name });
+    notice.value = { key: "preset.deleted", params: { name: preset.name } };
   } catch (e) {
-    error.value = normalizeError(e);
+    error.value = normalizeBackendError(e);
   } finally {
     busy.value = "";
   }
@@ -193,8 +183,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
           </p>
         </section>
 
-        <div v-if="error" class="preset-alert error">{{ error }}</div>
-        <div v-if="notice" class="preset-alert ok">{{ notice }}</div>
+        <div v-if="error" class="preset-alert error">{{ msgText(error) }}</div>
+        <div v-if="notice" class="preset-alert ok">{{ msgText(notice) }}</div>
 
         <section v-if="result" class="preset-alert ok">
           <strong>{{ resultName }}: {{ translateBackendMessage(result.message) }}</strong>

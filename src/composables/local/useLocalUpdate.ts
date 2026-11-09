@@ -7,10 +7,14 @@
  * 启动检查用 check_update（无防抖）+ 前端 10 分钟节流，失败静默，
  * 没网 / GitHub 限流不应该在界面上刷错误。
  */
-import { ref, type ComputedRef } from "vue";
+import { ref, computed, type ComputedRef, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { checkUpdate, openExternalUrl } from "../../api";
-import { installMod } from "../../online/service";
+import {
+  enqueueLocalUpdate,
+  onTaskSettled,
+  downloadTasks,
+} from "../../online/downloadQueue";
 import { markUpdated } from "../../modUpdates";
 import { sessionPhase } from "../../sessionState";
 import type { ModEntry } from "../../types";
@@ -47,14 +51,55 @@ export function useLocalUpdate(deps: {
 
   /** 启动时检查到的版本更新提示（右下角常驻，可点击跳转、可手动关闭） */
   const updateNotice = ref<{ version: string; url: string } | null>(null);
-  /** v0.4：正在覆盖安装的模组（ModEntry.id），用于禁用详情页按钮 */
-  const updatingEntryId = ref<string | null>(null);
 
   /**
-   * v0.4：把本地模组覆盖安装到服务端最新版。
-   * 直接复用现有的 online_install 管线（下载 → 解压 → 原子更换 → 写 mod-status.json）；
-   * force=true 表示目标目录已存在时也允许覆盖（旧目录会先备份，不直接删）。
-   * 分类 Tag 不回传，由 Rust 从 mod_metadata.json 里沿用上次安装记录。
+   * 正在本地更新的 entryId（从统一队列派生）。
+   * 找 kind=local_update 且状态为 downloading/installing 的任务，取其 entryId。
+   */
+  const updatingEntryId = computed<string | null>(() => {
+    for (const task of downloadTasks.value) {
+      if (
+        task.kind === "local_update" &&
+        (task.status === "downloading" || task.status === "installing") &&
+        task.entryId
+      ) {
+        return task.entryId;
+      }
+    }
+    return null;
+  });
+
+  /** rescan 防抖：批量连续完成时合并成一次 */
+  let rescanTimer: number | null = null;
+  function scheduleRescan() {
+    if (rescanTimer !== null) window.clearTimeout(rescanTimer);
+    rescanTimer = window.setTimeout(() => {
+      rescanTimer = null;
+      void deps.rescan();
+    }, 400);
+  }
+
+  // 监听队列任务完成：local_update 类型的任务成功后清除角标 + rescan
+  const offSettled = onTaskSettled((task) => {
+    if (task.kind !== "local_update") return;
+    if (task.status === "done") {
+      if (task.entryId) markUpdated(task.entryId);
+      deps.showToast(t("update.modDoneToast"));
+      scheduleRescan();
+    } else if (task.status === "failed" && task.error) {
+      deps.showToast(task.error, "error");
+    }
+  });
+
+  onUnmounted(() => {
+    offSettled();
+    if (rescanTimer !== null) window.clearTimeout(rescanTimer);
+  });
+
+  /**
+   * 把本地模组覆盖安装到服务端最新版。
+   * 走统一下载队列（enqueueLocalUpdate），与在线下载共享串行泵。
+   * force=true 自动设置（覆盖已有本地目录，旧目录先备份）。
    */
   async function handleUpdateMod(mod: ModEntry): Promise<void> {
     const modId = mod.workshopId ?? 0;
@@ -68,16 +113,9 @@ export function useLocalUpdate(deps: {
       deps.showToast(t("sort.unsavedBlock"), "error");
       return;
     }
-    updatingEntryId.value = mod.id;
-    try {
-      await installMod(modId, mod.displayName, true);
-      markUpdated(mod.id);
-      deps.showToast(t("update.modDoneToast"));
-      await deps.rescan();
-    } catch (e) {
-      deps.showToast(deps.normalizeError(e), "error");
-    } finally {
-      updatingEntryId.value = null;
+    const result = enqueueLocalUpdate(modId, mod.displayName, mod.id);
+    if (!result.accepted && result.reason === "duplicate") {
+      deps.showToast(t("downloader.alreadyQueued"), "error");
     }
   }
 

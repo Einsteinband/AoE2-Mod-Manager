@@ -10,6 +10,7 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { batchToggleMods } from "../../api";
+import { translateBackendMessage } from "../../format";
 import type { BatchTarget, ModEntry, ScanReport } from "../../types";
 
 export function useBatchToggle(deps: {
@@ -25,7 +26,10 @@ export function useBatchToggle(deps: {
   /** null = 未弹窗；true = 全部启用；false = 全部禁用 */
   const batchAsk = ref<boolean | null>(null);
   const batchBusy = ref(false);
-  const batchError = ref<string | null>(null);
+  const batchErrorRaw = ref<string | null>(null);
+  const batchError = computed(() =>
+    batchErrorRaw.value ? translateBackendMessage(batchErrorRaw.value) : null,
+  );
 
   /**
    * 只传当前筛选出的列表：WorkshopID 优先，local 模组靠 kind + 文件夹名定位。
@@ -47,7 +51,7 @@ export function useBatchToggle(deps: {
       showToast(t("batch.empty"), "error");
       return;
     }
-    batchError.value = null;
+    batchErrorRaw.value = null;
     batchAsk.value = enable;
   }
 
@@ -62,7 +66,7 @@ export function useBatchToggle(deps: {
     }
     const keys = new Set(targets.map((target) => `${target.kind}//${target.folderName}`));
     batchBusy.value = true;
-    batchError.value = null;
+    batchErrorRaw.value = null;
     try {
       const result = await batchToggleMods(enable, targets);
       for (const mod of report.value?.mods ?? []) {
@@ -84,7 +88,7 @@ export function useBatchToggle(deps: {
         showToast(text);
       }
     } catch (e) {
-      batchError.value = deps.normalizeError(e);
+      batchErrorRaw.value = deps.normalizeError(e);
     } finally {
       batchBusy.value = false;
     }

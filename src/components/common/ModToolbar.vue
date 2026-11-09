@@ -139,18 +139,57 @@ function clearSearch() {
 <style scoped>
 /* v2.1：搜索框不再吃掉整行 —— 排序下拉与 #extra 里的按钮（重新扫描 / 刷新）
    紧贴搜索框右边缘，留给顶栏右侧留白，不再被 justify-content: flex-end 顶到最右。 */
+.mod-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: visible;
+}
 .mod-toolbar .search-box {
-  flex: 0 1 360px;
-  max-width: 360px;
+  flex: 1 1 180px;
+  min-width: 140px;
+  max-width: 480px;
+}
+/* 窄窗口：搜索框缩到最小 */
+@media (max-width: 1000px) {
+  .mod-toolbar .search-box {
+    flex: 1 1 120px;
+    min-width: 100px;
+    max-width: 320px;
+  }
+}
+@media (max-width: 820px) {
+  .mod-toolbar .search-box {
+    flex: 1 1 80px;
+    min-width: 80px;
+    max-width: 200px;
+  }
 }
 .mod-toolbar .toolbar {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   justify-content: flex-start;
+  flex-wrap: nowrap;
 }
-/* 窗口较窄时搜索框仍可缩到 css 里的 150px 下限，工具栏整体换行不溢出 */
+/* 下拉框绝不收缩，防止箭头变形 */
+.mod-toolbar .toolbar select {
+  flex: 0 0 auto;
+  min-width: 70px;
+  max-width: 120px;
+}
+/* extra 插槽里的按钮也不收缩 */
+.mod-toolbar .toolbar ::slotted(button) {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* 窗口较窄时搜索框仍可缩到 css 里的 120px 下限，工具栏整体不换行 */
 @media (max-width: 1100px) {
   .mod-toolbar .search-box {
-    flex: 1 1 220px;
+    flex: 1 1 150px;
     max-width: none;
   }
 }

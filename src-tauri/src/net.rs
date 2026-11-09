@@ -10,8 +10,10 @@
 //!   `ProxyEnable=0`，我们按直连处理即可。
 
 use serde::Serialize;
+use serde_json::json;
 
 use crate::models::Settings;
+use crate::user_err;
 
 /// `settings.proxy_mode` 的取值
 pub const MODE_SYSTEM: &str = "system";
@@ -67,13 +69,11 @@ impl NetResolution {
 pub fn normalize_manual(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err("代理地址不能为空".to_string());
+        return Err(user_err("net.proxyEmpty", json!({})));
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("socks") {
-        return Err(
-            "暂不支持 SOCKS 代理，请改填 HTTP 代理地址，例如 http://127.0.0.1:7897".to_string(),
-        );
+        return Err(user_err("net.proxySocksUnsupported", json!({})));
     }
 
     let (scheme, rest) = match trimmed.split_once("://") {
@@ -81,35 +81,33 @@ pub fn normalize_manual(raw: &str) -> Result<String, String> {
         None => ("http".to_string(), trimmed.to_string()),
     };
     if scheme != "http" {
-        return Err(format!(
-            "仅支持 HTTP 代理（http://），当前填写的是 {scheme}://"
+        return Err(user_err(
+            "net.proxySchemeUnsupported",
+            json!({ "scheme": scheme }),
         ));
     }
     let rest = rest.trim_end_matches('/').trim();
     if rest.is_empty() {
-        return Err("代理地址缺少主机名，例如 http://127.0.0.1:7897".to_string());
+        return Err(user_err("net.proxyMissingHost", json!({})));
     }
     if rest.contains('@') {
-        return Err(
-            "代理地址不支持用户名/密码，请使用允许本机匿名访问的端口（例如 Clash 的混合端口）"
-                .to_string(),
-        );
+        return Err(user_err("net.proxyAuthUnsupported", json!({})));
     }
     let (host, port) = match rest.rsplit_once(':') {
         Some(parts) => parts,
         None => {
-            return Err("代理地址缺少端口，例如 http://127.0.0.1:7897".to_string());
+            return Err(user_err("net.proxyMissingPort", json!({})));
         }
     };
     if host.trim().is_empty() {
-        return Err("代理地址缺少主机名，例如 http://127.0.0.1:7897".to_string());
+        return Err(user_err("net.proxyMissingHost", json!({})));
     }
     let port_num: u16 = port
         .trim()
         .parse()
-        .map_err(|_| format!("代理端口无效：{port}（应为 1-65535 的数字）"))?;
+        .map_err(|_| user_err("net.proxyPortInvalid", json!({ "port": port })))?;
     if port_num == 0 {
-        return Err("代理端口不能为 0".to_string());
+        return Err(user_err("net.proxyPortZero", json!({})));
     }
     Ok(format!("http://{}:{port_num}", host.trim()))
 }
@@ -237,10 +235,8 @@ fn probe_system_proxy() -> SystemProxyProbe {
     }
 
     let note = match (enabled, auto_config) {
-        (_, Some(url)) => Some(format!(
-            "系统代理使用自动配置脚本（PAC：{url}），本应用无法执行 PAC 脚本；如果你的加速器只设置了 PAC，请改用 TUN 模式或在高级设置里手动填写 HTTP 代理"
-        )),
-        (true, None) => Some("系统代理已开启，但 ProxyServer 为空，按直连处理".to_string()),
+        (_, Some(url)) => Some(user_err("net.proxyPac", json!({ "url": url }))),
+        (true, None) => Some(user_err("net.proxyEmptyServer", json!({}))),
         _ => None,
     };
     SystemProxyProbe { proxy_url: None, note }
@@ -250,7 +246,7 @@ fn probe_system_proxy() -> SystemProxyProbe {
 fn probe_system_proxy() -> SystemProxyProbe {
     SystemProxyProbe {
         proxy_url: None,
-        note: Some("非 Windows 平台不支持读取系统代理，请使用环境变量或手动代理".to_string()),
+        note: Some(user_err("net.nonWindowsProxy", json!({}))),
     }
 }
 
@@ -320,7 +316,7 @@ pub fn ureq_proxy(resolved: &NetResolution) -> Result<Option<ureq::Proxy>, Strin
             // 代理写错（含 socks:// 这类 ureq 不支持的写法）时，后续所有请求都会失败；
             // 这里落一条 error，用户报「登录/更新全挂」时能第一眼看到代理地址不对。
             log::error!(target: "http", "代理地址无法被 HTTP 客户端使用（{url}）：{e}");
-            format!("代理地址 {url} 无法被 HTTP 客户端使用：{e}")
+            user_err("net.proxyClientRejected", json!({ "url": url, "error": e.to_string() }))
         }),
         None => Ok(None),
     }
@@ -354,8 +350,10 @@ mod tests {
     #[test]
     fn manual_proxy_rejects_socks_with_clear_message() {
         let err = normalize_manual("socks5://127.0.0.1:7890").unwrap_err();
-        assert!(err.contains("暂不支持 SOCKS"), "实际提示：{err}");
-        assert!(err.contains("http://127.0.0.1:7897"));
+        assert!(
+            err.starts_with("aoe2mm:err:net.proxySocksUnsupported"),
+            "实际提示：{err}"
+        );
     }
 
     #[test]

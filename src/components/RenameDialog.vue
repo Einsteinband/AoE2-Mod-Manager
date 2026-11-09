@@ -74,3 +74,22 @@ function submit() {
     </div>
   </div>
 </template>
+
+<style scoped>
+.rename-modal {
+  max-width: 420px;
+}
+.rename-input {
+  display: block;
+  width: 100%;
+  margin: 8px 0 4px;
+  padding: 7px 9px;
+  font-size: calc(12.5px * var(--global-scale));
+}
+.rename-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+</style>

@@ -23,7 +23,7 @@ import { cancelInstall, installMod, loadDownloadQueue, onDownloadProgress, saveD
 import { messageOf } from "./errors";
 import { classifyNetworkFailure } from "./networkError";
 import { translate } from "../i18n";
-import { sessionPhase } from "../sessionState";
+import { sessionPhase, markUnauthenticated } from "../sessionState";
 import {
   isApiFailure,
   type DownloadProgress,
@@ -60,6 +60,12 @@ export type TaskStatus =
   | "failed"
   | "cancelled";
 
+/** 任务类型：
+ * - install/reinstall = 在线页下载安装
+ * - local_update = 本地已有模组的覆盖更新（走同一个串行队列）
+ */
+export type TaskKind = "install" | "reinstall" | "local_update";
+
 /** 结果消息只存 key + 参数，翻译交给 UI（store 不依赖 vue-i18n 上下文） */
 export interface TaskMessage {
   key: string;
@@ -69,8 +75,10 @@ export interface TaskMessage {
 export interface QueueTaskInput {
   modId: number;
   title: string;
-  /** install = 主按钮「下载并安装」；reinstall = 已有本地目录时的重装 */
-  kind: "install" | "reinstall";
+  /** install = 主按钮「下载并安装」；reinstall = 已有本地目录时的重装；local_update = 本地覆盖更新 */
+  kind: TaskKind;
+  /** 本地模组的 entryId（仅 local_update 用）：完成后用于 markUpdated 清除角标 */
+  entryId?: string;
   tagIds?: number[];
   tagNames?: string[];
   creator?: string | null;
@@ -91,7 +99,9 @@ export interface DownloadTask {
   id: string;
   modId: number;
   title: string;
-  kind: "install" | "reinstall";
+  kind: TaskKind;
+  /** 本地模组 entryId（仅 local_update）：完成后用于清除更新角标 */
+  entryId: string | null;
   status: TaskStatus;
   progress: DownloadProgress | null;
   error: string | null;
@@ -173,6 +183,7 @@ function snapshotTask(task: DownloadTask): Record<string, unknown> {
     modId: task.modId,
     title: task.title,
     kind: task.kind,
+    entryId: task.entryId,
     status: task.status,
     error: task.error,
     localized: task.localized,
@@ -279,6 +290,7 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
     modId: input.modId,
     title: input.title,
     kind: input.kind,
+    entryId: input.entryId ?? null,
     status: "queued",
     progress: null,
     error: null,
@@ -295,7 +307,8 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
       creator: input.creator ?? null,
       description: input.description ?? null,
       thumbnail: input.thumbnail ?? null,
-      force: input.force === true,
+      // local_update 必须 force=true 覆盖已有目录；在线安装默认 false
+      force: input.kind === "local_update" ? true : input.force === true,
     },
     createdAt: Date.now(),
     startedAt: null,
@@ -394,6 +407,7 @@ export function retryTask(taskId: string): EnqueueResult {
     modId: old.modId,
     title: old.title,
     kind: old.kind,
+    entryId: old.entryId ?? undefined,
     tagIds: old.payload.tagIds,
     tagNames: old.payload.tagNames,
     creator: old.payload.creator,
@@ -402,6 +416,21 @@ export function retryTask(taskId: string): EnqueueResult {
     // 旧任务的 null（订阅状态未知）还原成「不传」，enqueue 内部会再归一成 null
     wasSubscribed: old.wasSubscribed ?? undefined,
     force: old.payload.force,
+  });
+}
+
+/**
+ * 本地模组覆盖更新入队（local_update 专用入口）。
+ * 与在线安装共用同一个串行队列，保证同一时刻只有一个 online_install 在执行。
+ * force 自动设为 true（覆盖已有本地目录）。
+ */
+export function enqueueLocalUpdate(modId: number, title: string, entryId: string): EnqueueResult {
+  return enqueueDownload({
+    modId,
+    title,
+    kind: "local_update",
+    entryId,
+    force: true,
   });
 }
 
@@ -484,9 +513,10 @@ async function runTask(task: DownloadTask): Promise<void> {
   let watchdog: number | undefined;
   const watchdogPromise = new Promise<never>((_, reject) => {
     watchdog = window.setTimeout(() => {
-      // 直接带友好文案：translateBackendMessage 找不到 key 时原样返回，
-      // 这样用户在 20 分钟看门狗兜底触发时看到的是中文提示而非英文错误码。
-      const err = new Error("下载超时，网络可能已断开") as Error & { kind?: string };
+      // 看门狗兜底：用英文标记 "watchdog timeout"，classifyNetworkFailure 会命中
+      // TIMEOUT_HINTS（"timeout"），从而显示 downloader.networkTimeout 三语文案，
+      // 不再硬编码中文。
+      const err = new Error("download watchdog timeout") as Error & { kind?: string };
       err.kind = "network";
       reject(err);
     }, WATCHDOG_TIMEOUT_MS);
@@ -523,6 +553,14 @@ async function runTask(task: DownloadTask): Promise<void> {
     if (kind === "cancelled") {
       task.status = "cancelled";
       task.message = { key: "online.downloadCancelled" };
+    } else if (kind === "unauthenticated") {
+      // v0.4.9：下载时才发现 401（登录态过期），必须立刻把底栏打回离线，
+      // 不能只弹个安装失败。messageOf 会走 aoe2mm:err 协议查 i18n。
+      markUnauthenticated(messageOf(e));
+      task.status = "failed";
+      task.error = messageOf(e);
+      task.needForce = false;
+      task.message = { key: "online.installFailed" };
     } else if (kind === "network") {
       // 底层 ureq/rustls 错误（os error 10060 / TLS close_notify / URL 等）全是技术串，
       // 且 Rust 侧 ApiFailure::network 写死了「网络请求失败：」中文前缀，英文界面下会
@@ -542,10 +580,20 @@ async function runTask(task: DownloadTask): Promise<void> {
       task.needForce = false;
       task.message = { key: "online.installFailed" };
     } else {
+      // 官方 API 返回的下载链接失效（模组已被作者删除，但列表接口仍残留该条目）。
+      // 底层 ureq / url crate 会报 "Invalid download URL" 或 "relative URL without base"。
+      // 这里在 messageOf 之前先嗅探原始错误串，命中就换成友好文案，不再把技术词透传给玩家。
+      const rawMessage = isApiFailure(e)
+        ? e.message
+        : e instanceof Error
+          ? e.message
+          : String(e);
+      const looksModRemoved = /invalid download url|relative url/i.test(rawMessage);
+      const looksOverwriteRequired = rawMessage.startsWith("aoe2mm:err:install.overwriteRequired");
       const message = messageOf(e);
       task.status = "failed";
-      task.error = message;
-      task.needForce = kind === "install" && message.includes("允许覆盖");
+      task.error = looksModRemoved ? translate("downloader.modRemoved") : message;
+      task.needForce = !looksModRemoved && looksOverwriteRequired;
       task.message = { key: "online.installFailed" };
     }
     settledByUs = true;
@@ -593,14 +641,18 @@ function coerceTask(raw: Record<string, unknown>): DownloadTask | null {
   if (!["queued", "downloading", "installing", "done", "failed", "cancelled"].includes(status)) {
     return null;
   }
+  const kind = raw.kind as TaskKind;
+  if (!["install", "reinstall", "local_update"].includes(kind)) return null;
   const payload = (raw.payload ?? {}) as Record<string, unknown>;
   const message = raw.message as TaskMessage | null | undefined;
   const id = typeof raw.id === "string" && raw.id ? raw.id : `${modId}-${Date.now()}-r`;
+  const entryId = typeof raw.entryId === "string" && raw.entryId ? raw.entryId : null;
   return {
     id,
     modId,
     title: typeof raw.title === "string" && raw.title ? raw.title : `#${modId}`,
-    kind: raw.kind === "reinstall" ? "reinstall" : "install",
+    kind,
+    entryId,
     status,
     progress: null, // 进度不持久化：重启后不可能续传，只看得到状态
     error: typeof raw.error === "string" ? raw.error : null,

@@ -8,12 +8,15 @@
 //! asset 协议（`http://asset.localhost/...`）读取，属于本机文件读取，零网络。
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use tauri::Manager;
+
+use crate::user_err;
 
 pub const DIR_NAME: &str = "image_cache";
 pub const MAX_BYTES: u64 = 500 * 1024 * 1024;
@@ -85,16 +88,16 @@ pub fn local_for(app: &tauri::AppHandle, mod_id: i64) -> Option<String> {
 /// 写入图片（原子替换）。返回最终路径。
 pub fn store_bytes(app: &tauri::AppHandle, mod_id: i64, bytes: &[u8]) -> Result<String, String> {
     if bytes.is_empty() {
-        return Err("图片内容为空".to_string());
+        return Err(user_err("image.empty", json!({})));
     }
     let dir = dir_for(app)?;
-    fs::create_dir_all(&dir).map_err(|e| format!("无法创建图片缓存目录：{e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| user_err("image.createDirFailed", json!({ "error": e.to_string() })))?;
     let final_path = dir.join(format!("{mod_id}.jpg"));
     let tmp = dir.join(format!("{mod_id}.jpg.tmp"));
-    fs::write(&tmp, bytes).map_err(|e| format!("写入临时图片失败：{e}"))?;
+    fs::write(&tmp, bytes).map_err(|e| user_err("image.writeFailed", json!({ "error": e.to_string() })))?;
     fs::rename(&tmp, &final_path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
-        format!("替换图片文件失败：{e}")
+        user_err("image.replaceFailed", json!({ "error": e.to_string() }))
     })?;
     Ok(final_path.display().to_string())
 }

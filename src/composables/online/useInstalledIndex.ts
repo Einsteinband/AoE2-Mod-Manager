@@ -5,14 +5,18 @@
  * 详情页用它决定主按钮是「下载安装」还是「卸载本地模组」，
  * 本地页删过模组、装过模组后都要重新读一次（在线页被 KeepAlive 唤醒时也会）。
  */
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { installedLocalIndex } from "../../api";
-import { messageOf } from "../../online/errors";
+import { rawMessageOf } from "../../online/errors";
+import { translateBackendMessage } from "../../format";
 import type { InstalledIndexEntry } from "../../types";
 
 export function useInstalledIndex() {
   const localIndex = ref<Record<number, InstalledIndexEntry>>({});
-  const localIndexError = ref<string | null>(null);
+  const localIndexErrorRaw = ref<string | null>(null);
+  const localIndexError = computed(() =>
+    localIndexErrorRaw.value ? translateBackendMessage(localIndexErrorRaw.value) : null,
+  );
 
   async function refreshLocalIndex(): Promise<void> {
     try {
@@ -27,9 +31,9 @@ export function useInstalledIndex() {
         map[entry.workshopId] = entry;
       }
       localIndex.value = map;
-      localIndexError.value = null;
+      localIndexErrorRaw.value = null;
     } catch (e) {
-      localIndexError.value = messageOf(e);
+      localIndexErrorRaw.value = rawMessageOf(e);
     }
   }
 

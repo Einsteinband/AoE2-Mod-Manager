@@ -2,12 +2,10 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { OnlineMod } from "../online/types";
-import { initials } from "../format";
 import { customNameOf, displayTitle, isFavorite } from "../userData";
 import { translatedTitleOf } from "../online/translation";
+import BaseModCard from "./base/BaseModCard.vue";
 
-/** 在线模组卡片：与本地 ModCard 共用 style.css 的 .mod-card / .card-* 类，
- *  宽高比、字号、内边距、Badge 位置全部保持一致（不另写一套尺寸）。 */
 const props = defineProps<{ mod: OnlineMod; active: boolean; thumb?: string | null }>();
 const emit = defineEmits<{ (event: "select", mod: OnlineMod): void }>();
 
@@ -59,61 +57,51 @@ function formatCount(n: number | null): string {
 </script>
 
 <template>
-  <button class="mod-card" :class="{ active }" type="button" @click="emit('select', mod)">
-    <div class="card-thumb">
-      <img
-        v-if="src"
-        :src="src"
-        alt=""
-        loading="lazy"
-        draggable="false"
-        @error="onImageError"
-      />
-      <div v-else class="placeholder">{{ initials(mod.title) }}</div>
-      <span v-if="favorited" class="fav-badge" :title="t('favorites.badgeTitle')">⭐</span>
-      <span v-if="!src" class="no-cover">{{ t("card.noCover") }}</span>
-    </div>
-    <div class="card-body">
-      <div class="card-title" :title="title">{{ title }}</div>
-      <div v-if="sub" class="card-sub" :title="mod.title">📝 {{ mod.title }}</div>
-      <div class="card-meta">
-        <span v-if="mod.updateAvailable" class="badge warn">{{ t("online.cardUpdate") }}</span>
-        <span v-else-if="mod.userInstalled" class="badge sub">{{ t("online.cardSubscribed") }}</span>
-        <span v-else class="badge">{{ t("online.cardOnline") }}</span>
-        <span>
-          {{ t("online.cardInstalls", { n: formatCount(mod.installs) + (mod.installsTruncated ? "+" : "") }) }}
-        </span>
-      </div>
-      <div class="card-meta">
-        <span>#{{ mod.modId }}</span>
-        <span v-if="mod.creator" class="author" :title="mod.creator">{{ mod.creator }}</span>
-        <span v-else class="author missing">{{ t("card.authorMissing") }}</span>
-      </div>
-    </div>
-  </button>
+  <BaseModCard
+    :title="title"
+    :sub="sub"
+    :cover-url="src"
+    :fallback-text="mod.title.slice(0, 2)"
+    :favorited="favorited"
+    :workshop-id="mod.modId"
+    :author="mod.creator"
+    :active="active"
+    @click="emit('select', mod)"
+    @img-error="onImageError"
+  >
+    <!-- 第一行 meta：在线状态徽章 + 安装数 -->
+    <template #meta-top>
+      <span v-if="mod.updateAvailable" class="badge warn">{{ t("online.cardUpdate") }}</span>
+      <span v-else-if="mod.userInstalled" class="badge sub">{{ t("online.cardSubscribed") }}</span>
+      <span v-else class="badge">{{ t("online.cardOnline") }}</span>
+      <span>
+        {{ t("online.cardInstalls", { n: formatCount(mod.installs) + (mod.installsTruncated ? "+" : "") }) }}
+      </span>
+    </template>
+  </BaseModCard>
 </template>
 
 <style scoped>
-.card-meta .author {
-  max-width: 96px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* 在线卡片的状态徽章样式 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  font-size: calc(var(--card-font-size) * 0.75);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(var(--badge-base-rgb), 0.82);
+  color: var(--muted);
   white-space: nowrap;
 }
-.card-meta .author.missing {
-  color: var(--text-dim);
-  font-style: italic;
+.badge.warn {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  color: var(--danger-text);
+  background: rgba(var(--danger-rgb), 0.08);
 }
-
-/* v3.2：卡片标题显式跟随全局字体栈（避免中间层 font-family 截断继承） */
-.card-title,
-.card-sub,
-.card-meta {
-  font-family: var(--app-font-family);
-}
-/* v3.3：字重改由独立的「卡片字重」变量承担（默认 400，与旧观感一致） */
-.card-title,
-.card-sub {
-  font-weight: var(--card-font-weight);
+.badge.sub {
+  border-color: rgba(var(--info-rgb), 0.45);
+  color: var(--info-text);
+  background: rgba(var(--info-rgb), 0.08);
 }
 </style>

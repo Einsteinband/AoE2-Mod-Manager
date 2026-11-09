@@ -3,9 +3,10 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry } from "../types";
 import { fileUrl, toggleModEnabled } from "../api";
-import { initials, sourceHint, sourceLabel, translateBackendMessage } from "../format";
+import { sourceHint, sourceLabel, translateBackendMessage } from "../format";
 import { customNameOf, displayTitle, isFavorite } from "../userData";
 import { translatedTitleOf } from "../online/translation";
+import BaseModCard from "./base/BaseModCard.vue";
 
 const props = defineProps<{
   mod: ModEntry;
@@ -18,6 +19,12 @@ const props = defineProps<{
   hasUpdate?: boolean;
   /** 同一模组在 local 与 subscribed 各有一份（账号仍订阅），左上角红色角标 */
   conflict?: boolean;
+  /** v0.7：可更新视图中显示选择复选框 */
+  selectable?: boolean;
+  /** v0.7：复选框是否勾选 */
+  selected?: boolean;
+  /** v0.7：该模组正在更新中（禁用复选框和更新按钮） */
+  updating?: boolean;
 }>();
 const emit = defineEmits<{
   (event: "select", mod: ModEntry): void;
@@ -27,6 +34,10 @@ const emit = defineEmits<{
   (event: "toggle-error", message: string): void;
   /** 数据模组的启用请求：互斥裁决在父组件，卡片自己不动磁盘 */
   (event: "request-enable", payload: { id: string }): void;
+  /** v0.7：勾选/取消勾选（可更新视图） */
+  (event: "check", payload: { id: string; checked: boolean }): void;
+  /** v0.7：单个更新按钮 */
+  (event: "update", mod: ModEntry): void;
 }>();
 
 const { t } = useI18n();
@@ -124,21 +135,32 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
 </script>
 
 <template>
-  <button
-    class="mod-card"
-    :class="{ active, sortable }"
-    type="button"
+  <BaseModCard
+    :title="title"
+    :sub="sub"
+    :cover-url="coverUrl"
+    :fallback-text="mod.displayName.slice(0, 2)"
+    :favorited="favorited"
+    :workshop-id="mod.workshopId"
+    :author="mod.author"
+    :active="active"
     @click="emit('select', mod)"
   >
-    <div class="card-thumb">
-      <img v-if="coverUrl" :src="coverUrl" alt="" draggable="false" @error="imgFailed = true" />
-      <div v-else class="placeholder">{{ initials(mod.displayName) }}</div>
-      <span v-if="favorited" class="fav-badge" :title="t('favorites.badgeTitle')">⭐</span>
-      <span v-if="!coverUrl" class="no-cover">{{ t("card.noCover") }}</span>
+    <!-- 角标 slot：排序序号、可更新红标、来源角标等 -->
+    <template #badges>
       <span v-if="order !== undefined" class="order-badge" :title="`#${order}`">{{ order }}</span>
       <span v-if="hasUpdate" class="update-badge" :title="t('card.updateBadgeHint')">
         {{ t("card.updateBadge") }}
       </span>
+      <input
+        v-if="selectable"
+        type="checkbox"
+        class="card-select"
+        :checked="selected"
+        :disabled="updating"
+        @click.stop
+        @change="emit('check', { id: mod.id, checked: ($event.target as HTMLInputElement).checked })"
+      />
       <div class="thumb-badges">
         <span v-if="conflict" class="conflict-badge" :title="t('subscription.conflictBadgeHint')">
           {{ t("subscription.conflictBadge") }}
@@ -158,39 +180,41 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
           {{ t("card.dataModBadge") }}
         </span>
       </div>
-    </div>
-    <div class="card-body">
-      <div class="card-title" :title="title">{{ title }}</div>
-      <div v-if="sub" class="card-sub" :title="mod.displayName">📝 {{ mod.displayName }}</div>
-      <div class="card-meta status-row">
-        <span v-if="mod.isDataMod" class="data-mark" :title="t('card.dataModBadgeHint')">⚙️</span>
-        <span
-          class="card-toggle"
-          :class="[statusClass, { busy: toggling }]"
-          role="switch"
-          :aria-checked="mod.enabled === true"
-          :aria-busy="toggling"
-          :title="toggleTitle"
-          @click="toggleEnabled"
-        >
-          <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M2.5 6.4 4.8 8.6 9.5 3.4" />
-          </svg>
-          <svg v-else-if="statusClass === 'off'" viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M3.2 6h5.6" />
-          </svg>
-          <svg v-else viewBox="0 0 12 12" aria-hidden="true">
-            <circle cx="6" cy="6" r="3.9" />
-          </svg>
-        </span>
-      </div>
-      <div class="card-meta">
-        <span>{{ mod.workshopId ? `#${mod.workshopId}` : t("card.noNumericId") }}</span>
-        <span v-if="mod.author" class="author">{{ mod.author }}</span>
-        <span v-else class="author missing">{{ t("card.authorMissing") }}</span>
-      </div>
-    </div>
-  </button>
+    </template>
+
+    <!-- 第一行 meta：启用/禁用开关 + 数据模组标记 -->
+    <template #meta-top>
+      <span v-if="mod.isDataMod" class="data-mark" :title="t('card.dataModBadgeHint')">⚙️</span>
+      <span
+        class="card-toggle"
+        :class="[statusClass, { busy: toggling }]"
+        role="switch"
+        :aria-checked="mod.enabled === true"
+        :aria-busy="toggling"
+        :title="toggleTitle"
+        @click="toggleEnabled"
+      >
+        <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M2.5 6.4 4.8 8.6 9.5 3.4" />
+        </svg>
+        <svg v-else-if="statusClass === 'off'" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M3.2 6h5.6" />
+        </svg>
+        <svg v-else viewBox="0 0 12 12" aria-hidden="true">
+          <circle cx="6" cy="6" r="3.9" />
+        </svg>
+      </span>
+      <button
+        v-if="hasUpdate && selectable"
+        type="button"
+        class="card-update-btn"
+        :disabled="updating"
+        @click.stop="emit('update', mod)"
+      >
+        {{ updating ? t("updates.updating") : t("updates.updateBtn") }}
+      </button>
+    </template>
+  </BaseModCard>
 </template>
 
 <style scoped>
@@ -254,13 +278,13 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   cursor: progress;
   transform: none;
 }
+
 /* v0.4：右上角「可更新」角标。排序模式的序号在左上，两者互不遮挡 */
 .update-badge {
   position: absolute;
   top: 5px;
   right: 5px;
   padding: 1px 6px;
-  /* v2.4：角标字号跟卡片层同比例缩放（0.8 ≈ 旧 9.5 / 12） */
   font-size: calc(var(--card-font-size) * 0.8);
   font-weight: var(--card-font-weight);
   letter-spacing: calc(0.5px * var(--ui-tracking));
@@ -275,7 +299,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   pointer-events: none;
 }
 
-/* 左上角角标容器：来源角标 + 数据模组角标竖排，互不遮挡（列表模式整组隐藏） */
+/* 左上角角标容器：来源角标 + 数据模组角标竖排，互不遮挡 */
 .thumb-badges {
   position: absolute;
   top: 5px;
@@ -286,16 +310,12 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   gap: 3px;
   pointer-events: none;
 }
-.card-grid.list-mode .card-thumb .thumb-badges {
-  display: none;
-}
 
-/* 卡片左上角来源角标：羊皮纸底 + 金框（本工具）/ 蓝框（官方）/ 朴素灰（未知） */
+/* 卡片左上角来源角标 */
 .source-badge {
   display: inline-flex;
   align-items: center;
   padding: 1px 6px;
-  /* v2.4：来源角标同上，卡片字号变大时角标不会反而变小 */
   font-size: calc(var(--card-font-size) * 0.75);
   letter-spacing: calc(0.4px * var(--ui-tracking));
   line-height: 1.5;
@@ -321,15 +341,13 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   color: var(--parch-dim);
   background: rgba(var(--badge-plain-rgb), 0.88);
 }
-
-/* v0.6：未安装的收藏卡片：左上角金色角标（其余交互与普通卡片完全一致） */
 .source-badge.uninstalled-badge {
   border-color: var(--gold-dim);
   color: var(--gold-bright);
   background: rgba(var(--accent-rgb), 0.22);
 }
 
-/* 数据模组角标：金色描边，和来源角标区分开 */
+/* 数据模组角标 */
 .data-badge {
   display: inline-flex;
   align-items: center;
@@ -355,38 +373,35 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
 .card-grid.list-mode .data-mark {
   display: inline;
 }
-.card-meta .author {
-  max-width: 96px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.card-meta .author.missing {
-  color: var(--text-dim);
-  font-style: italic;
+
+/* v0.7：可更新视图中的选择复选框（左上角，与来源角标错开） */
+.card-select {
+  position: absolute;
+  top: 5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  z-index: 2;
+  accent-color: var(--gold-bright);
 }
 
-/* v3.2：卡片里的标题 / 副标题 / 角标全部显式跟随全局字体。
-   标题与副标题固定 400：Windows 幼圆 / 黑体无真粗体，被 700 带走会被 Chromium 合成描边，
-   圆润的幼圆会变成方硬笔画（实测截图已确认）。
-   注：优先级低于列表模式 .card-grid.list-mode .card-title 的 700，列表模式观感不变。 */
-.card-title,
-.card-sub,
-.card-meta,
-.update-badge,
-.source-badge,
-.data-badge,
-.data-mark,
-.order-badge,
-.fav-badge,
-.no-cover {
-  font-family: var(--app-font-family);
+/* v0.7：卡片上的单个更新按钮 */
+.card-update-btn {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: calc(var(--card-font-size) * 0.75);
+  line-height: 1.5;
+  border-radius: 3px;
+  border: 1px solid var(--danger-text-strong);
+  background: linear-gradient(180deg, var(--badge-danger-top), var(--badge-danger-bottom));
+  color: var(--text-inverse);
+  cursor: pointer;
+  white-space: nowrap;
 }
-/* v3.3：卡片标题 / 副标题改为跟随独立的「卡片字重」变量（默认 400，与旧观感一致）。
-   旧版无条件钉死 400 是为了避免幼圆被界面加粗的合成描边写成方硬笔画；
-   现在由 --card-font-weight 单独承担，用户想加粗卡片才加粗。 */
-.card-title,
-.card-sub {
-  font-weight: var(--card-font-weight);
+.card-update-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
 }
 </style>

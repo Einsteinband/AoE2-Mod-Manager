@@ -1,10 +1,10 @@
 ﻿# publish.ps1
 # 自动读取 package.json 的版本号，创建 GitHub Release 并上传本地安装包。
 #
-# 默认策略（2026-11 起）：不推送仓库源代码。
-# 本地仍会 commit + 打 tag 留档，但不会 git push main / git push tag；
-# 远端 tag 由 gh release create 用 --target main 在默认分支上创建，只发布安装包资产。
-# 如确需连源码一起推送，显式加 -PushSource。
+# 默认策略：本地 commit + 打 tag，并 git push origin main 与 tag，
+# 然后用 gh release create 上传安装包资产。
+# 如只发布安装包、不推送源码，显式加 -NoPushSource（此时本地仍 commit/tag 留档，
+# 远端 tag 由 gh release create 用 --target main 在默认分支上兜底创建）。
 #
 # 文件范围规则（2026-11）：
 #   暂存时用 pathspec 显式排除 AI 协作文档、个人开发环境配置、临时文件和本地交接目录。

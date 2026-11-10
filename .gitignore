@@ -12,6 +12,9 @@ src-tauri/target/
 /errors.txt
 /docs/v0.3-summary.md
 
+# 本地发布脚本（仅本地使用，不推送）
+/publish.ps1
+
 # 交接文档、内部决策、项目上下文、UI 样式规范（仅本地维护）
 docs/ddd/*
 docs/handoff/*

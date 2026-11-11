@@ -190,7 +190,12 @@ pub fn detect_mod_root(extracted: &Path) -> PathBuf {
 }
 
 /// 系统缓存/元数据文件：不算“内容”，避免只有一个 .DS_Store 的空包被当成有效模组
-const JUNK_FILE_NAMES: &[&str] = &[".ds_store", "thumbs.db", "desktop.ini", ".gitkeep"];
+const JUNK_FILE_NAMES: &[&str] = &[".ds_store", "thumbs.db", "desktop.ini", ".gitkeep",
+    "readme", "readme.md", "readme.txt",
+    "license", "license.md", "license.txt",
+    "changelog", "changelog.md", "changelog.txt",
+    "contributing.md", "code_of_conduct.md",
+];
 
 /// 模组不需要可执行载荷；命中即拒绝安装（并明确指出是哪个文件）
 const BLOCKED_EXTS: &[&str] = &[
@@ -1770,6 +1775,69 @@ mod tests {
         assert_eq!(detect_mod_root(&dir2), dir2.join("Wrapped"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn detect_mod_root_ignores_readme_and_descends() {
+        // GitHub 仓库包装：README.md + 一个模组子目录 → 正确下钻
+        let dir = temp_dir("gh-readme");
+        fs::create_dir_all(dir.join("MY/resources/_common")).unwrap();
+        fs::write(dir.join("MY/info.json"), "{}").unwrap();
+        fs::write(dir.join("README.md"), "# My Mod").unwrap();
+        assert_eq!(detect_mod_root(&dir), dir.join("MY"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_mod_root_ignores_license_and_descends() {
+        let dir = temp_dir("gh-license");
+        fs::create_dir_all(dir.join("ModName/widgetui")).unwrap();
+        fs::write(dir.join("ModName/info.json"), "{}").unwrap();
+        fs::write(dir.join("LICENSE.txt"), "MIT").unwrap();
+        assert_eq!(detect_mod_root(&dir), dir.join("ModName"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_mod_root_readme_case_insensitive() {
+        let dir = temp_dir("gh-readme-case");
+        fs::create_dir_all(dir.join("Mod/resources")).unwrap();
+        fs::write(dir.join("Mod/info.json"), "{}").unwrap();
+        fs::write(dir.join("README"), "Readme").unwrap();
+        fs::write(dir.join("LICENSE.md"), "MIT").unwrap();
+        assert_eq!(detect_mod_root(&dir), dir.join("Mod"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_mod_root_two_dirs_no_descend() {
+        // 两个候选子目录：不能随意选一个
+        let dir = temp_dir("two-dirs");
+        fs::create_dir_all(dir.join("ModA/resources")).unwrap();
+        fs::create_dir_all(dir.join("ModB/resources")).unwrap();
+        assert_eq!(detect_mod_root(&dir), dir);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_mod_root_standard_mod_at_root() {
+        // 标准模组：根目录直接有 info.json → 不下降
+        let dir = temp_dir("standard");
+        fs::write(dir.join("info.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("widgetui")).unwrap();
+        fs::write(dir.join("thumbnail.jpg"), "img").unwrap();
+        assert_eq!(detect_mod_root(&dir), dir);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_mod_root_game_loose_file_blocks_descend() {
+        // 真正的游戏资源散文件 + 子目录：仍然不能下钻
+        let dir = temp_dir("game-loose");
+        fs::create_dir_all(dir.join("inner/resources")).unwrap();
+        fs::write(dir.join("background.bmp"), "img").unwrap();
+        assert_eq!(detect_mod_root(&dir), dir);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { DownloadProgress, OnlineMod } from "../../online/types";
 import type { InstalledIndexEntry } from "../../types";
@@ -36,6 +36,7 @@ const props = defineProps<{
   // 字段
   ratingText: string;
   sizeText: string;
+  fileCountText: string;
   diskText: string;
   versionText: string;
   createdText: string | null;
@@ -73,6 +74,7 @@ const needForce = defineModel<boolean>("needForce", { default: false });
 const forceOverwrite = defineModel<boolean>("forceOverwrite", { default: false });
 
 const emit = defineEmits<{
+  (event: "refresh-cover"): void;
   (event: "translate"): void;
   (event: "toggle-favorite"): void;
   (event: "rename"): void;
@@ -87,6 +89,60 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
+/** 在线封面重试阶段：获取地址 → 排队下载 → 完成 / 失败（无逐字节进度） */
+type CoverStage = "idle" | "fetching" | "downloading" | "done" | "failed";
+const coverStage = ref<CoverStage>("idle");
+/** 在线封面加载失败（失败态由本地 <img> @error 驱动，不发请求） */
+const thumbFailed = ref(false);
+/** 重试进行中：获取 / 下载阶段都禁止重复点击 */
+const thumbReloading = computed(() => coverStage.value === "fetching" || coverStage.value === "downloading");
+
+/** 封面成功 / 失败轻提示（与本地详情同一套 .app-toast 全局样式） */
+const coverToast = ref<{ text: string; kind: "ok" | "error" } | null>(null);
+let coverToastTimer: number | null = null;
+function showCoverToast(text: string, kind: "ok" | "error" = "ok"): void {
+  coverToast.value = { text, kind };
+  if (coverToastTimer !== null) window.clearTimeout(coverToastTimer);
+  coverToastTimer = window.setTimeout(() => {
+    coverToast.value = null;
+    coverToastTimer = null;
+  }, 3200);
+}
+
+/** 进行中阶段的可见文案（完成 / 失败走 toast，不在此长期占位） */
+const coverStatusText = computed(() => {
+  if (coverStage.value === "fetching") return t("detail.coverFetching");
+  if (coverStage.value === "downloading") return t("detail.coverDownloading");
+  return null;
+});
+
+function onThumbLoad(): void {
+  coverStage.value = "done";
+  showCoverToast(t("detail.coverUpdated"));
+}
+
+function onThumbError(): void {
+  thumbFailed.value = true;
+  coverStage.value = "failed";
+  showCoverToast(t("detail.coverLoadFailed"), "error");
+}
+
+/** 上抛父组件走现有缩略图链路重试；面板只呈现加载态与按钮 */
+function reloadThumb(): void {
+  if (thumbReloading.value) return;
+  thumbFailed.value = false;
+  // 服务端未提供缩略图 URL：无链路可重试，给出获取失败提示，按钮保持可点
+  if (!props.mod?.thumbnail) {
+    coverStage.value = "failed";
+    showCoverToast(t("detail.coverFetchFailed"), "error");
+    return;
+  }
+  coverStage.value = "fetching";
+  emit("refresh-cover");
+  // 父组件回退官网 URL 并排队后台下载；当前后台链路无逐字节进度事件，此阶段仅为「下载中」标签
+  coverStage.value = "downloading";
+}
+
 /** 长描述折叠：与本地详情页保持同一套阈值 */
 const DESC_COLLAPSE_AT = 260;
 const descExpanded = ref(false);
@@ -97,11 +153,57 @@ const descLong = computed(() => {
 });
 const descClamped = computed(() => descLong.value && !descExpanded.value);
 
+/** 复制 Workshop ID：优先 Clipboard API，失败退回 textarea + execCommand */
+const copied = ref(false);
+let copyTimer: number | null = null;
+async function copyWorkshopId(): Promise<void> {
+  if (!props.mod) return;
+  const text = String(props.mod.modId);
+  let ok = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.top = "-1000px";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(area);
+    } catch {
+      ok = false;
+    }
+  }
+  copied.value = ok;
+  if (copyTimer !== null) window.clearTimeout(copyTimer);
+  copyTimer = window.setTimeout(() => {
+    copied.value = false;
+    copyTimer = null;
+  }, 2400);
+}
+
+onBeforeUnmount(() => {
+  if (copyTimer !== null) window.clearTimeout(copyTimer);
+  if (coverToastTimer !== null) window.clearTimeout(coverToastTimer);
+});
+
 // 换模组时重置折叠状态
 watch(
   () => props.mod?.modId,
   () => {
     descExpanded.value = false;
+    thumbFailed.value = false;
+    coverStage.value = "idle";
   },
 );
 </script>
@@ -109,7 +211,6 @@ watch(
 <template>
   <div class="detail-header">
     <h2>{{ t("online.detailTitle") }}</h2>
-    <span v-if="mod" class="badge">#{{ mod.modId }}</span>
   </div>
 
   <div v-if="!mod" class="detail-empty">
@@ -120,14 +221,57 @@ watch(
   <div v-else class="detail-body">
     <!-- ① 识别区：封面 + 名称 + 标签 -->
     <section class="dv-zone dv-ident">
-      <img v-if="thumb" class="detail-cover" :src="thumb" alt="" />
-      <div v-else class="no-cover-box">{{ t("online.noThumbnail") }}</div>
+      <div class="cover-frame">
+        <img
+          v-if="thumb"
+          class="detail-cover"
+          :src="thumb"
+          alt=""
+          @load="onThumbLoad"
+          @error="onThumbError"
+        />
+        <div v-else class="no-cover-box">{{ t("online.noThumbnail") }}</div>
+        <button
+          v-if="!thumb || thumbFailed"
+          type="button"
+          class="cover-reload-btn"
+          :disabled="thumbReloading"
+          :aria-label="t('detail.refreshCover')"
+          :title="t('detail.refreshCoverHint')"
+          @click="reloadThumb"
+        >
+          <span :class="{ 'is-spinning': thumbReloading }" aria-hidden="true">🔄</span>
+        </button>
+      </div>
+      <p v-if="coverStatusText" class="cover-status">{{ coverStatusText }}</p>
 
       <h3 class="detail-title">{{ title }}</h3>
       <div v-if="subtitle" class="detail-title-orig">{{ subtitle }}</div>
 
       <div v-if="tags.length" class="detail-badges">
         <span v-for="name in tags" :key="name" class="badge">{{ name }}</span>
+      </div>
+
+      <!-- 基本信息：Workshop ID（可复制）+ 文件体积 + 文件数量，紧凑横排 -->
+      <div class="basic-row">
+        <button
+          type="button"
+          class="basic-chip basic-chip-copy"
+          :title="copied ? t('online.copied') : t('online.copyIdTitle')"
+          :aria-label="`${t('detail.workshopId')}: ${mod.modId}`"
+          @click="copyWorkshopId"
+        >
+          <span class="chip-label">{{ t("detail.workshopId") }}</span>
+          <span class="chip-value">{{ mod.modId }}</span>
+        </button>
+        <span class="basic-chip">
+          <span class="chip-label">{{ t("online.fileSize") }}</span>
+          <span class="chip-value">{{ sizeText }}</span>
+        </span>
+        <span class="basic-chip">
+          <span class="chip-label">{{ t("online.fileCount") }}</span>
+          <span class="chip-value">{{ fileCountText }}</span>
+        </span>
       </div>
     </section>
 
@@ -183,18 +327,19 @@ watch(
 
       <div v-if="installError" class="online-error">{{ installError }}</div>
 
-      <!-- 常用辅助操作：收藏 + 翻译 -->
-      <div class="dv-action-row dv-action-secondary">
+      <!-- 辅助操作单行：收藏、翻译、打开文件夹、重装、停止、网站浏览、备注名 -->
+      <div class="detail-actions">
         <button
           type="button"
           class="fav-btn"
           :class="{ active: favorited }"
           :disabled="!canFavorite || favBusy"
           :title="t('favorites.favoriteTitle')"
+          :aria-label="favorited ? t('favorites.favorited') : t('favorites.favorite')"
           @click="emit('toggle-favorite')"
         >
           <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
-          {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
+          <span class="sr-only">{{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}</span>
         </button>
         <button
           type="button"
@@ -202,66 +347,72 @@ watch(
           :class="{ active: translateActive }"
           :disabled="translateDisabled"
           :title="t('translate.triggerTitle')"
+          :aria-label="translateLabel"
           @click="emit('translate')"
         >
           <span class="fav-star">🌐</span>
-          {{ translateLabel }}
+          <span class="sr-only">{{ translateLabel }}</span>
         </button>
-      </div>
-      <div v-if="favError" class="online-error">{{ favError }}</div>
-      <div v-if="translateProvider" class="translate-note-row">
-        <span class="translate-note">{{ translateProvider }}</span>
-      </div>
-
-      <!-- 次要操作：打开文件夹 + 网站浏览 + 重装 + 更多操作（备注名） -->
-      <div class="detail-actions">
         <button
           v-if="primaryAction === 'uninstall-local'"
           type="button"
-          class="dv-btn-ghost"
+          class="dv-btn-ghost icon-btn"
           :disabled="revealingFolder"
           :title="t('detail.openFolder')"
+          :aria-label="t('detail.openFolder')"
           @click="emit('reveal-folder')"
         >
-          {{ revealingFolder ? t("detail.opening") : t("detail.openFolder") }}
+          <span aria-hidden="true">📁</span>
+          <span class="sr-only">{{ revealingFolder ? t("detail.opening") : t("detail.openFolder") }}</span>
         </button>
         <button
           v-if="localEntry"
           type="button"
-          class="dv-btn-ghost"
+          class="dv-btn-ghost icon-btn"
           :disabled="subscribeBusy"
+          :title="mod.updateAvailable ? t('online.updateLocal') : t('online.reinstallLocal')"
+          :aria-label="mod.updateAvailable ? t('online.updateLocal') : t('online.reinstallLocal')"
           @click="emit('reinstall')"
         >
-          {{ installing ? t("online.installing") : mod.updateAvailable ? t("online.updateLocal") : t("online.reinstallLocal") }}
+          <span aria-hidden="true">🔄</span>
+          <span class="sr-only">{{ installing ? t("online.installing") : mod.updateAvailable ? t("online.updateLocal") : t("online.reinstallLocal") }}</span>
         </button>
         <button
           v-if="installing"
           type="button"
-          class="dv-btn-ghost"
+          class="dv-btn-ghost icon-btn"
           :disabled="cancelRequested"
+          :title="t('online.cancelDownload')"
+          :aria-label="t('online.cancelDownload')"
           @click="emit('stop-install')"
         >
-          {{ cancelRequested ? t("downloader.stopping") : t("online.cancelDownload") }}
+          <span aria-hidden="true">⏹</span>
+          <span class="sr-only">{{ cancelRequested ? t("downloader.stopping") : t("online.cancelDownload") }}</span>
         </button>
-        <button type="button" class="dv-btn-ghost" :disabled="openingWeb" @click="emit('open-webpage')">
-          {{ t("online.browseSite") }}
+        <button
+          type="button"
+          class="dv-btn-ghost icon-btn"
+          :disabled="openingWeb"
+          :title="t('online.browseSite')"
+          :aria-label="t('online.browseSite')"
+          @click="emit('open-webpage')"
+        >
+          <span aria-hidden="true">🔗</span>
+          <span class="sr-only">{{ t("online.browseSite") }}</span>
         </button>
-        <details class="more-actions">
-          <summary class="dv-btn-ghost more-actions-summary">
-            ⋯ {{ t("detailPanel.more") }}
-          </summary>
-          <div class="more-actions-menu">
-            <button
-              type="button"
-              :disabled="!canFavorite || renameBusy"
-              :title="t('favorites.renameTitle')"
-              @click="emit('rename'); ($event.currentTarget as HTMLButtonElement).closest('details')!.open = false"
-            >
-              📝 {{ t("favorites.rename") }}
-            </button>
-          </div>
-        </details>
+        <button
+          type="button"
+          class="dv-btn-ghost icon-btn"
+          :disabled="!canFavorite || renameBusy"
+          :title="t('favorites.renameTitle')"
+          :aria-label="t('favorites.rename')"
+          @click="emit('rename')"
+        >
+          <span aria-hidden="true">📝</span>
+          <span class="sr-only">{{ t("favorites.rename") }}</span>
+        </button>
       </div>
+      <div v-if="favError" class="online-error">{{ favError }}</div>
     </section>
 
     <!-- ③ 描述区（v2.1）：夹在主操作与其他操作之间，长文本折叠 -->
@@ -303,18 +454,16 @@ watch(
       </div>
     </section>
 
-    <!-- ⑥ 作者 / 版本 / 时间 -->
+    <!-- ⑥ 更多信息：作者 / 发布时间 / 更新时间 / 版本 / 订阅数 / 评分。
+         发布时间取服务端 createDate，更新时间取 lastUpdate，二者不混用；
+         服务端磁盘占用、内部状态串与服务端订阅标记属内部信息，不在普通界面展示。 -->
     <section class="dv-zone dv-zone-meta">
-      <h4 class="dv-zone-title">{{ t("detailPanel.meta") }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.more") }}</h4>
       <div class="field">
         <span class="k">{{ t("online.author") }}</span>
         <span class="v" :class="{ missing: !mod.creator }">
           {{ mod.creator ?? t("labels.notProvided") }}
         </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.version") }}</span>
-        <span class="v">{{ versionText }}</span>
       </div>
       <div class="field">
         <span class="k">{{ t("online.created") }}</span>
@@ -324,10 +473,10 @@ watch(
         <span class="k">{{ t("online.updated") }}</span>
         <span class="v" :class="{ missing: !updatedText }">{{ updatedText ?? t("labels.notProvided") }}</span>
       </div>
-    </section>
-
-    <!-- ⑦ 低频信息：订阅数 / 评分 / 体积 / 状态（不折叠、不显示分区标题，直接平铺） -->
-    <section class="dv-zone dv-zone-more">
+      <div class="field">
+        <span class="k">{{ t("online.version") }}</span>
+        <span class="v">{{ versionText }}</span>
+      </div>
       <div class="field">
         <span class="k">{{ t("online.installs") }}</span>
         <span class="v">
@@ -339,24 +488,11 @@ watch(
         <span class="k">{{ t("online.rating") }}</span>
         <span class="v">{{ ratingText }}</span>
       </div>
-      <div class="field">
-        <span class="k">{{ t("online.modSize") }}</span>
-        <span class="v">{{ sizeText }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.diskSize") }}</span>
-        <span class="v">{{ diskText }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.status") }}</span>
-        <span class="v">{{ mod.modStatus ?? t("labels.notProvided") }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.subscribed") }}</span>
-        <span class="v">{{ mod.userInstalled ? t("online.yesOfficial") : t("online.no") }}</span>
-      </div>
     </section>
   </div>
+
+  <!-- 封面重试成功 / 失败轻提示（固定右下角，复用全局 .app-toast） -->
+  <div v-if="coverToast" class="app-toast" :class="coverToast.kind">{{ coverToast.text }}</div>
 </template>
 
 <style scoped>
@@ -421,64 +557,11 @@ watch(
   color: var(--danger-text);
 }
 
-/* 更多操作下拉菜单 */
-.more-actions {
-  position: relative;
-}
-.more-actions-summary {
-  list-style: none;
-  cursor: pointer;
-  user-select: none;
-}
-.more-actions-summary::-webkit-details-marker {
-  display: none;
-}
-.more-actions-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  min-width: 140px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--bg-panel);
-  box-shadow: 0 8px 20px rgba(var(--shadow-rgb), 0.4);
-  z-index: 10;
-  padding: 4px 0;
-}
-.more-actions-menu button {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  text-align: left;
-  background: transparent;
-  border: none;
-  color: var(--parch);
-  font-size: calc(12px * var(--global-scale));
-  cursor: pointer;
-  white-space: nowrap;
-}
-.more-actions-menu button:hover:not(:disabled) {
-  background: rgba(var(--accent-rgb), 0.1);
-  color: var(--gold-text);
-}
-.more-actions-menu button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* 辅助操作行统一间距 */
 .dv-action-secondary {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 8px;
-}
-.translate-note-row {
-  margin-top: 4px;
-}
-.translate-note {
-  font-size: calc(11px * var(--global-scale));
-  color: var(--muted);
 }
 </style>

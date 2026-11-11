@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, Theme};
 use tauri_plugin_window_state::{AppHandleExt, WindowExt};
 
 use serde_json::json;
@@ -1339,15 +1339,46 @@ async fn set_view_prefs(
     Ok(current)
 }
 
+/// 把界面明暗主题同步到 Windows 原生窗口装饰（标题栏 / 边框明暗）。
+/// 方案 A：保留原生窗口装饰，不自绘标题栏；强调色只作用于 WebView 内部，不影响原生外框。
+fn apply_native_theme(app: &tauri::AppHandle, theme: &str) {
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    let native = if theme.trim().eq_ignore_ascii_case(models::THEME_LIGHT) {
+        Theme::Light
+    } else {
+        Theme::Dark
+    };
+    if let Err(e) = main.set_theme(Some(native)) {
+        log::warn!(target: "window-theme", "原生窗口主题同步失败：{e}");
+    }
+}
+
 /// v2.2：界面主题（"dark" 深色羊皮纸 / "light" 明亮米白）。
 ///
 /// 只写界面偏好：非法值一律归一化成 dark，不报错、不动扫描结果、不触发重扫
 /// （前端切换后可以立即调用，写盘失败由前端提示，不回滚界面）。
+/// 落盘后同步把原生窗口装饰切到对应明暗（方案 A）。
 #[tauri::command]
 async fn set_theme(app: tauri::AppHandle, theme: String) -> Result<models::Settings, String> {
     let path = settings_path(&app)?;
     let mut current = settings::load(&path);
     current.theme = models::normalize_theme(&theme);
+    settings::save(&path, &current)?;
+    apply_native_theme(&app, &current.theme);
+    Ok(current)
+}
+
+/// v3.6：强调色主题（gold 默认 / blue / amber / brick）。
+///
+/// 只写界面偏好：非法值一律归一化成 gold，不报错、不动扫描结果、不触发重扫。
+/// 强调色不影响原生窗口明暗（那是 theme 字段的职责）。
+#[tauri::command]
+async fn set_accent(app: tauri::AppHandle, accent: String) -> Result<models::Settings, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    current.accent = models::normalize_accent(&accent);
     settings::save(&path, &current)?;
     Ok(current)
 }
@@ -1385,6 +1416,23 @@ async fn save_typography_prefs(
     current.card_font_weight = models::normalize_card_font_weight(card_font_weight);
     // v3.5：纯布尔开关，无非法值需要归一化
     current.latin_font = latin_font;
+    settings::save(&path, &current)?;
+    Ok(current)
+}
+
+/// 已安装卡片三种独立视觉装饰开关；全部默认开启，只影响本机真实已安装卡片。
+#[tauri::command]
+async fn save_installed_card_decor_prefs(
+    app: tauri::AppHandle,
+    card_bg_enabled: bool,
+    side_bar_enabled: bool,
+    corner_stripes_enabled: bool,
+) -> Result<models::Settings, String> {
+    let path = settings_path(&app)?;
+    let mut current = settings::load(&path);
+    current.installed_card_bg_enabled = card_bg_enabled;
+    current.installed_card_bar_enabled = side_bar_enabled;
+    current.installed_card_stripes_enabled = corner_stripes_enabled;
     settings::save(&path, &current)?;
     Ok(current)
 }
@@ -1456,6 +1504,97 @@ async fn online_images_fetch(app: tauri::AppHandle, tasks: Vec<images::FetchTask
     let count = queued.len();
     std::thread::spawn(move || images::download_batch(app, queued));
     count
+}
+
+/// 封面同步结果：缓存复用复制 / 缺失下载并同时写缓存与安装目录
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverSyncOutcome {
+    /// `copied-from-cache` = 复用有效缓存复制到模组目录；`downloaded` = 缓存缺失/损坏，重新下载并写两处
+    pub status: String,
+    pub bytes: u64,
+    pub cache_path: Option<String>,
+    pub install_path: Option<String>,
+}
+
+/// 把有效封面同步到已安装模组目录的 `thumbnail.jpg`。
+/// 复用现有图片缓存（images）与安装目录缩略图写入（`install::write_thumbnail`），不新建下载系统；
+/// 不动 info.json，也不覆盖目录内其他文件。
+#[tauri::command]
+async fn online_cover_sync(
+    app: tauri::AppHandle,
+    mod_id: i64,
+    kind: String,
+    folder_name: String,
+    url: Option<String>,
+) -> Result<CoverSyncOutcome, String> {
+    let root = settings::load_for_app(&app)
+        .mod_root
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
+    if kind != "local" && kind != "subscribed" {
+        return Err(user_err("modOps.unknownKind", json!({ "kind": kind })));
+    }
+    let folder = folder_name.trim().to_string();
+    if folder.is_empty() || folder.contains('/') || folder.contains('\\') || folder.contains("..") {
+        return Err(user_err("modOps.illegalFolder", json!({})));
+    }
+    let mod_dir = PathBuf::from(&root).join(&kind).join(&folder);
+    if !mod_dir.is_dir() {
+        return Err(user_err("modOps.dirNotExist", json!({ "path": mod_dir.display().to_string() })));
+    }
+
+    let inner = tauri::async_runtime::spawn_blocking(move || {
+        // 1. 读现有缓存：存在且魔数有效才复用，否则视为缺失/损坏走下载
+        let cache_path = images::file_for(&app, mod_id).ok();
+        let cached: Option<Vec<u8>> = cache_path
+            .as_ref()
+            .filter(|p| p.is_file())
+            .and_then(|p| fs::read(p).ok())
+            .filter(|b| images::looks_valid_image(b));
+
+        let (bytes, cache_path_out, status): (Vec<u8>, Option<String>, String) = match cached {
+            Some(b) => (
+                b,
+                cache_path.map(|p| p.display().to_string()),
+                "copied-from-cache".to_string(),
+            ),
+            None => {
+                let u = url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                let Some(u) = u else {
+                    return Err(user_err("cover.cacheInvalid", json!({ "modId": mod_id })));
+                };
+                let client = client(&app).map_err(|e| {
+                    user_err("cover.network", json!({ "kind": e.kind, "message": e.message, "status": e.status }))
+                })?;
+                let bytes = client
+                    .fetch_bytes(&u, images::MAX_IMAGE_BYTES)
+                    .map_err(|e| user_err("cover.network", json!({ "kind": e.kind, "message": e.message, "status": e.status })))?;
+                // 下载成功：先补应用缓存（与既有图片缓存同一目录/命名）
+                let cache = images::store_bytes(&app, mod_id, &bytes)?;
+                (bytes, Some(cache), "downloaded".to_string())
+            }
+        };
+
+        // 2. 写入模组安装目录 thumbnail.jpg（复用既有写入函数，不动 info.json 与其他文件）
+        let install_path = install::write_thumbnail(&mod_dir, &bytes)?;
+
+        log::info!(
+            target: "image-cache",
+            "封面同步 modId={} status={} bytes={} install={}",
+            mod_id, status, bytes.len(), install_path
+        );
+        Ok(CoverSyncOutcome {
+            status,
+            bytes: bytes.len() as u64,
+            cache_path: cache_path_out,
+            install_path: Some(install_path),
+        })
+    })
+    .await
+    .map_err(|e| user_err("cover.syncFailed", json!({ "error": e.to_string() })))?;
+
+    inner
 }
 
 
@@ -3237,6 +3376,9 @@ pub fn run() {
                         Ok(()) => log::info!(target: "window-state", "启动时主窗口状态已恢复"),
                         Err(e) => log::warn!(target: "window-state", "启动时主窗口状态恢复失败，按默认尺寸显示：{e}"),
                     }
+                    // 方案 A：显示前先按持久化明暗主题同步原生窗口装饰，避免标题栏先闪默认深色再切浅色。
+                    let persisted_theme = settings::load_for_app(app.handle()).theme;
+                    apply_native_theme(app.handle(), &persisted_theme);
                     let _ = main.show();
                     let _ = main.set_focus();
 
@@ -3325,7 +3467,9 @@ pub fn run() {
     set_enable_local_search,
     set_view_prefs,
     set_theme,
+    set_accent,
     save_typography_prefs,
+    save_installed_card_decor_prefs,
             online_index_clear,
             online_titles_translate_start,
             online_titles_translate_stop,
@@ -3339,6 +3483,7 @@ pub fn run() {
             translator::translation_cache_clear,
             online_images_local,
             online_images_fetch,
+            online_cover_sync,
             online_install,
             online_cancel_install,
             online_uninstall,

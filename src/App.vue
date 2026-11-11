@@ -10,20 +10,33 @@ import DownloadManager from "./components/DownloadManager.vue";
 import LocalBrowser from "./components/local/LocalBrowser.vue";
 import {
   FONT_FAMILY_VARS,
+  INSTALLED_CARD_DECOR_DEFAULTS,
   TYPOGRAPHY_DEFAULTS,
   appVersion,
   fetchGithubReleases,
   getSettings,
+  normalizeInstalledCardDecor,
   normalizeTypography,
   normalizeVersion,
   openExternalUrl,
   renderReleaseMarkdown,
+  saveInstalledCardDecorPrefs,
   saveTypographyPrefs,
+  setAccent,
   setLocale as persistLocale,
   setTheme,
+  type InstalledCardDecorPrefs,
   type TypographyPrefs,
+  type UiAccent,
   type UiFontFamily,
 } from "./api";
+import {
+  ACCENT_CSS_VARS,
+  DEFAULT_ACCENT,
+  getAccentPalette,
+  isAccentId,
+  normalizeAccentTheme,
+} from "./config/accentThemes";
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
 import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
@@ -143,8 +156,75 @@ applyTheme(theme.value);
 
 watch(theme, (next) => {
   applyTheme(next);
+  applyAccentPalette(accent.value, next);
   if (!themeReady) return;
   void setTheme(next).catch((e) => console.warn("[theme] failed to save", e));
+});
+
+// ---------------- 强调色（与明暗模式正交，驱动选中 / 主按钮 / 反馈 / Focus 等强调层） ----------------
+const ACCENT_CACHE_KEY = "aoe2mm.accent";
+
+function readCachedAccent(): UiAccent {
+  try {
+    return normalizeAccentTheme(window.localStorage.getItem(ACCENT_CACHE_KEY));
+  } catch {
+    return DEFAULT_ACCENT;
+  }
+}
+
+/** 把当前强调色对应明暗档位的调色板写进根节点 CSS 变量（注册表为唯一色值来源） */
+function applyAccentPalette(accentId: UiAccent, mode: Theme) {
+  const palette = getAccentPalette(accentId, mode);
+  const root = document.documentElement;
+  for (const { field, cssVar } of ACCENT_CSS_VARS) {
+    root.style.setProperty(cssVar, palette[field]);
+  }
+}
+
+function applyAccent(next: UiAccent) {
+  document.documentElement.setAttribute("data-accent", next);
+  applyAccentPalette(next, theme.value);
+  try {
+    window.localStorage.setItem(ACCENT_CACHE_KEY, next);
+  } catch { /* 忽略 */ }
+}
+const accent = ref<UiAccent>(readCachedAccent());
+let accentReady = false;
+applyAccent(accent.value);
+
+watch(accent, (next) => {
+  applyAccent(next);
+  if (!accentReady) return;
+  // 写入侧防护：注册表外的 ID 不落盘（防御外部字符串 / 坏值被当成有效主题色保存）
+  if (!isAccentId(next)) return;
+  void setAccent(next).catch((e) => console.warn("[accent] failed to save", e));
+});
+
+// ---------------- 详情页辅助按钮样式：图标（默认）/ 原始文字 ----------------
+type DetailButtonMode = "icon" | "text";
+const DETAIL_BTN_MODE_CACHE_KEY = "aoe2mm.detailButtonMode";
+
+function normalizeDetailBtnMode(raw: unknown): DetailButtonMode {
+  return String(raw ?? "").toLowerCase() === "text" ? "text" : "icon";
+}
+function readCachedDetailBtnMode(): DetailButtonMode {
+  try {
+    return normalizeDetailBtnMode(window.localStorage.getItem(DETAIL_BTN_MODE_CACHE_KEY));
+  } catch {
+    return "icon";
+  }
+}
+function applyDetailBtnMode(next: DetailButtonMode) {
+  document.documentElement.dataset.detailButtonMode = next;
+  try {
+    window.localStorage.setItem(DETAIL_BTN_MODE_CACHE_KEY, next);
+  } catch { /* 忽略 */ }
+}
+const detailButtonMode = ref<DetailButtonMode>(readCachedDetailBtnMode());
+applyDetailBtnMode(detailButtonMode.value);
+
+watch(detailButtonMode, (next) => {
+  applyDetailBtnMode(next);
 });
 
 // ---------------- 排版（三层 CSS 变量） ----------------
@@ -247,6 +327,73 @@ watch(
 
 onBeforeUnmount(() => {
   if (typographyTimer) clearTimeout(typographyTimer);
+});
+
+// ---------------- 已安装卡片装饰开关（背景 / 左侧条 / 右下角斜纹） ----------------
+const DECOR_CACHE_KEY = "aoe2mm.installedCardDecor.v1";
+
+function readCachedDecor(): InstalledCardDecorPrefs {
+  try {
+    const raw = window.localStorage.getItem(DECOR_CACHE_KEY);
+    if (!raw) return { ...INSTALLED_CARD_DECOR_DEFAULTS };
+    return normalizeInstalledCardDecor(JSON.parse(raw));
+  } catch {
+    return { ...INSTALLED_CARD_DECOR_DEFAULTS };
+  }
+}
+
+function applyDecor(next: InstalledCardDecorPrefs) {
+  const root = document.documentElement;
+  const prefs = normalizeInstalledCardDecor(next);
+  root.dataset.installedCardBg = prefs.cardBg ? "on" : "off";
+  root.dataset.installedCardBar = prefs.sideBar ? "on" : "off";
+  root.dataset.installedCardStripes = prefs.cornerStripes ? "on" : "off";
+  try {
+    window.localStorage.setItem(DECOR_CACHE_KEY, JSON.stringify(prefs));
+  } catch { /* 忽略 */ }
+}
+
+const cachedDecor = readCachedDecor();
+const installedCardBg = ref<boolean>(cachedDecor.cardBg);
+const installedCardBar = ref<boolean>(cachedDecor.sideBar);
+const installedCardStripes = ref<boolean>(cachedDecor.cornerStripes);
+
+function currentDecor(): InstalledCardDecorPrefs {
+  return normalizeInstalledCardDecor({
+    cardBg: installedCardBg.value,
+    sideBar: installedCardBar.value,
+    cornerStripes: installedCardStripes.value,
+  });
+}
+
+let decorReady = false;
+let persistedDecor: InstalledCardDecorPrefs = { ...cachedDecor };
+let decorTimer: ReturnType<typeof setTimeout> | null = null;
+
+function sameDecor(a: InstalledCardDecorPrefs, b: InstalledCardDecorPrefs): boolean {
+  return a.cardBg === b.cardBg && a.sideBar === b.sideBar && a.cornerStripes === b.cornerStripes;
+}
+
+applyDecor(cachedDecor);
+
+watch(
+  [installedCardBg, installedCardBar, installedCardStripes],
+  () => {
+    const next = currentDecor();
+    applyDecor(next);
+    if (!decorReady) return;
+    if (sameDecor(next, persistedDecor)) return;
+    if (decorTimer) clearTimeout(decorTimer);
+    decorTimer = setTimeout(() => {
+      if (sameDecor(next, persistedDecor)) return;
+      persistedDecor = next;
+      void saveInstalledCardDecorPrefs(next).catch((e) => console.warn("[installed-card-decor] failed", e));
+    }, 300);
+  },
+);
+
+onBeforeUnmount(() => {
+  if (decorTimer) clearTimeout(decorTimer);
 });
 
 // ---------------- 顶栏「启动游戏」 ----------------
@@ -371,6 +518,9 @@ onMounted(async () => {
     theme.value = normalizeTheme(settings.theme);
     applyTheme(theme.value);
     themeReady = true;
+    accent.value = normalizeAccentTheme(settings.accent);
+    applyAccent(accent.value);
+    accentReady = true;
 
     const typoPrefs = normalizeTypography({
       fontFamily: settings.uiFontFamily,
@@ -393,6 +543,18 @@ onMounted(async () => {
     applyTypography(typoPrefs);
     persistedTypography = { ...typoPrefs };
     typographyReady = true;
+
+    const decorPrefs = normalizeInstalledCardDecor({
+      cardBg: settings.installedCardBgEnabled,
+      sideBar: settings.installedCardBarEnabled,
+      cornerStripes: settings.installedCardStripesEnabled,
+    });
+    installedCardBg.value = decorPrefs.cardBg;
+    installedCardBar.value = decorPrefs.sideBar;
+    installedCardStripes.value = decorPrefs.cornerStripes;
+    applyDecor(decorPrefs);
+    persistedDecor = { ...decorPrefs };
+    decorReady = true;
 
     const savedLocale = normalizeLocale(settings.locale);
     applyLocale(savedLocale ?? detectSystemLocale());
@@ -451,7 +613,7 @@ onBeforeUnmount(() => {
             :title="t('toolbar.rescanTitle')"
             @click="localRef?.rescan()"
           >
-            <span class="glyph">⟳</span>
+            <span class="glyph">🔄</span>
             <span class="btn-text">{{ t("toolbar.rescan") }}</span>
           </button>
         </template>
@@ -479,7 +641,7 @@ onBeforeUnmount(() => {
       >
         <template #extra>
           <button type="button" class="icon-btn" :title="t('online.refreshTitle')" @click="onlineRef?.refresh()">
-            <span class="glyph">⟳</span>
+            <span class="glyph">🔄</span>
             <span class="btn-text">{{ t("online.refresh") }}</span>
           </button>
         </template>
@@ -557,6 +719,7 @@ onBeforeUnmount(() => {
         v-if="showSettings"
         v-model:card-size="cardSize"
         v-model:theme="theme"
+        v-model:accent="accent"
         v-model:ui-font-family="uiFontFamily"
         v-model:ui-font-weight="uiFontWeight"
         v-model:global-font-scale="globalFontScale"
@@ -566,6 +729,10 @@ onBeforeUnmount(() => {
         v-model:card-font-size="cardFontSize"
         v-model:card-font-weight="cardFontWeight"
         v-model:latin-font="latinFont"
+        v-model:installed-card-bg="installedCardBg"
+        v-model:installed-card-bar="installedCardBar"
+        v-model:installed-card-stripes="installedCardStripes"
+        v-model:detail-button-mode="detailButtonMode"
         :root-path="localRef?.reportRoot ?? ''"
         :initial-tab="settingsInitialTab"
         :focus-game-root="settingsFocusGameRoot"

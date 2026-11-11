@@ -63,6 +63,13 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const imgFailed = ref(false);
+/** 封面重试阶段：本地模组无网络下载源，只有重新加载 / 完成 / 失败 */
+type CoverStage = "idle" | "reloading" | "done" | "failed";
+const coverStage = ref<CoverStage>("idle");
+/** 封面重新加载中：防止短时间重复点击 */
+const coverReloading = computed(() => coverStage.value === "reloading");
+/** 强制 <img> 重建重渲同一资源（本地文件 / 缓存 asset URL 无网络重下链路） */
+const coverReloadKey = ref(0);
 const revealing = ref(false);
 const revealError = ref<string | null>(null);
 const toggling = ref(false);
@@ -219,14 +226,6 @@ const translateLabel = computed(() => {
     : t("translate.showOriginal");
 });
 
-const translateProvider = computed(() => {
-  const tr = translationOf(translateId.value);
-  if (!tr) return null;
-  return tr.cached
-    ? t("translate.fromCache", { name: tr.provider })
-    : t("translate.provider", { name: tr.provider });
-});
-
 /** 只读探测本地译文缓存（无网络）：在线页翻过 / 上次会话翻过 → 打开即中文 */
 async function probeTranslationCache(): Promise<void> {
   const id = translateId.value;
@@ -318,6 +317,57 @@ const confirmMessage = computed(
 
 /** 有 WorkshopID 才能定位官网页面；无 ID 的本地模组不算失败，只是没得浏览 */
 const canOpenWebsite = computed(() => (props.mod.workshopId ?? 0) > 0);
+
+/** 基本信息区：文件体积（安装后目录统计，非压缩包大小） */
+const sizeText = computed(() => {
+  if (props.statsLoading) return t("detail.counting");
+  if (props.stats) return formatBytes(props.stats.sizeBytes);
+  if (props.statsError) return translateBackendMessage(props.statsError);
+  return "—";
+});
+
+/** 基本信息区：文件数量 */
+const fileCountText = computed(() => {
+  if (props.statsLoading) return t("detail.counting");
+  if (props.stats) return t("detail.files", { n: props.stats.fileCount.toLocaleString() });
+  return "—";
+});
+
+/**
+ * 复制 Workshop ID 到系统剪贴板：优先 Clipboard API，失败退回 textarea + execCommand。
+ * 无 ID 时按钮不可点，不会触发。
+ */
+async function copyWorkshopId(): Promise<void> {
+  const id = props.mod.workshopId;
+  if (!id || id <= 0) return;
+  const text = String(id);
+  let ok = false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.top = "-1000px";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(area);
+    } catch {
+      ok = false;
+    }
+  }
+  showToast(ok ? t("detail.copied") : t("detail.copyFailed"), ok ? "ok" : "error");
+}
 
 /** 返回 raw 错误串，渲染时由 translateBackendMessage 翻译，切语言即时跟随。 */
 function errorText(e: unknown, fallbackKey: string): string {
@@ -412,10 +462,38 @@ const coverUrl = computed(() => {
   return props.mod.thumbnail ? fileUrl(props.mod.thumbnail) : null;
 });
 
+/** 封面加载成功：结束重试态并提示已更新 */
+function onCoverLoad(): void {
+  coverStage.value = "done";
+  showToast(t("detail.coverUpdated"));
+}
+
+/** 封面加载失败：回到失败态，按钮保留可再次点击 */
+function onCoverError(): void {
+  imgFailed.value = true;
+  coverStage.value = "failed";
+  showToast(t("detail.coverLoadFailed"), "error");
+}
+
+/** 重新尝试读取现有封面资源；本地模组无网络下载链路，仅强制重渲 */
+function reloadCover(): void {
+  if (coverReloading.value) return;
+  imgFailed.value = false;
+  // 清失败态后仍无资源（本地确实缺文件 / 无缓存 URL）：给出获取失败提示，按钮保持可点
+  if (!coverUrl.value) {
+    coverStage.value = "failed";
+    showToast(t("detail.coverFetchFailed"), "error");
+    return;
+  }
+  coverStage.value = "reloading";
+  coverReloadKey.value += 1;
+}
+
 watch(
   () => [props.mod.id, props.mod.workshopId, translationLangEpoch()] as const,
   () => {
     imgFailed.value = false;
+    coverStage.value = "idle";
     // 换模组时描述折叠状态归零，避免上一个模组的「展开」状态被带过来
     descExpanded.value = false;
     toggleError.value = null;
@@ -443,11 +521,33 @@ watch(
   <div class="detail-body">
     <!-- ① 识别区：封面 + 模组名 + 来源/分类标签 -->
     <section class="dv-zone dv-ident">
-      <img v-if="coverUrl" class="detail-cover" :src="coverUrl" alt="" @error="imgFailed = true" />
-      <div v-else class="no-cover-box">
-        {{ t("detail.coverMissing") }}<br />
-        {{ t("detail.coverMissingDetail") }}
+      <div class="cover-frame">
+        <img
+          v-if="coverUrl"
+          :key="coverReloadKey"
+          class="detail-cover"
+          :src="coverUrl"
+          alt=""
+          @load="onCoverLoad"
+          @error="onCoverError"
+        />
+        <div v-else class="no-cover-box">
+          {{ t("detail.coverMissing") }}<br />
+          {{ t("detail.coverMissingDetail") }}
+        </div>
+        <button
+          v-if="!coverUrl || imgFailed"
+          type="button"
+          class="cover-reload-btn"
+          :disabled="coverReloading"
+          :aria-label="t('detail.refreshCover')"
+          :title="t('detail.refreshCoverHint')"
+          @click="reloadCover"
+        >
+          <span :class="{ 'is-spinning': coverReloading }" aria-hidden="true">🔄</span>
+        </button>
       </div>
+      <p v-if="coverStage === 'reloading'" class="cover-status">{{ t("detail.coverReloading") }}</p>
 
       <h3 class="detail-title">{{ headerTitle }}</h3>
       <div v-if="titleSub" class="detail-title-orig">{{ titleSub }}</div>
@@ -455,8 +555,31 @@ watch(
       <div class="detail-badges">
         <span v-if="conflictHint" class="conflict-badge">{{ conflictHint }}</span>
         <span v-for="tag in mod.contentTags" :key="tag" class="badge">{{ localizedTagName(tag) }}</span>
-        <span v-if="!uninstalled && mod.nameFromFolder !== mod.displayName" class="badge">
-          {{ t("detail.folder") }}: {{ mod.nameFromFolder }}
+      </div>
+
+      <!-- 基本信息：Workshop ID（可复制）+ 文件体积 + 文件数量，紧凑横排 -->
+      <div class="basic-row">
+        <button
+          type="button"
+          class="basic-chip basic-chip-copy"
+          :disabled="!mod.workshopId"
+          :title="mod.workshopId ? t('detail.copyIdTitle') : t('detail.workshopIdMissing')"
+          :aria-label="mod.workshopId ? `${t('detail.workshopId')}: ${mod.workshopId}` : t('detail.workshopIdMissing')"
+          @click="copyWorkshopId"
+        >
+          <span class="chip-label">{{ t("detail.workshopId") }}</span>
+          <span class="chip-value">{{ mod.workshopId ?? t("detail.workshopIdMissing") }}</span>
+        </button>
+        <span class="basic-chip">
+          <span class="chip-label">{{ t("detail.fileSize") }}</span>
+          <span class="chip-value">{{ sizeText }}</span>
+        </span>
+        <span
+          class="basic-chip"
+          :title="stats?.truncated ? t('detail.sizeTruncated') : undefined"
+        >
+          <span class="chip-label">{{ t("detail.fileCount") }}</span>
+          <span class="chip-value">{{ fileCountText }}</span>
         </span>
       </div>
     </section>
@@ -523,7 +646,7 @@ watch(
         <span>{{ t("detail.dataModWarning") }}</span>
       </div>
 
-      <!-- 常用辅助操作：收藏 + 翻译 -->
+      <!-- 辅助操作单行：收藏、翻译、打开文件夹、网站浏览、备注名 -->
       <div class="dv-action-row dv-action-secondary">
         <button
           type="button"
@@ -531,10 +654,11 @@ watch(
           :class="{ active: favorited }"
           :disabled="!canFavorite || favBusy"
           :title="canFavorite ? t('favorites.favoriteTitle') : t('favorites.noId')"
+          :aria-label="favorited ? t('favorites.favorited') : t('favorites.favorite')"
           @click="toggleFavorite"
         >
           <span class="fav-star">{{ favorited ? "⭐" : "☆" }}</span>
-          {{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}
+          <span class="sr-only">{{ favorited ? t("favorites.favorited") : t("favorites.favorite") }}</span>
         </button>
         <button
           v-if="translateId > 0"
@@ -543,54 +667,49 @@ watch(
           :class="{ active: hasTranslation && !showingOriginalText }"
           :disabled="translateBusy || translateQueued || (!hasTranslation && !canTranslate)"
           :title="t('translate.triggerTitle')"
+          :aria-label="translateLabel"
           @click="onTranslateClick"
         >
           <span class="fav-star">🌐</span>
-          {{ translateLabel }}
+          <span class="sr-only">{{ translateLabel }}</span>
+        </button>
+        <button
+          v-if="!uninstalled"
+          type="button"
+          class="dv-btn-ghost icon-btn"
+          :disabled="revealing"
+          :title="t('detail.openFolder')"
+          :aria-label="t('detail.openFolder')"
+          @click="revealFolder"
+        >
+          <span aria-hidden="true">📁</span>
+          <span class="sr-only">{{ revealing ? t("detail.opening") : t("detail.openFolder") }}</span>
+        </button>
+        <button
+          type="button"
+          class="dv-btn-ghost icon-btn"
+          :disabled="!canOpenWebsite || openingWeb"
+          :title="canOpenWebsite ? t('detail.browseSiteTitle') : t('detail.browseSiteDisabled')"
+          :aria-label="t('detail.browseSite')"
+          @click="openWebsite"
+        >
+          <span aria-hidden="true">🔗</span>
+          <span class="sr-only">{{ openingWeb ? t("detail.opening") : t("detail.browseSite") }}</span>
+        </button>
+        <button
+          type="button"
+          class="dv-btn-ghost icon-btn"
+          :disabled="!canFavorite || renameBusy"
+          :title="canFavorite ? t('favorites.renameTitle') : t('favorites.noId')"
+          :aria-label="t('favorites.rename')"
+          @click="openRename"
+        >
+          <span aria-hidden="true">📝</span>
+          <span class="sr-only">{{ t("favorites.rename") }}</span>
         </button>
       </div>
       <div v-if="favError" class="path-actions">
         <span class="path-error">{{ translateBackendMessage(favError) }}</span>
-      </div>
-      <div v-if="translateProvider" class="translate-note-row">
-        <span class="translate-note">{{ translateProvider }}</span>
-      </div>
-
-      <!-- 次要操作：打开文件夹 + 网站浏览 + 更多操作（备注名） -->
-      <div class="dv-action-row dv-action-ghost-row">
-        <button
-          v-if="!uninstalled"
-          type="button"
-          class="dv-btn-ghost"
-          :disabled="revealing"
-          @click="revealFolder"
-        >
-          {{ revealing ? t("detail.opening") : t("detail.openFolder") }}
-        </button>
-        <button
-          type="button"
-          class="dv-btn-ghost"
-          :disabled="!canOpenWebsite || openingWeb"
-          :title="canOpenWebsite ? t('detail.browseSiteTitle') : t('detail.browseSiteDisabled')"
-          @click="openWebsite"
-        >
-          {{ openingWeb ? t("detail.opening") : t("detail.browseSite") }}
-        </button>
-        <details class="more-actions">
-          <summary class="dv-btn-ghost more-actions-summary">
-            ⋯ {{ t("detailPanel.more") }}
-          </summary>
-          <div class="more-actions-menu">
-            <button
-              type="button"
-              :disabled="!canFavorite || renameBusy"
-              :title="canFavorite ? t('favorites.renameTitle') : t('favorites.noId')"
-              @click="openRename(); ($event.currentTarget as HTMLButtonElement).closest('details')!.open = false"
-            >
-              📝 {{ t("favorites.rename") }}
-            </button>
-          </div>
-        </details>
       </div>
       <p v-if="!canOpenWebsite" class="dv-action-note">{{ t("detail.noWorkshopNote") }}</p>
       <div v-if="revealError" class="path-actions">
@@ -637,18 +756,6 @@ watch(
       <div v-else-if="mod.enabled === null" class="path-actions">
         <span class="path-error">{{ t("detail.statusNoRecord") }}</span>
       </div>
-      <div class="field">
-        <span class="k">{{ t("detail.priority") }}</span>
-        <span class="v" :class="{ missing: mod.priority === null }">
-          {{ mod.priority ?? t("labels.unknown") }}
-        </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("detail.source") }}</span>
-        <span class="v source-cell">
-          <span class="badge" :class="'source-' + mod.source">{{ sourceLabel(mod.source) }}</span>
-        </span>
-      </div>
       <div v-if="mod.issues.length" class="dv-issues">
         <h5 class="dv-sub-title">{{ t("detail.dataIssues") }}</h5>
         <ul class="issue-list">
@@ -657,9 +764,11 @@ watch(
       </div>
     </section>
 
-    <!-- ⑥ 作者 / 版本 / 更新时间 -->
+    <!-- ⑥ 更多信息：作者 / 发布时间 / 更新时间。
+         本地模组没有可靠的首次发布时间来源：installedAtMs 是本机安装时间、
+         lastUpdateMs 是最近更新时间，都不能冒充发布时间，这里固定显示未知，不推算。 -->
     <section class="dv-zone dv-zone-meta">
-      <h4 class="dv-zone-title">{{ t("detailPanel.metaUpdated") }}</h4>
+      <h4 class="dv-zone-title">{{ t("detailPanel.more") }}</h4>
       <div class="field">
         <span class="k">{{ t("detail.author") }}</span>
         <span class="v" :class="{ missing: !mod.author }">
@@ -667,53 +776,14 @@ watch(
         </span>
       </div>
       <div class="field">
+        <span class="k">{{ t("detail.published") }}</span>
+        <span class="v missing">{{ t("labels.unknown") }}</span>
+      </div>
+      <div class="field">
         <span class="k">{{ t("detail.lastUpdate") }}</span>
         <span class="v" :class="{ missing: !mod.lastUpdateMs }">{{ formatDateTime(mod.lastUpdateMs) }}</span>
       </div>
     </section>
-
-    <!-- ⑦ 低频技术信息：默认收起，点开才占位 -->
-    <details class="dv-zone dv-more">
-      <summary class="dv-more-summary">{{ t("detailPanel.more") }}</summary>
-      <div class="field">
-        <span class="k">{{ t("detail.workshopId") }}</span>
-        <span class="v" :class="{ missing: !mod.workshopId }">
-          {{ mod.workshopId ?? t("detail.workshopIdMissing") }}
-        </span>
-      </div>
-      <div v-if="!uninstalled" class="field">
-        <span class="k">{{ t("detail.size") }}</span>
-        <span class="v">
-          <template v-if="statsLoading">{{ t("detail.counting") }}</template>
-          <template v-else-if="stats">
-            {{ formatBytes(stats.sizeBytes) }} / {{ t("detail.files", { n: stats.fileCount.toLocaleString() }) }}
-            <span v-if="stats.truncated">{{ t("detail.sizeTruncated") }}</span>
-          </template>
-          <span v-else-if="statsError" class="missing">{{ translateBackendMessage(statsError) }}</span>
-          <template v-else>—</template>
-        </span>
-      </div>
-      <div v-if="!uninstalled" class="field">
-        <span class="k">{{ t("detail.folder") }}</span>
-        <span class="v mono">{{ mod.folderName }}</span>
-      </div>
-      <div v-if="!uninstalled" class="field">
-        <span class="k">{{ t("detail.fullPath") }}</span>
-        <span class="v mono">{{ mod.path }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("detail.checksum") }}</span>
-        <span class="v mono" :class="{ missing: !mod.checksum }">
-          {{ mod.checksum ?? t("labels.notProvided") }}
-        </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("detail.nameSource") }}</span>
-        <span class="v">
-          {{ mod.displayNameSource === "info.json" ? t("detail.nameFromInfoJson") : t("detail.nameFromFolder") }}
-        </span>
-      </div>
-    </details>
   </div>
 
   <!-- v0.5：备注名弹窗 -->
@@ -773,58 +843,9 @@ watch(
   white-space: nowrap;
 }
 
-/* 更多操作下拉菜单 */
-.more-actions {
-  position: relative;
-}
-.more-actions-summary {
-  list-style: none;
-  cursor: pointer;
-  user-select: none;
-}
-.more-actions-summary::-webkit-details-marker {
-  display: none;
-}
-.more-actions-menu {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  margin-top: 4px;
-  min-width: 140px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--bg-panel);
-  box-shadow: 0 8px 20px rgba(var(--shadow-rgb), 0.4);
-  z-index: 10;
-  padding: 4px 0;
-}
-.more-actions-menu button {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  text-align: left;
-  background: transparent;
-  border: none;
-  color: var(--parch);
-  font-size: calc(12px * var(--global-scale, 1));
-  cursor: pointer;
-  white-space: nowrap;
-}
-.more-actions-menu button:hover:not(:disabled) {
-  background: rgba(var(--accent-rgb), 0.1);
-  color: var(--gold-text);
-}
-.more-actions-menu button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* 辅助操作行统一间距 */
 .dv-action-secondary {
   gap: 8px;
   flex-wrap: wrap;
-}
-.translate-note-row {
-  margin-top: 4px;
 }
 </style>

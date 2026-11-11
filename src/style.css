@@ -34,14 +34,19 @@
   --text-on-accent: #1b1409;
   --text-inverse: #ffffff;
 
-  /* ---- 强调色（金） ---- */
-  --accent-gold: #c9a24d;
-  --accent-gold-bright: #e8c97a;
-  --accent-gold-dim: #8a6f33;
-  --accent-gold-light: #f3d994;
-  /* 金色文字专用：与 --accent-gold-bright（渐变高光）分开，避免明亮模式下金底金字互撞 */
-  --gold-text: #e8c97a;
+  /* ---- 强调色（canonical 变量族；随 data-accent 切换，gold 档 = 现有暖金黄，逐字节保留） ---- */
+  --accent: #c9a24d;
+  --accent-bright: #e8c97a;
+  --accent-dim: #8a6f33;
+  --accent-light: #f3d994;
+  /* 强调色文字专用：与 --accent-bright（渐变高光）分开，避免明亮模式下底字互撞 */
+  --accent-text: #e8c97a;
   --accent-rgb: 201, 162, 77;
+  /* 已安装卡片信息区：跟随当前 accent 的低饱和实心底色，不使用成功绿大面积染色 */
+  --installed-card-bg: #30281a;
+  /* C 方案装饰：左侧醒目标识条 + 角落低对比斜纹，均跟随当前 accent */
+  --installed-mark-bar: var(--accent);
+  --installed-mark-stripe: var(--accent-dim);
 
   /* ---- 成功（绿） ---- */
   --ok: #78a25c;
@@ -120,9 +125,15 @@
   --panel-lo: var(--bg-panel-deep);
   --line: var(--border-color);
   --line-soft: var(--border-soft);
-  --gold: var(--accent-gold);
-  --gold-bright: var(--accent-gold-bright);
-  --gold-dim: var(--accent-gold-dim);
+  /* 旧金色变量名统一转发到 canonical 强调族，组件层无需改名 */
+  --accent-gold: var(--accent);
+  --accent-gold-bright: var(--accent-bright);
+  --accent-gold-dim: var(--accent-dim);
+  --accent-gold-light: var(--accent-light);
+  --gold: var(--accent);
+  --gold-bright: var(--accent-bright);
+  --gold-dim: var(--accent-dim);
+  --gold-text: var(--accent-text);
   --parch: var(--text-main);
   --parch-dim: var(--text-soft);
   --muted: var(--text-muted);
@@ -243,13 +254,15 @@ html[data-theme="light"] {
   --text-on-accent: #2b2317;
   --text-inverse: #ffffff;
 
-  /* ---- 强调色（暗金） ---- */
-  --accent-gold: #8a6f33;
-  --accent-gold-bright: #a8823a;
-  --accent-gold-dim: #6f5a29;
-  --accent-gold-light: #b08a3c;
-  --gold-text: #8a6f33;
+  /* ---- 强调色（暗金，gold 档明亮值） ---- */
+  --accent: #8a6f33;
+  --accent-bright: #a8823a;
+  --accent-dim: #6f5a29;
+  --accent-light: #b08a3c;
+  --accent-text: #8a6f33;
   --accent-rgb: 138, 111, 51;
+  /* 已安装卡片信息区：浅色主题下的淡金实心底色 */
+  --installed-card-bg: #eee2c4;
 
   /* ---- 成功（绿） ---- */
   --ok: #4f7a3a;
@@ -308,6 +321,12 @@ html[data-theme="light"] {
   --toast-error-top: #f7e3dd;
   --toast-error-bottom: #edd4cb;
 }
+
+/* ================= 强调色档位 =================
+   四档强调色的 dark/light 调色板统一维护在 `src/config/accentThemes.ts` 注册表；
+   App.vue 按当前强调色与明暗档位把 --accent-* / --installed-card-bg 注入根节点。
+   :root 与 html[data-theme="light"] 内保留的 gold 档值仅作首帧兜底，不再另设 blue/amber/brick 选择器。
+   强调色只用于选中、主按钮、交互反馈、Focus 与重要视觉状态，不大面积染色。 */
 
 /* 窗口变窄：先收两侧固定栏，把宽度让给卡片区（与历史断点一致） */
 @media (max-width: 1180px) {
@@ -442,6 +461,20 @@ select:focus {
 }
 select {
   cursor: pointer;
+}
+
+/* v3.6：键盘导航焦点反馈。
+   :focus-visible 只在 Tab / 方向键等键盘聚焦时出现，鼠标点击不强制出框；
+   输入框 / 下拉沿用上面的 :focus 描边，按钮 / 链接 / 角色化控件统一走强调色描边。 */
+button:focus-visible,
+a:focus-visible,
+[role="radio"]:focus-visible,
+[role="tab"]:focus-visible,
+[role="menuitem"]:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent-dim);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
 }
 
 /* ---------- 布局骨架 ----------
@@ -1369,6 +1402,50 @@ select {
   min-width: 0;
   overflow: hidden;
 }
+.card-body.is-installed {
+  position: relative;
+  background: var(--installed-card-bg);
+}
+.card-body.is-installed::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--installed-mark-bar);
+  pointer-events: none;
+  z-index: 0;
+}
+.card-body.is-installed::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  background: repeating-linear-gradient(
+    135deg,
+    var(--installed-mark-stripe) 0 1.4px,
+    transparent 1.4px 4.2px
+  );
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+.card-body.is-installed > * {
+  position: relative;
+  z-index: 1;
+}
+html[data-installed-card-bg="off"] .card-body.is-installed {
+  background: transparent;
+}
+html[data-installed-card-bar="off"] .card-body.is-installed::before {
+  display: none;
+}
+html[data-installed-card-stripes="off"] .card-body.is-installed::after {
+  display: none;
+}
 .card-title {
   /* v2.4：卡片标题只读卡片层字号（--card-font-size），与界面缩放 / 正文完全解耦；
      高度用 em 表达，两行标题同比变高，既不裁字也不溢出边框 */
@@ -1411,6 +1488,11 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.card-meta .extra-meta {
+  color: var(--text-dim);
+  font-size: calc(var(--card-font-size) * 0.82);
+  white-space: nowrap;
+}
 .badge {
   /* v3.2：徽标文字跟随全局字体 */
   font-family: var(--app-font-family);
@@ -1427,19 +1509,19 @@ select {
   white-space: nowrap;
 }
 .badge.local {
-  border-color: rgba(var(--ok-rgb), 0.5);
+  border-color: var(--ok-border);
   color: var(--ok-text);
-  background: rgba(var(--ok-rgb), 0.08);
+  background: var(--ok-surface-top);
 }
 .badge.sub {
   border-color: rgba(var(--info-rgb), 0.45);
   color: var(--info-text);
-  background: rgba(var(--info-rgb), 0.08);
+  background: var(--panel-hi);
 }
 .badge.warn {
-  border-color: rgba(var(--danger-rgb), 0.5);
+  border-color: var(--danger-border);
   color: var(--danger-text);
-  background: rgba(var(--danger-rgb), 0.08);
+  background: var(--danger-surface-top);
 }
 /* 卡片右下角：启用状态指示（图标式，高对比 + 发光） */
 .card-meta.status-row {
@@ -1550,6 +1632,60 @@ select {
     var(--bg-grad-bottom) 8px 16px
   );
 }
+/* 封面区域：相对定位容器，承载右下角重试按钮（不改动封面图本身与卡片装饰） */
+.cover-frame {
+  position: relative;
+}
+
+.cover-reload-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-panel-deep);
+  color: var(--parch);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.92;
+}
+
+.cover-reload-btn:hover,
+.cover-reload-btn:focus-visible {
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+.cover-reload-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.cover-reload-btn .is-spinning {
+  display: inline-block;
+  animation: cover-reload-spin 0.9s linear infinite;
+}
+
+@keyframes cover-reload-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 封面重试进行中的阶段文案（获取 / 下载 / 重新加载），小字提示，不占位挤压布局 */
+.cover-status {
+  margin: 6px 0 0;
+  font-size: calc(11px * var(--global-scale));
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 .detail-title {
   margin: 12px 0 6px;
   font-size: calc(16px * var(--global-scale));
@@ -2271,7 +2407,7 @@ button.delete-btn:disabled {
   justify-content: center;
   border-radius: 9px;
   border: 1px solid rgba(var(--accent-rgb), 0.7);
-  background: rgba(var(--panel-rgb), 0.9);
+  background: var(--panel-hi);
   color: var(--gold-text);
   font-size: calc(10px * var(--global-scale));
   line-height: 1;
@@ -2525,6 +2661,103 @@ body.sort-dragging * {
   line-height: 1;
 }
 
+/* 基本信息行：Workshop ID / 文件体积 / 文件数量，紧凑横排，长文本可换行 */
+.basic-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.basic-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  background: var(--bg-panel-deep);
+  font-size: calc(11px * var(--global-scale));
+  line-height: 1.5;
+  min-width: 0;
+}
+.basic-chip .chip-label {
+  color: var(--muted);
+  letter-spacing: calc(0.4px * var(--ui-tracking));
+  white-space: nowrap;
+}
+.basic-chip .chip-value {
+  color: var(--parch);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.basic-chip-copy {
+  cursor: pointer;
+  color: var(--parch-dim);
+}
+.basic-chip-copy:hover:not(:disabled) {
+  border-color: var(--gold-dim);
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--gold-text);
+}
+.basic-chip-copy:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 详情图标化辅助按钮：固定方形点击区，图标居中；文字由 .sr-only 提供给读屏。
+   选择器限定详情 ghost 按钮（dv-btn-ghost.icon-btn），不外溢顶栏等位置带文字的裸 icon-btn。 */
+.dv-btn-ghost.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: calc(13px * var(--global-scale));
+  line-height: 1;
+}
+
+/* 视觉隐藏但保留在 DOM 中：供屏幕阅读器与测试文本匹配，不占视觉空间 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 详情辅助按钮「原始文字」模式：隐藏图标、把读屏文字恢复为可见文字。
+   事件、权限判断、按钮顺序与图标模式完全一致；选择器限定详情 ghost 按钮（dv-btn-ghost.icon-btn），
+   不影响顶栏等其他位置的裸 icon-btn。 */
+[data-detail-button-mode="text"] .fav-btn .fav-star,
+[data-detail-button-mode="text"] .dv-btn-ghost.icon-btn [aria-hidden="true"] {
+  display: none;
+}
+[data-detail-button-mode="text"] .fav-btn .sr-only,
+[data-detail-button-mode="text"] .dv-btn-ghost.icon-btn .sr-only {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+[data-detail-button-mode="text"] .dv-btn-ghost.icon-btn {
+  width: auto;
+  height: auto;
+  padding: 7px 12px;
+  gap: 6px;
+  justify-content: flex-start;
+  font-size: calc(11.5px * var(--global-scale));
+  line-height: 1.4;
+}
+
 /* ---------- v0.2.4：详情页「一键翻译」按钮行（与收藏/备注名同一套金色描边语言） ---------- */
 .translate-row {
   display: flex;
@@ -2592,7 +2825,7 @@ body.sort-dragging * {
   line-height: 1.6;
   border-radius: 3px;
   border: 1px solid rgba(var(--accent-rgb), 0.55);
-  background: rgba(var(--badge-base-rgb), 0.82);
+  background: var(--panel-hi);
   color: var(--gold-text);
   pointer-events: none;
 }
@@ -2900,7 +3133,7 @@ button.primary.queued {
   line-height: 1.5;
   border-radius: 999px;
   border: 1px solid var(--danger-text-strong);
-  background: linear-gradient(180deg, var(--badge-danger-top), var(--badge-danger-bottom));
+  background: var(--danger-strong);
   color: var(--text-inverse);
   font-family: var(--app-font-family);
   white-space: nowrap;

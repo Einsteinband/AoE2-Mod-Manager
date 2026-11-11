@@ -10,31 +10,59 @@ import ImportDialog from "./ImportDialog.vue";
 import PresetManager from "../PresetManager.vue";
 import FirstRunWizard from "../FirstRunWizard.vue";
 import ConfirmDialog from "../ConfirmDialog.vue";
+import RenameDialog from "../RenameDialog.vue";
+import ContextMenu from "../common/ContextMenu.vue";
+import type { ContextMenuItem } from "../common/contextMenuTypes";
 import { useLocalScan } from "../../composables/local/useLocalScan";
+import { useContextMenu } from "../../composables/useContextMenu";
 import { useUninstalledFavorites } from "../../composables/local/useUninstalledFavorites";
 import { useLocalFilters } from "../../composables/local/useLocalFilters";
 import { useSortMode } from "../../composables/local/useSortMode";
 import { useLocalModActions } from "../../composables/local/useLocalModActions";
+import { buildLocalMenuItems } from "../../composables/local/useLocalModMenu";
 import { useDataModMutex } from "../../composables/local/useDataModMutex";
 import { usePresets } from "../../composables/local/usePresets";
 import { useLocalUpdate } from "../../composables/local/useLocalUpdate";
 import { useLocalBatchUpdate } from "../../composables/local/useLocalBatchUpdate";
 import { useToast } from "../../composables/useToast";
 import { useScrollRestore } from "../../composables/useScrollRestore";
-import { pickModZip, openExternalUrl } from "../../api";
+import { deleteModFiles, openExternalUrl, pickModZip, revealModFolder, toggleModEnabled } from "../../api";
 import { itemsById, updateIds, report as modUpdateReport, checkProgress } from "../../modUpdates";
 import { buildConflictIndex } from "../../modConflict";
 import { enrichFavoriteMetaFromDetail, favoriteMetaOf } from "../../favoriteMeta";
 import { enqueueDownload } from "../../online/downloadQueue";
 import { sessionPhase } from "../../sessionState";
-import { hydrateTranslations, translationLangEpoch } from "../../online/translation";
+import {
+  canTranslateText,
+  currentTargetLanguageName,
+  ensureTranslation,
+  hydrateTranslations,
+  isQueued,
+  isShowingOriginal,
+  isTranslating,
+  toggleOriginal,
+  translationErrorKind,
+  translationLangEpoch,
+  translationOf,
+} from "../../online/translation";
+import { openModWebpage } from "../../online/service";
+import {
+  customNameOf,
+  ensureUserData,
+  isFavorite,
+  setCustomName,
+  setFavorite,
+} from "../../userData";
+import { translateBackendMessage } from "../../format";
 import type { ModEntry, SortKey } from "../../types";
 
 /**
  * 本地模组浏览器：本地页面唯一入口。
  *
  * 接管原 App.vue 内联的本地页面全部逻辑：
- * 扫描、筛选、排序、批量启停、数据模组互斥、预设、ZIP 导入、详情面板、状态面板。
+ * 扫描、筛选、排序、批量启停、数据模组互斥、预设、详情面板、状态面板。
+ * （第三方 ZIP 导入功能已阶段性搁置：入口与弹窗挂载已关闭，后端实现保留，见
+ * docs/ddd/THIRD_PARTY_MOD_IMPORT_HOLD.md）
  *
  * 顶栏工具栏（ModToolbar）和信息栏（rootbar）仍在 App.vue 的 AppShell 插槽中，
  * 通过 v-model props（search/sortModel）和 defineExpose 与本组件通信。
@@ -58,7 +86,7 @@ const emit = defineEmits<{
 }>();
 
 const { t, locale } = useI18n();
-const { showToast } = useToast();
+const { toast, showToast } = useToast();
 
 // ---------------- 顶栏 v-model 桥接（search / sortModel 由 App.vue 持有） ----------------
 const searchModel = computed({
@@ -201,6 +229,277 @@ const {
   handleCardToggleError,
   handleRemoved,
 } = actions;
+
+// ---------------- 卡片右键上下文菜单（目标快照，不改选中态） ----------------
+const cardMenu = useContextMenu<ModEntry>();
+const menuOpen = cardMenu.open;
+const menuX = cardMenu.x;
+const menuY = cardMenu.y;
+
+/** 页面层托管的备注弹窗（作用于快照；ModDetail 内原弹窗保留不动） */
+const renameTarget = ref<ModEntry | null>(null);
+const renameBusy = ref(false);
+const renameError = ref<string | null>(null);
+
+/** 页面层托管的卸载确认弹窗（作用于快照；复用现有 ConfirmDialog 二次确认） */
+const deleteTarget = ref<ModEntry | null>(null);
+const deleting = ref(false);
+const deleteError = ref<string | null>(null);
+
+/** 目录 / 官网瞬时忙碌标记（按条目 id，避免重复触发） */
+const revealingId = ref<string | null>(null);
+const webOpeningId = ref<string | null>(null);
+
+function onCardContextMenu(mod: ModEntry, event: MouseEvent | KeyboardEvent): void {
+  cardMenu.openAt(event, mod);
+}
+
+/** 卸载确认文案：与 ModDetail 三态口径一致（tool / official / unknown + 本地补句） */
+const deleteConfirmMessage = computed(() => {
+  const mod = deleteTarget.value;
+  if (!mod) return "";
+  const body =
+    mod.source === "tool"
+      ? t("detail.confirmTool")
+      : mod.source === "official"
+        ? t("detail.confirmOfficial")
+        : t("detail.confirmUnknown");
+  return `${body}\n\n${t("detail.confirmLocalOnly")}`;
+});
+
+const localMenuItems = computed<ContextMenuItem[]>(() => {
+  const mod = cardMenu.target.value;
+  if (!mod) return [];
+  const id = mod.workshopId ?? 0;
+  const favorited = id > 0 && isFavorite(id);
+  const hasTranslation = id > 0 && translationOf(id) !== null;
+  const canText = canTranslateText(mod.description ?? "");
+  const translating = id > 0 && isTranslating(id);
+  const queued = id > 0 && isQueued(id);
+  const showingOriginal = id > 0 && isShowingOriginal(id);
+
+  return buildLocalMenuItems(
+    mod,
+    {
+      favorited,
+      hasTranslation,
+      canText,
+      translating,
+      queued,
+      showingOriginal,
+      offline: sessionPhase.value !== "online",
+    },
+    {
+      enable: t("menu.enable"),
+      disable: t("menu.disable"),
+      favorite: t("favorites.favorite"),
+      favorited: t("favorites.favorited"),
+      rename: t("favorites.rename"),
+      translateBusy: t("translate.busy"),
+      translateQueued: t("translate.queued"),
+      translateTrigger: t("translate.trigger", { lang: currentTargetLanguageName() }),
+      translateShowTranslated: t("translate.showTranslated", { lang: currentTargetLanguageName() }),
+      translateShowOriginal: t("translate.showOriginal"),
+      openFolder: t("detail.openFolder"),
+      browseSite: t("detail.browseSite"),
+      deleteMod: t("detail.deleteMod"),
+      downloadInstall: t("detail.downloadInstall"),
+      offlineHint: t("online.offlineBlocked"),
+      notRegisteredHint: t("card.notRegisteredHint"),
+    },
+  );
+});
+
+async function onMenuSelect(itemId: string): Promise<void> {
+  const mod = cardMenu.target.value;
+  if (!mod) return;
+  const id = mod.workshopId ?? 0;
+
+  switch (itemId) {
+    case "toggle": {
+      cardMenu.close();
+      if (mod.enabled === null) {
+        showToast(t("card.notRegisteredHint"), "error");
+        return;
+      }
+      const target = mod.enabled !== true;
+      // 数据模组启用：互斥裁决交给父组件（与卡片开关 / 详情面板同一入口）
+      if (target && mod.isDataMod) {
+        requestEnableDataMod({ id: mod.id });
+        return;
+      }
+      try {
+        const result = await toggleModEnabled(id, mod.kind, mod.folderName, target);
+        scan.patchModEnabled(mod.id, result.enabled);
+      } catch (e) {
+        showToast(scan.normalizeError(e), "error");
+      }
+      return;
+    }
+    case "install": {
+      cardMenu.close();
+      downloadUninstalledFavorite(mod);
+      return;
+    }
+    case "favorite": {
+      if (id <= 0) return;
+      cardMenu.close();
+      await ensureUserData();
+      try {
+        const next = await setFavorite(id, !isFavorite(id));
+        showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
+      } catch (e) {
+        showToast(scan.normalizeError(e), "error");
+      }
+      return;
+    }
+    case "rename": {
+      if (id <= 0) return;
+      cardMenu.close();
+      renameError.value = null;
+      renameTarget.value = mod;
+      return;
+    }
+    case "translate": {
+      await translateFromMenu(mod);
+      cardMenu.close();
+      return;
+    }
+    case "folder": {
+      cardMenu.close();
+      await revealFromMenu(mod);
+      return;
+    }
+    case "website": {
+      cardMenu.close();
+      await openWebsiteFromMenu(mod);
+      return;
+    }
+    case "delete": {
+      cardMenu.close();
+      deleteError.value = null;
+      deleteTarget.value = mod;
+      return;
+    }
+  }
+}
+
+function rawBackendMessage(error: unknown): string {
+  if (typeof error === "string") return translateBackendMessage(error);
+  const message = (error as Error)?.message;
+  return translateBackendMessage(message ?? String(error ?? ""));
+}
+
+function translationErrorMessage(error: unknown): string {
+  switch (translationErrorKind(error)) {
+    case "network":
+      return t("translate.failNetwork");
+    case "busy":
+      return t("translate.failBusy");
+    case "quota":
+      return t("translate.failQuota");
+    case "not_ready":
+      return t("translate.notReady");
+    default:
+      return t("translate.failGeneric", { msg: rawBackendMessage(error) });
+  }
+}
+
+async function translateFromMenu(mod: ModEntry): Promise<void> {
+  const id = mod.workshopId ?? 0;
+  if (id <= 0) return;
+  // 已有译文：只切原文 / 译文，不发请求
+  if (translationOf(id)) {
+    toggleOriginal(id);
+    return;
+  }
+  if (isTranslating(id) || isQueued(id)) return;
+  if (!canTranslateText(mod.description ?? "")) {
+    showToast(t("translate.notReady"), "error");
+    return;
+  }
+  try {
+    const tr = await ensureTranslation({ modId: id, title: mod.displayName }, mod.description ?? "");
+    if (tr.truncated) {
+      showToast(t("translate.truncated", { chars: tr.charCount }));
+    } else {
+      showToast(tr.cached ? t("translate.fromCacheToast") : t("translate.okToast"));
+    }
+  } catch (e) {
+    showToast(translationErrorMessage(e), "error");
+  }
+}
+
+async function revealFromMenu(mod: ModEntry): Promise<void> {
+  if (!mod.path || revealingId.value) return;
+  revealingId.value = mod.id;
+  try {
+    await revealModFolder(mod.path);
+  } catch (e) {
+    showToast(scan.normalizeError(e), "error");
+  } finally {
+    revealingId.value = null;
+  }
+}
+
+async function openWebsiteFromMenu(mod: ModEntry): Promise<void> {
+  const id = mod.workshopId ?? 0;
+  if (id <= 0 || webOpeningId.value) return;
+  webOpeningId.value = mod.id;
+  try {
+    await openModWebpage(id);
+  } catch (e) {
+    showToast(scan.normalizeError(e), "error");
+  } finally {
+    webOpeningId.value = null;
+  }
+}
+
+async function applyMenuRename(name: string): Promise<void> {
+  const mod = renameTarget.value;
+  if (!mod || renameBusy.value) return;
+  const id = mod.workshopId ?? 0;
+  if (id <= 0) {
+    renameTarget.value = null;
+    return;
+  }
+  renameBusy.value = true;
+  renameError.value = null;
+  try {
+    await setCustomName(id, name);
+    renameTarget.value = null;
+    showToast(t("favorites.savedToast"));
+  } catch (e) {
+    renameError.value = scan.normalizeError(e);
+  } finally {
+    renameBusy.value = false;
+  }
+}
+
+function closeMenuRename(): void {
+  renameTarget.value = null;
+}
+
+async function confirmMenuDelete(): Promise<void> {
+  const mod = deleteTarget.value;
+  if (!mod || deleting.value) return;
+  deleting.value = true;
+  deleteError.value = null;
+  try {
+    await deleteModFiles(mod.kind, mod.folderName, mod.workshopId);
+    deleteTarget.value = null;
+    handleRemoved({ id: mod.id });
+  } catch (e) {
+    deleteError.value = scan.normalizeError(e);
+  } finally {
+    deleting.value = false;
+  }
+}
+
+function cancelMenuDelete(): void {
+  deleteTarget.value = null;
+}
+
 
 // ---------------- 未安装收藏的下载入口 ----------------
 function downloadUninstalledFavorite(mod: ModEntry): void {
@@ -368,7 +667,17 @@ function onLocalGridReady(payload: { scrollEl: HTMLElement | null; gridEl: HTMLE
 const showWarnings = ref(false);
 function toggleWarnings() { showWarnings.value = !showWarnings.value; }
 
-// ---------------- ZIP 导入 ----------------
+// ---------------- 重扫包装（排序模式保护） ----------------
+async function refresh(root?: string | null): Promise<void> {
+  if (sort.blocksRescan.value) {
+    showToast(t("sort.unsavedBlock"), "error");
+    return;
+  }
+  sort.exitSortMode();
+  await scan.refresh(root);
+}
+
+// ---------------- 第三方 ZIP 导入（实验性，仅 ZIP） ----------------
 const importDialogOpen = ref(false);
 const importZipPath = ref<string | null>(null);
 const dragActive = ref(false);
@@ -393,16 +702,6 @@ function handleZipPath(p: string) {
 async function onImported() {
   const root = scan.report.value?.root;
   if (root) await refresh(root);
-}
-
-// ---------------- 重扫包装（排序模式保护） ----------------
-async function refresh(root?: string | null): Promise<void> {
-  if (sort.blocksRescan.value) {
-    showToast(t("sort.unsavedBlock"), "error");
-    return;
-  }
-  sort.exitSortMode();
-  await scan.refresh(root);
 }
 
 // ---------------- 本地译文预热（只读缓存，零网络） ----------------
@@ -444,9 +743,9 @@ watch(
   { immediate: true },
 );
 
-// ---------------- Tauri 拖拽监听 + Ctrl+S 快捷键 ----------------
+// ---------------- Ctrl+S 快捷键 ----------------
 onMounted(async () => {
-  // Tauri 2 原生拖拽通道
+  // Tauri 2 原生拖拽通道（非 Tauri 环境静默降级）
   try {
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
@@ -467,7 +766,7 @@ onMounted(async () => {
       }
     });
   } catch {
-    // 非 Tauri 环境静默降级
+    /* 非 Tauri 环境静默降级 */
   }
   // 排序模式 Ctrl+S 保存
   window.addEventListener("keydown", onSortHotkey);
@@ -532,7 +831,7 @@ defineExpose({
 
     <!-- 中：内容区 -->
     <template #content>
-      <!-- 拖拽覆盖层 -->
+      <!-- 拖拽 ZIP 覆盖层 -->
       <div v-if="dragActive" class="drag-overlay">
         <p>{{ t("import.dragPrompt") }}</p>
       </div>
@@ -590,12 +889,15 @@ defineExpose({
               {{ sortMode ? (sortSaving ? t("sort.saving") : t("sort.save")) : t("sort.enter") }}
             </button>
             <button
+              v-if="source === 'imported'"
               type="button"
               class="batch-btn import-entry"
               :disabled="loading"
+              :title="t('import.buttonTitle')"
               @click="handleImportClick"
             >
-              {{ t("import.button") }}
+              <span>{{ t("import.button") }}</span>
+              <span class="import-experimental">{{ t("import.experimentalBadge") }}</span>
             </button>
           </div>
         </div>
@@ -776,6 +1078,7 @@ defineExpose({
             @request-enable="requestEnableDataMod"
             @check="(payload) => toggleSelect(payload.id)"
             @update="handleUpdateMod"
+            @context-menu="onCardContextMenu"
           />
         </template>
       </ModGrid>
@@ -823,7 +1126,7 @@ defineExpose({
     @applied="handlePresetApplied"
   />
 
-  <!-- ZIP 导入弹窗 -->
+  <!-- 第三方 ZIP 导入弹窗（实验性） -->
   <ImportDialog
     v-model="importDialogOpen"
     :zip-path="importZipPath"
@@ -871,6 +1174,43 @@ defineExpose({
     @cancel="cancelDiscardSort"
   />
 
+  <!-- 卡片右键：备注名弹窗（作用于快照 Mod，与详情面板弹窗互不影响） -->
+  <RenameDialog
+    v-if="renameTarget"
+    :original="renameTarget.displayName"
+    :initial="customNameOf(renameTarget.workshopId)"
+    :busy="renameBusy"
+    :error="renameError"
+    @save="applyMenuRename"
+    @cancel="closeMenuRename"
+  />
+
+  <!-- 卡片右键：卸载二次确认（危险操作，确认后才删目录） -->
+  <ConfirmDialog
+    v-if="deleteTarget"
+    :title="t('detail.confirmTitle')"
+    :message="deleteConfirmMessage"
+    :detail="deleteTarget.path"
+    :confirm-label="t('detail.deleteConfirmLabel')"
+    :busy="deleting"
+    :error="deleteError"
+    @confirm="confirmMenuDelete"
+    @cancel="cancelMenuDelete"
+  />
+
+  <!-- 轻量提示 -->
+  <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
+
+  <!-- 卡片右键上下文菜单（fixed 浮层；关闭逻辑由共享组件统一处理） -->
+  <ContextMenu
+    v-if="menuOpen"
+    :x="menuX"
+    :y="menuY"
+    :items="localMenuItems"
+    @select="onMenuSelect"
+    @close="cardMenu.close"
+  />
+
   <!-- 版本更新提示（右下角常驻） -->
   <div v-if="updateNotice" class="app-toast update-toast">
     <div class="update-toast-main">
@@ -897,25 +1237,6 @@ defineExpose({
 </template>
 
 <style scoped>
-/* Tauri 拖拽覆盖层：fixed 盖满窗口 */
-.drag-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(201, 168, 76, 0.15);
-  border: 2px dashed var(--accent-gold);
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 9999;
-  pointer-events: none;
-}
-.drag-overlay p {
-  font-size: 18px;
-  color: var(--accent-gold);
-  font-weight: 600;
-}
-
 /* 批量操作按钮（覆盖全局 .batch-actions 的视觉变体） */
 .batch-actions .batch-btn {
   padding: 4px 9px;
@@ -930,16 +1251,6 @@ defineExpose({
   border-color: var(--gold-dim);
   background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-hover));
   letter-spacing: calc(1px * var(--ui-tracking));
-}
-.batch-actions .batch-btn.import-entry {
-  color: #6ec6e8;
-  border-color: rgba(110, 198, 232, 0.4);
-  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-hover));
-  letter-spacing: calc(1px * var(--ui-tracking));
-}
-.batch-actions .batch-btn.import-entry:hover:not(:disabled) {
-  border-color: #6ec6e8;
-  background: rgba(110, 198, 232, 0.1);
 }
 .batch-actions .batch-btn.batch-enable {
   color: var(--ok-text-strong);
@@ -1085,5 +1396,47 @@ defineExpose({
   height: 100%;
   background: linear-gradient(90deg, var(--gold), var(--gold-bright));
   transition: width 0.3s ease;
+}
+
+/* 第三方 ZIP 导入按钮（实验性，信息蓝变体） */
+.batch-actions .batch-btn.import-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--info-text);
+  border-color: rgba(var(--info-rgb), 0.4);
+  background: linear-gradient(180deg, var(--bg-grad-top), var(--bg-hover));
+  letter-spacing: calc(1px * var(--ui-tracking));
+}
+.batch-actions .batch-btn.import-entry:hover:not(:disabled) {
+  border-color: rgba(var(--info-rgb), 0.8);
+  background: rgba(var(--info-rgb), 0.1);
+}
+.import-experimental {
+  font-size: calc(10px * var(--global-scale));
+  opacity: 0.8;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 1.4;
+}
+
+/* Tauri 拖拽覆盖层：fixed 盖满窗口 */
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(var(--accent-rgb), 0.15);
+  border: 2px dashed var(--accent-gold);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  pointer-events: none;
+}
+.drag-overlay p {
+  font-size: 18px;
+  color: var(--accent-gold);
+  font-weight: 600;
 }
 </style>

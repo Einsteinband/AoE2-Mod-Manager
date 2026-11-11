@@ -7,14 +7,20 @@
 import { computed, inject } from "vue";
 import { useI18n } from "vue-i18n";
 import type { UiFontFamily } from "../../api";
+import { ACCENT_THEMES } from "../../config/accentThemes";
 
 const { t } = useI18n();
 
 interface AppearanceSettings {
   // 状态（都是 ref，模板里要 .value）
   theme: { value: string };
+  accent: { value: string };
   uiFontFamily: { value: UiFontFamily };
   latinFont: { value: boolean };
+  installedCardBg: { value: boolean };
+  installedCardBar: { value: boolean };
+  installedCardStripes: { value: boolean };
+  detailButtonMode: { value: string };
   uiFontWeight: { value: number };
   showAdvancedTypography: { value: boolean };
   globalFontScale: { value: number };
@@ -64,6 +70,10 @@ const theme = computed({
   get: () => settings.theme.value,
   set: (val: string) => { settings.theme.value = val; },
 });
+const accent = computed({
+  get: () => settings.accent.value,
+  set: (val: string) => { settings.accent.value = val; },
+});
 const uiFontFamily = computed({
   get: () => settings.uiFontFamily.value,
   set: (val: UiFontFamily) => { settings.uiFontFamily.value = val; },
@@ -72,6 +82,27 @@ const latinFont = computed({
   get: () => settings.latinFont.value,
   set: (val: boolean) => { settings.latinFont.value = val; },
 });
+const installedCardBg = computed({
+  get: () => settings.installedCardBg.value,
+  set: (val: boolean) => { settings.installedCardBg.value = val; },
+});
+const installedCardBar = computed({
+  get: () => settings.installedCardBar.value,
+  set: (val: boolean) => { settings.installedCardBar.value = val; },
+});
+const installedCardStripes = computed({
+  get: () => settings.installedCardStripes.value,
+  set: (val: boolean) => { settings.installedCardStripes.value = val; },
+});
+const detailButtonMode = computed({
+  get: () => settings.detailButtonMode.value,
+  set: (val: string) => { settings.detailButtonMode.value = val; },
+});
+
+const DETAIL_BTN_MODE_OPTIONS = computed(() => [
+  { value: "icon", label: t("settingsUi.detailBtnModeIcon") },
+  { value: "text", label: t("settingsUi.detailBtnModeText") },
+]);
 const uiFontWeight = computed({
   get: () => settings.uiFontWeight.value,
   set: (val: number) => { settings.uiFontWeight.value = val; },
@@ -144,7 +175,6 @@ const {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settingsUi.themeTitle") }}</span>
-        <span class="row-note">{{ t("settingsUi.themeNote") }}</span>
       </div>
       <div class="settings-segment" role="radiogroup" :aria-label="t('settingsUi.themeTitle')">
         <button
@@ -162,6 +192,95 @@ const {
       </div>
     </div>
 
+    <!-- v3.6：强调色主题（与明暗模式正交），点一下立即换肤，不重载页面 -->
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.accentTitle") }}</span>
+      </div>
+      <div class="accent-swatch-grid" role="radiogroup" :aria-label="t('settingsUi.accentTitle')">
+        <button
+          v-for="theme in ACCENT_THEMES"
+          :key="theme.id"
+          type="button"
+          role="radio"
+          class="accent-swatch"
+          :class="{ active: accent === theme.id }"
+          :aria-checked="accent === theme.id"
+          :title="t(theme.labelKey)"
+          @click="accent = theme.id"
+        >
+          <span
+            class="swatch-color"
+            :style="{ background: `linear-gradient(180deg, ${theme.dark.bright}, ${theme.dark.accent})` }"
+            aria-hidden="true"
+          />
+          <span class="swatch-check" aria-hidden="true">✓</span>
+          <span class="swatch-label">{{ t(theme.labelKey) }}</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 详情页辅助按钮：图标（默认）/ 原始文字，只影响模组详情操作按钮 -->
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.detailBtnModeTitle") }}</span>
+      </div>
+      <div class="settings-segment" role="radiogroup" :aria-label="t('settingsUi.detailBtnModeTitle')">
+        <button
+          v-for="option in DETAIL_BTN_MODE_OPTIONS"
+          :key="option.value"
+          type="button"
+          role="radio"
+          class="settings-segment-btn"
+          :class="{ active: detailButtonMode === option.value }"
+          :aria-checked="detailButtonMode === option.value"
+          @click="detailButtonMode = option.value"
+        >
+          {{ option.label }}
+        </button>
+      </div>
+    </div>
+
+    <div class="settings-sep"></div>
+
+    <h3 class="settings-group-title">{{ t("settingsUi.installedCardDecorTitle") }}</h3>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.installedCardBgTitle") }}</span>
+      </div>
+      <input
+        v-model="installedCardBg"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.installedCardBgTitle')"
+      />
+    </div>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.installedCardBarTitle") }}</span>
+      </div>
+      <input
+        v-model="installedCardBar"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.installedCardBarTitle')"
+      />
+    </div>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.installedCardStripesTitle") }}</span>
+      </div>
+      <input
+        v-model="installedCardStripes"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.installedCardStripesTitle')"
+      />
+    </div>
+
     <div class="settings-sep"></div>
 
     <!-- 【外观】：首屏只留「字体种类 + 界面字重」，其余 6 项收进「更多排版选项」 -->
@@ -170,7 +289,6 @@ const {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settingsUi.fontFamilyTitle") }}</span>
-        <span class="row-note">{{ t("settingsUi.fontFamilyNote") }}</span>
       </div>
       <select
         class="settings-select typography-select"
@@ -188,7 +306,6 @@ const {
     <div v-if="isEnglishUi" class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settingsUi.latinFontTitle") }}</span>
-        <span class="row-note">{{ t("settingsUi.latinFontNote") }}</span>
       </div>
       <input
         v-model="latinFont"
@@ -202,7 +319,6 @@ const {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settingsUi.uiFontWeightTitle") }}</span>
-        <span class="row-note">{{ t("settingsUi.uiFontWeightNote") }}</span>
       </div>
       <div class="seg-stepper" role="group" :aria-label="t('settingsUi.uiFontWeightTitle')">
         <button
@@ -241,7 +357,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.globalScaleTitle") }}</span>
-          <span class="row-note">{{ t("settingsUi.globalScaleNote") }}</span>
         </div>
         <div class="settings-range-wrap">
           <input
@@ -262,7 +377,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.cardSize") }}</span>
-          <span class="row-note">{{ t("settingsUi.cardSizeNote") }}</span>
         </div>
         <div class="settings-range-wrap">
           <input
@@ -280,8 +394,6 @@ const {
         </div>
       </div>
 
-      <p class="settings-hint">{{ t("settingsUi.cardSizeHint") }}</p>
-
       <div class="settings-sep"></div>
 
       <!-- 【正文阅读】：字号 12–24px / 行距 / 字重 -->
@@ -290,7 +402,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.readerFontSizeTitle") }}</span>
-          <span class="row-note">{{ t("settingsUi.readerFontSizeNote") }}</span>
         </div>
         <div class="settings-range-wrap">
           <input
@@ -312,7 +423,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.lineHeightTitle") }}</span>
-          <span class="row-note">{{ t("settingsUi.lineHeightNote") }}</span>
         </div>
         <div class="seg-stepper" role="group" :aria-label="t('settingsUi.lineHeightTitle')">
           <button
@@ -341,7 +451,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.fontWeightTitle") }}</span>
-          <span class="row-note">{{ t("settingsUi.fontWeightNote") }}</span>
         </div>
         <div class="seg-stepper" role="group" :aria-label="t('settingsUi.fontWeightTitle')">
           <button
@@ -374,7 +483,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.cardFontSizeTitle") }}</span>
-          <span class="row-note">{{ t("settingsUi.cardFontSizeNote") }}</span>
         </div>
         <div class="settings-range-wrap">
           <input
@@ -395,7 +503,6 @@ const {
       <div class="settings-row">
         <div class="row-label">
           <span class="row-title">{{ t("settingsUi.cardFontWeightTitle") }}</span>
-          <span class="row-note">{{ t("settingsUi.cardFontWeightNote") }}</span>
         </div>
         <div class="seg-stepper" role="group" :aria-label="t('settingsUi.cardFontWeightTitle')">
           <button
@@ -480,9 +587,78 @@ const {
   text-align: center;
   font-size: calc(12px * var(--global-scale));
 }
-.latin-font-check {
+.latin-font-check,
+.installed-card-decor-check {
   width: 18px;
   height: 18px;
   cursor: pointer;
+}
+
+/* 强调色色块选择器：四列网格，窄窗降两列；色块、勾选与标签统一 */
+.accent-swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.accent-swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-lo);
+  cursor: pointer;
+}
+.accent-swatch:hover:not(.active) {
+  border-color: var(--gold-dim);
+  background: var(--bg-hover);
+}
+.accent-swatch:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 1px;
+}
+.accent-swatch .swatch-color {
+  position: relative;
+  width: 100%;
+  height: 26px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+.accent-swatch .swatch-check {
+  position: absolute;
+  top: 13px;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+}
+.accent-swatch.active .swatch-check {
+  opacity: 1;
+}
+.accent-swatch.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.accent-swatch .swatch-label {
+  font-size: calc(11px * var(--global-scale, 1));
+  color: var(--parch-dim);
+  letter-spacing: calc(0.4px * var(--ui-tracking));
+  white-space: nowrap;
+}
+.accent-swatch.active .swatch-label {
+  color: var(--parch);
+  font-weight: var(--ui-font-weight-strong, 600);
+}
+@media (max-width: 560px) {
+  .accent-swatch-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

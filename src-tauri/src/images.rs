@@ -34,11 +34,25 @@ pub struct LocalImage {
     pub path: String,
 }
 
+/// 单张封面下载失败的回执（成功走 `online://images-ready`，失败走 `online://images-failed`）
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedImage {
+    pub mod_id: i64,
+    pub kind: String,
+    pub message: String,
+    pub status: Option<u16>,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchTask {
     pub mod_id: i64,
     pub url: String,
+    /// 手动「重新加载封面」时为 true：先删除既有（可能损坏的）本地缓存再下载；
+    /// 普通批量缩略图下载保持 false，文件存在即跳过。默认 false 以兼容旧调用。
+    #[serde(default)]
+    pub force: bool,
 }
 
 pub fn dir_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -83,6 +97,40 @@ pub fn local_for(app: &tauri::AppHandle, mod_id: i64) -> Option<String> {
     }
     touch(&path);
     Some(path.display().to_string())
+}
+
+/// 删除指定 Mod 的本地封面缓存；返回是否确实删掉了一个已存在文件。
+pub fn remove_for(app: &tauri::AppHandle, mod_id: i64) -> bool {
+    let Ok(path) = file_for(app, mod_id) else { return false };
+    match fs::remove_file(&path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            log::warn!(target: "image-cache", "删除旧封面缓存失败 {mod_id}：{e}");
+            false
+        }
+    }
+}
+
+/// 最小图片有效性校验：非空且头部像 JPEG / PNG / WEBP 视为有效；其余按损坏缓存处理。
+/// 只做头部魔数判断，不做完整解码（与现有缓存策略一致，不引入新依赖）。
+pub fn looks_valid_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return true; // JPEG
+    }
+    if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
+        return true; // PNG
+    }
+    if bytes[0] == b'R' && bytes[1] == b'I' && bytes[2] == b'F' && bytes[3] == b'F'
+        && bytes.len() >= 12
+        && &bytes[8..12] == b"WEBP"
+    {
+        return true; // WEBP
+    }
+    false
 }
 
 /// 写入图片（原子替换）。返回最终路径。
@@ -186,15 +234,27 @@ pub fn download_batch(app: tauri::AppHandle, tasks: Vec<FetchTask>) {
     }
     let queue = Arc::new(Mutex::new(tasks));
     let finished: Arc<Mutex<Vec<LocalImage>>> = Arc::new(Mutex::new(Vec::new()));
+    let failed: Arc<Mutex<Vec<FailedImage>>> = Arc::new(Mutex::new(Vec::new()));
 
     let mut handles = Vec::new();
     for _ in 0..WORKERS {
         let app = app.clone();
         let queue = queue.clone();
         let finished = finished.clone();
+        let failed = failed.clone();
         handles.push(std::thread::spawn(move || {
             let Ok(client) = crate::client(&app) else {
-                // 未登录 / 网络配置无效：直接放弃这一批，下次进在线页会重试
+                // 未登录 / 网络配置无效：整批放弃，下次进在线页会重试；登记失败便于前端诊断
+                if let Ok(mut list) = failed.lock() {
+                    for task in queue.lock().map_err(|p| p.into_inner()).unwrap().iter() {
+                        list.push(FailedImage {
+                            mod_id: task.mod_id,
+                            kind: "client".to_string(),
+                            message: "client unavailable".to_string(),
+                            status: None,
+                        });
+                    }
+                }
                 return;
             };
             loop {
@@ -206,19 +266,60 @@ pub fn download_batch(app: tauri::AppHandle, tasks: Vec<FetchTask>) {
                     guard.pop()
                 };
                 let Some(task) = next else { break };
-                if file_for(&app, task.mod_id).map(|p| p.is_file()).unwrap_or(false) {
+                let exists = file_for(&app, task.mod_id).map(|p| p.is_file()).unwrap_or(false);
+                log::info!(
+                    target: "image-cache",
+                    "封面下载开始 modId={} force={} exists={} url={}",
+                    task.mod_id, task.force, exists, task.url
+                );
+                // 手动强制刷新：先删除既有（可能损坏的）本地缓存，再重新下载；
+                // 普通批量下载文件存在即跳过，行为不变。
+                if task.force && exists {
+                    let removed = remove_for(&app, task.mod_id);
+                    log::info!(target: "image-cache", "强制刷新删除旧缓存 modId={} removed={}", task.mod_id, removed);
+                } else if exists {
+                    log::info!(target: "image-cache", "封面缓存命中，跳过下载 modId={}", task.mod_id);
                     continue;
                 }
                 match client.fetch_bytes(&task.url, MAX_IMAGE_BYTES) {
                     Ok(bytes) => match store_bytes(&app, task.mod_id, &bytes) {
                         Ok(path) => {
+                            log::info!(
+                                target: "image-cache",
+                                "封面下载成功 modId={} 响应大小={} 写入={}",
+                                task.mod_id, bytes.len(), path
+                            );
                             if let Ok(mut list) = finished.lock() {
                                 list.push(LocalImage { mod_id: task.mod_id, path });
                             }
                         }
-                        Err(e) => log::warn!(target: "image-cache", "封面写入失败 {}：{e}", task.mod_id),
+                        Err(e) => {
+                            log::warn!(target: "image-cache", "封面写入失败 modId={}：{e}", task.mod_id);
+                            if let Ok(mut list) = failed.lock() {
+                                list.push(FailedImage {
+                                    mod_id: task.mod_id,
+                                    kind: "store".to_string(),
+                                    message: e,
+                                    status: None,
+                                });
+                            }
+                        }
                     },
-                    Err(e) => log::info!(target: "image-cache", "封面下载失败 {}：{}", task.mod_id, e.message),
+                    Err(e) => {
+                        log::info!(
+                            target: "image-cache",
+                            "封面下载失败 modId={} kind={} status={:?} message={}",
+                            task.mod_id, e.kind, e.status, e.message
+                        );
+                        if let Ok(mut list) = failed.lock() {
+                            list.push(FailedImage {
+                                mod_id: task.mod_id,
+                                kind: e.kind,
+                                message: e.message,
+                                status: e.status,
+                            });
+                        }
+                    }
                 }
             }
         }));
@@ -230,9 +331,42 @@ pub fn download_batch(app: tauri::AppHandle, tasks: Vec<FetchTask>) {
     let done = Arc::try_unwrap(finished)
         .map(|mutex| mutex.into_inner().unwrap_or_default())
         .unwrap_or_default();
+    let failed_list = Arc::try_unwrap(failed)
+        .map(|mutex| mutex.into_inner().unwrap_or_default())
+        .unwrap_or_default();
     evict(&app);
     if !done.is_empty() {
         log::info!(target: "image-cache", "本次新增封面 {} 张", done.len());
         let _ = app.emit("online://images-ready", &done);
+    }
+    if !failed_list.is_empty() {
+        log::info!(target: "image-cache", "本次封面下载失败 {} 张", failed_list.len());
+        let _ = app.emit("online://images-failed", &failed_list);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FetchTask;
+
+    #[test]
+    fn image_magic_detects_valid_and_rejects_garbage() {
+        assert!(super::looks_valid_image(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00]));
+        assert!(super::looks_valid_image(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
+        assert!(super::looks_valid_image(b"RIFF\x00\x00\x00\x00WEBPVP8 "));
+        assert!(!super::looks_valid_image(b""));
+        assert!(!super::looks_valid_image(b"not-an-image"));
+    }
+
+    #[test]
+    fn force_defaults_false_for_legacy_tasks() {
+        // 旧批量调用不传 force：默认 false，保持「文件存在即跳过」
+        let legacy: FetchTask =
+            serde_json::from_str(r#"{"modId":1,"url":"https://cdn.example/a.jpg"}"#).unwrap();
+        assert!(!legacy.force);
+        // 手动刷新显式带 force=true
+        let forced: FetchTask =
+            serde_json::from_str(r#"{"modId":1,"url":"https://cdn.example/a.jpg","force":true}"#).unwrap();
+        assert!(forced.force);
     }
 }

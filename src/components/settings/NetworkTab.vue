@@ -205,6 +205,6 @@ onMounted(() => {
   font-size: 0.9em;
 }
 .settings-msg.error {
-  color: #e74c3c;
+  color: var(--danger-text);
 }
 </style>

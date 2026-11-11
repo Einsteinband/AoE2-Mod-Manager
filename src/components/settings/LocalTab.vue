@@ -187,7 +187,6 @@ onMounted(async () => {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settings.indexing") }}</span>
-        <span class="row-note">{{ t("settings.indexingNote") }}</span>
       </div>
       <label class="settings-check-line">
         <input
@@ -207,7 +206,6 @@ onMounted(async () => {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settings.localSearch") }}</span>
-        <span class="row-note">{{ t("settings.localSearchNote") }}</span>
       </div>
       <label class="settings-check-line">
         <input
@@ -265,9 +263,6 @@ onMounted(async () => {
       {{ t("settings.modUpdateHint") }}
     </p>
 
-    <div class="settings-sep"></div>
-
-    <p class="settings-hint">{{ t("settingsUi.rootPath") }}</p>
   </section>
 </template>
 

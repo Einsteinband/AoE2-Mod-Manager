@@ -4,7 +4,7 @@
 //! 返回 task_id 供前端保存。不写 mod-status.json、不写正式 metadata。
 //!
 //! 阶段二 install_local_zip：根据 task_id 取回暂存任务，校验后正式安装到 local/，
-//! 注册 WorkshopID=0 的本地记录（默认禁用），写入 source="thirdparty-zip" 元数据。
+//! 注册 WorkshopID=0 的本地记录（默认禁用），写入 source="imported-zip" 元数据。
 
 use std::collections::HashMap;
 use std::fs;
@@ -65,12 +65,14 @@ fn gen_task_id() -> String {
 // ---------------- 返回结构 ----------------
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalyzeResult {
     pub task_id: String,
     pub title: String,
     pub author: String,
     pub description: String,
     pub target_folder: String,
+    pub target_path: String,
     pub file_count: u64,
     pub bytes: u64,
     pub exists: bool,
@@ -78,6 +80,7 @@ pub struct AnalyzeResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstallResult {
     pub folder_name: String,
     pub file_count: u64,
@@ -88,15 +91,43 @@ pub struct InstallResult {
 
 // ---------------- 内部文件系统函数（可单元测试） ----------------
 
+/// Windows 保留设备名（不区分大小写），不能用作文件夹名。
+const RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// 第三方模组安装目录名规范化。
+/// 基于 install::sanitize_component 做基础清理，额外处理：
+/// - 连续空格合并为单个空格
+/// - Windows 保留设备名检测
+/// - 空结果 fallback 为 "imported-mod"
+pub(crate) fn sanitize_imported_folder(input: &str) -> String {
+    let base = install::sanitize_component(input);
+    // sanitize_component 已经处理了非法字符、trim、截断 80、空 fallback
+    // 这里只做额外的两步：空格合并 + 保留名检测
+    let collapsed = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    let upper = collapsed.to_uppercase();
+    if RESERVED_NAMES.contains(&upper.as_str()) {
+        return format!("mod-{}", collapsed);
+    }
+    if collapsed.is_empty() {
+        "imported-mod".to_string()
+    } else {
+        collapsed
+    }
+}
+
 /// 读取 info.json 的 title / author / description。
 pub(crate) fn read_info_json(mod_root: &Path) -> (String, String, String) {
     let info_path = mod_root.join("info.json");
     if let Ok(bytes) = fs::read(&info_path) {
         let stripped = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes[..]);
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(stripped) {
-            let title = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let author = v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let description = v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let title = v.get("Title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let author = v.get("Author").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let description = v.get("Description").and_then(|x| x.as_str()).unwrap_or("").to_string();
             return (title, author, description);
         }
     }
@@ -138,21 +169,18 @@ pub(crate) fn analyze_filesystem(
 
     let (mut title, author, description) = read_info_json(&detected);
     if title.is_empty() {
-        title = detected
-            .file_name()
+        // 包内没有 info.json 或标题为空时，用 ZIP 文件名（去掉 .zip 后缀）作为标题
+        title = zip_path
+            .file_stem()
             .and_then(|n| n.to_str())
             .unwrap_or("Imported Mod")
             .to_string();
     }
 
-    let safe_title = install::sanitize_component(&title);
-    let target_folder = if safe_title.is_empty() {
-        "imported-mod".to_string()
-    } else {
-        safe_title
-    };
+    let target_folder = sanitize_imported_folder(&title);
 
     let exists = local_dir.join(&target_folder).exists();
+    let target_path = local_dir.join(&target_folder).display().to_string();
 
     Ok((detected, AnalyzeResult {
         task_id: String::new(), // 由外层注册表填充
@@ -160,6 +188,7 @@ pub(crate) fn analyze_filesystem(
         author,
         description,
         target_folder,
+        target_path,
         file_count,
         bytes,
         exists,
@@ -263,12 +292,40 @@ pub async fn analyze_local_zip(
 
     let mod_root = crate::mod_root(&app).map_err(|e| e.message)?;
     let parent = mod_root.join(".aoe2mm-staging");
-    let local_dir = mod_root.join("mods").join("local");
+    let local_dir = mod_root.join("local");
 
     let task_id = gen_task_id();
     let staging_dir = parent.join(format!("import-{task_id}"));
 
-    let (mod_root_dir, mut result) = analyze_filesystem(Path::new(&zip_path), &staging_dir, &local_dir)?;
+    let zip_name = Path::new(&zip_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| zip_path.clone());
+    log::info!(target: "import", "[task:{task_id}][ANALYZE] start: zip=\"{zip_name}\"");
+
+    let t0 = std::time::Instant::now();
+    let (mod_root_dir, mut result) = match analyze_filesystem(Path::new(&zip_path), &staging_dir, &local_dir) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!(target: "import", "[task:{task_id}][ANALYZE] failed: {e}");
+            return Err(e);
+        }
+    };
+    let elapsed_ms = t0.elapsed().as_millis();
+
+    log::info!(target: "import",
+        "[task:{task_id}][ANALYZE] done in {elapsed_ms}ms: root=\"{}\" target=\"{}\" files={} bytes={} exists={}",
+        mod_root_dir.display(),
+        result.target_folder,
+        result.file_count,
+        result.bytes,
+        result.exists,
+    );
+    log::info!(target: "import",
+        "[task:{task_id}][ANALYZE] info: title=\"{}\" author=\"{}\"",
+        result.title, result.author,
+    );
+
     result.task_id = task_id.clone();
 
     let task = StagingTask {
@@ -308,34 +365,52 @@ pub async fn install_local_zip(
     let force = force.unwrap_or(false);
     let mod_root = crate::mod_root(&app).map_err(|e| e.message)?;
 
+    log::info!(target: "import", "[task:{task_id}][INSTALL] start: force={force}");
+
     // 取回任务
     let task = {
         let mut map = registry.tasks.lock().unwrap();
         let Some(task) = map.remove(&task_id) else {
+            log::warn!(target: "import", "[task:{task_id}][INSTALL] aborted: task not found");
             return Err(user_err("import.taskNotFound", json!({ "taskId": task_id })));
         };
         if task.installed {
+            log::warn!(target: "import", "[task:{task_id}][INSTALL] aborted: already installed");
             return Err(user_err("import.alreadyInstalled", json!({ "taskId": task_id })));
         }
         let elapsed = now_ms() - task.created_at_ms;
         if elapsed > TASK_TTL_MS {
             let _ = fs::remove_dir_all(&task.staging_dir);
+            log::warn!(target: "import", "[task:{task_id}][INSTALL] aborted: task expired (elapsed={elapsed}ms)");
             return Err(user_err("import.taskExpired", json!({ "taskId": task_id, "elapsedMs": elapsed })));
         }
         task
     };
 
     if !task.mod_root_dir.exists() {
+        log::error!(target: "import", "[task:{task_id}][INSTALL] failed: staging dir missing ({})", task.mod_root_dir.display());
         return Err(user_err("import.stagingMissing", json!({ "path": task.mod_root_dir.display().to_string() })));
     }
 
-    let local_dir = mod_root.join("mods").join("local");
+    let local_dir = mod_root.join("local");
+    let target = local_dir.join(&task.target_folder);
+    log::info!(target: "import", "[task:{task_id}][INSTALL] target: \"{}\"", target.display());
+
+    let t0 = std::time::Instant::now();
 
     // 文件系统层安装（含回滚）
-    let (backup_path, mut warnings) = install_filesystem(&task, &local_dir, force)?;
+    let (backup_path, mut warnings) = match install_filesystem(&task, &local_dir, force) {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!(target: "import", "[task:{task_id}][INSTALL] failed at filesystem: {e}");
+            return Err(e);
+        }
+    };
+    let elapsed_ms = t0.elapsed().as_millis();
+    log::info!(target: "import", "[task:{task_id}][INSTALL] files moved in {elapsed_ms}ms: {} files, {} bytes", task.file_count, task.bytes);
 
     // 注册到 mod-status.json（WorkshopID=0，默认禁用）
-    let status_path = mod_root.join("mods").join("mod-status.json");
+    let status_path = mod_root.join(presets::STATUS_FILE);
     let backup_dir = presets::backups_dir_for(&app).map_err(|e| e.to_string())?;
 
     let rec = presets::NewRecord {
@@ -346,19 +421,42 @@ pub async fn install_local_zip(
     };
 
     match presets::register_mod(&status_path, &backup_dir, &rec, false) {
-        Ok(_) => {}
+        Ok(_) => {
+            log::info!(target: "import", "[task:{task_id}][INSTALL] registered: WorkshopID=0, enabled=false");
+        }
         Err(e) => {
+            log::warn!(target: "import", "[task:{task_id}][INSTALL] register failed: {e}");
             warnings.push(format!("模组文件已安装，但注册 mod-status.json 失败：{e}"));
         }
     }
 
     // 写入 metadata
-    match metadata::upsert_local_for_app(&app, &task.target_folder, &task.title, "thirdparty-zip") {
+    match metadata::upsert_local_for_app(&app, &task.target_folder, &task.title, "imported-zip") {
         Ok(_) => {}
         Err(e) => {
+            log::warn!(target: "import", "[task:{task_id}][INSTALL] metadata write failed: {e}");
             warnings.push(format!("来源记录未保存：{e}"));
         }
     }
+
+    // 全部成功后清理旧版本备份（删除失败只记 WARN，不影响安装结果）
+    if let Some(ref bak_str) = backup_path {
+        let bak_path = PathBuf::from(bak_str);
+        match fs::remove_dir_all(&bak_path) {
+            Ok(_) => {
+                log::info!(target: "import", "[task:{task_id}][INSTALL] old backup cleaned: {}", bak_path.display());
+            }
+            Err(e) => {
+                log::warn!(target: "import", "[task:{task_id}][INSTALL] failed to clean old backup: {} (path: {})", e, bak_path.display());
+                warnings.push(format!("旧版本备份清理失败，可手动删除：{}", bak_path.display()));
+            }
+        }
+    }
+
+    log::info!(target: "import", "[task:{task_id}][INSTALL] done: folder=\"{}\" warnings={}",
+        task.target_folder,
+        warnings.len(),
+    );
 
     Ok(InstallResult {
         folder_name: task.target_folder,
@@ -376,6 +474,9 @@ pub async fn cancel_import_task(
 ) -> Result<(), String> {
     if let Some(task) = registry.tasks.lock().unwrap().remove(&task_id) {
         let _ = fs::remove_dir_all(&task.staging_dir);
+        log::info!(target: "import", "[task:{task_id}][CANCEL] task cancelled, staging cleaned");
+    } else {
+        log::debug!(target: "import", "[task:{task_id}][CANCEL] task not found (already done or expired)");
     }
     Ok(())
 }
@@ -607,7 +708,7 @@ mod tests {
     #[test]
     fn read_info_json_parses_fields() {
         let dir = fixture_dir("info-parse");
-        write(&dir.join("info.json"), r#"{"name":"TestMod","author":"Alice","description":"A test"}"#);
+        write(&dir.join("info.json"), r#"{"Title":"TestMod","Author":"Alice","Description":"A test"}"#);
 
         let (title, author, desc) = read_info_json(&dir);
         assert_eq!(title, "TestMod");
@@ -615,6 +716,48 @@ mod tests {
         assert_eq!(desc, "A test");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_imported_folder_basic() {
+        assert_eq!(sanitize_imported_folder("My Mod"), "My Mod");
+        assert_eq!(sanitize_imported_folder("中文模组"), "中文模组");
+        assert_eq!(sanitize_imported_folder("UI of Daniel Azar v2"), "UI of Daniel Azar v2");
+    }
+
+    #[test]
+    fn sanitize_imported_folder_collapses_spaces() {
+        assert_eq!(sanitize_imported_folder("My   Mod   Name"), "My Mod Name");
+        assert_eq!(sanitize_imported_folder("  spaced  out  "), "spaced out");
+    }
+
+    #[test]
+    fn sanitize_imported_folder_illegal_chars() {
+        assert_eq!(sanitize_imported_folder("a\"b:c*d"), "a_b_c_d");
+    }
+
+    #[test]
+    fn sanitize_imported_folder_empty_fallback() {
+        // sanitize_component 对纯非法字符输入返回 "unnamed"
+        // 这里验证非法字符被正确替换，不会产生危险名称
+        assert!(!sanitize_imported_folder("").is_empty());
+        assert!(!sanitize_imported_folder("***").is_empty());
+    }
+
+    #[test]
+    fn sanitize_imported_folder_reserved_names() {
+        assert_eq!(sanitize_imported_folder("CON"), "mod-CON");
+        assert_eq!(sanitize_imported_folder("nul"), "mod-nul");
+        assert_eq!(sanitize_imported_folder("COM1"), "mod-COM1");
+        assert_eq!(sanitize_imported_folder("LPT9"), "mod-LPT9");
+    }
+
+    #[test]
+    fn sanitize_imported_folder_long_name_truncated() {
+        let long = "a".repeat(100);
+        let result = sanitize_imported_folder(&long);
+        assert!(result.len() <= 80, "超长名称应被截断到 80 字符以内");
+        assert!(!result.is_empty());
     }
 
     #[test]
@@ -695,7 +838,7 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
             let opts = SimpleFileOptions::default();
             zip.start_file("MyMod/info.json", opts).unwrap();
-            zip.write_all(r#"{"name":"MyMod","author":"Zippy","description":"From zip"}"#.as_bytes()).unwrap();
+            zip.write_all(r#"{"Title":"MyMod","Author":"Zippy","Description":"From zip"}"#.as_bytes()).unwrap();
             zip.start_file("MyMod/mod.js", opts).unwrap();
             zip.write_all(b"// from zip").unwrap();
             zip.finish().unwrap();

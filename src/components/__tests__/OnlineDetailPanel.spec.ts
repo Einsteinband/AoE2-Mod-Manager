@@ -73,6 +73,7 @@ function mountPanel(props: Record<string, unknown> = {}) {
       renameBusy: false,
       ratingText: "4.5/5",
       sizeText: "5.0 MB",
+      fileCountText: "12",
       diskText: "5.0 MB",
       versionText: "1.0",
       createdText: "2024-01-01",
@@ -218,11 +219,13 @@ describe("OnlineDetailPanel: 收藏与备注名", () => {
     expect((favBtn.element as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("点击更多操作里的备注名按钮发出 rename 事件", async () => {
+  it("点击备注名图标按钮发出 rename 事件", async () => {
     const wrapper = mountPanel();
-    const renameBtn = wrapper.find(".more-actions-menu button");
-    expect(renameBtn.exists()).toBe(true);
-    await renameBtn.trigger("click");
+    const renameBtn = wrapper
+      .findAll("button.dv-btn-ghost")
+      .find((b) => b.text().includes("favorites.rename"));
+    expect(renameBtn).toBeTruthy();
+    await renameBtn!.trigger("click");
     expect(wrapper.emitted("rename")).toBeTruthy();
   });
 });

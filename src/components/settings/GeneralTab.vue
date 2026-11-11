@@ -156,7 +156,6 @@ onMounted(() => {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settings.language") }}</span>
-        <span class="row-note">{{ t("settings.languageNote") }}</span>
       </div>
       <select
         class="settings-select"
@@ -184,8 +183,6 @@ onMounted(() => {
         {{ t("settingsUi.changeRoot") }}
       </button>
     </div>
-
-    <p class="settings-hint">{{ t("settingsUi.rootNote") }}</p>
 
     <div class="settings-sep"></div>
 
@@ -233,7 +230,6 @@ onMounted(() => {
       </div>
     </div>
 
-    <p class="settings-hint">{{ t("settings.gameRootNote") }}</p>
   </section>
 </template>
 
@@ -272,7 +268,7 @@ onMounted(() => {
   font-size: 0.9em;
 }
 .settings-msg.error {
-  color: #e74c3c;
+  color: var(--danger-text);
 }
 .settings-sep {
   height: 1px;
@@ -301,11 +297,11 @@ onMounted(() => {
   white-space: nowrap;
 }
 .game-root-warn {
-  color: #e74c3c;
+  color: var(--danger-text);
   font-size: 0.85em;
 }
 .game-root-ok {
-  color: #27ae60;
+  color: var(--ok-text-strong);
   font-size: 0.85em;
 }
 .game-root-actions {
@@ -328,7 +324,7 @@ onMounted(() => {
   width: 12px;
   height: 12px;
   border: 2px solid rgba(0,0,0,0.2);
-  border-top-color: #333;
+  border-top-color: var(--text-muted);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }

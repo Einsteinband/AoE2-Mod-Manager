@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry } from "../types";
 import { fileUrl, toggleModEnabled } from "../api";
-import { sourceHint, sourceLabel, translateBackendMessage } from "../format";
+import { sourceHint, sourceLabel, translateBackendMessage, formatDateTime } from "../format";
 import { customNameOf, displayTitle, isFavorite } from "../userData";
 import { translatedTitleOf } from "../online/translation";
 import BaseModCard from "./base/BaseModCard.vue";
@@ -38,6 +38,8 @@ const emit = defineEmits<{
   (event: "check", payload: { id: string; checked: boolean }): void;
   /** v0.7：单个更新按钮 */
   (event: "update", mod: ModEntry): void;
+  /** 右键 / 键盘菜单键：把卡片与原始事件交给页面装配层打开上下文菜单（不改选中态） */
+  (event: "context-menu", mod: ModEntry, menuEvent: MouseEvent | KeyboardEvent): void;
 }>();
 
 const { t } = useI18n();
@@ -49,8 +51,15 @@ const coverUrl = computed(() => {
   if (props.mod.coverUrl) return props.mod.coverUrl;
   return props.mod.thumbnail ? fileUrl(props.mod.thumbnail) : null;
 });
-/** 已卸载 / 未安装的收藏占位卡片：只多一个角标，交互与普通卡片一致（点击看详情） */
+/** 未安装收藏占位：适配本地卡片形状，但不显示本地来源角标与启停开关 */
 const uninstalled = computed(() => props.mod.uninstalled === true);
+/** 真实磁盘条目视为本机已安装；ghost 占位不进入已安装视觉状态 */
+const installed = computed(() => !uninstalled.value);
+
+/** 本地封面解码 / 路径失效：回落到占位块，避免停在坏图状态 */
+function onImageError() {
+  imgFailed.value = true;
+}
 
 watch(
   () => props.mod.id,
@@ -122,6 +131,21 @@ async function toggleEnabled(event: MouseEvent) {
   }
 }
 
+// ---------------- 右键上下文菜单（目标快照由页面层持有，卡片不改变选中态） ----------------
+
+function onContextMenu(menuEvent: MouseEvent): void {
+  menuEvent.preventDefault();
+  emit("context-menu", props.mod, menuEvent);
+}
+
+function onMenuKeydown(menuEvent: KeyboardEvent): void {
+  // Shift+F10 或键盘菜单键：与右键等价，交给页面层定位落点
+  if (menuEvent.key === "ContextMenu" || (menuEvent.shiftKey && menuEvent.key === "F10")) {
+    menuEvent.preventDefault();
+    emit("context-menu", props.mod, menuEvent);
+  }
+}
+
 // v0.5：有备注名时主标题用备注名，副标题小字回显原英文标题
 // v0.2.4：没备注名时，已翻译的模组直接显示中文标题（跟详情页的「显示原文/中文」开关联动）
 const custom = computed(() => customNameOf(props.mod.workshopId));
@@ -132,6 +156,13 @@ const title = computed(() =>
 /** 副标题只服务于备注名（📝）；译文不再叠英文原名 */
 const sub = computed(() => (custom.value ? props.mod.displayName : null));
 const favorited = computed(() => isFavorite(props.mod.workshopId));
+
+/** 安装时间：只有 metadata 记录了真实安装时间才显示；旧模组为 null 时不伪造 */
+const installedAtText = computed(() => {
+  const ms = props.mod.installedAtMs;
+  if (!ms || ms <= 0) return null;
+  return t("card.installedAt", { date: formatDateTime(ms) });
+});
 </script>
 
 <template>
@@ -143,8 +174,12 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
     :favorited="favorited"
     :workshop-id="mod.workshopId"
     :author="mod.author"
+    :installed="installed"
     :active="active"
     @click="emit('select', mod)"
+    @img-error="onImageError"
+    @contextmenu="onContextMenu"
+    @keydown="onMenuKeydown"
   >
     <!-- 角标 slot：排序序号、可更新红标、来源角标等 -->
     <template #badges>
@@ -165,9 +200,6 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
         <span v-if="conflict" class="conflict-badge" :title="t('subscription.conflictBadgeHint')">
           {{ t("subscription.conflictBadge") }}
         </span>
-        <span v-if="uninstalled" class="source-badge uninstalled-badge">
-          {{ t("card.uninstalled") }}
-        </span>
         <span
           v-if="!uninstalled"
           class="source-badge"
@@ -186,6 +218,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
     <template #meta-top>
       <span v-if="mod.isDataMod" class="data-mark" :title="t('card.dataModBadgeHint')">⚙️</span>
       <span
+        v-if="!uninstalled"
         class="card-toggle"
         :class="[statusClass, { busy: toggling }]"
         role="switch"
@@ -213,6 +246,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
       >
         {{ updating ? t("updates.updating") : t("updates.updateBtn") }}
       </button>
+      <span v-if="installedAtText" class="card-installed-time">{{ installedAtText }}</span>
     </template>
   </BaseModCard>
 </template>
@@ -245,7 +279,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   transform: scale(1.14);
 }
 .card-toggle.on {
-  background: linear-gradient(180deg, var(--ok-bright), var(--ok));
+  background: var(--ok);
   border-color: var(--ok-border-bright);
   color: var(--text-inverse);
   box-shadow: 0 0 8px rgba(var(--ok-rgb), 0.85), inset 0 0 0 1px rgba(var(--sheen-rgb), 0.25);
@@ -254,7 +288,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   box-shadow: 0 0 12px rgba(var(--ok-glow-rgb), 1), inset 0 0 0 1px rgba(var(--sheen-rgb), 0.35);
 }
 .card-toggle.off {
-  background: linear-gradient(180deg, var(--bg-elevated-top), var(--bg-elevated-bottom));
+  background: var(--panel-hi);
   border-color: var(--switch-off-border);
   color: var(--switch-off-text);
   box-shadow: 0 0 6px rgba(var(--shadow-rgb), 0.5), inset 0 0 0 1px rgba(var(--sheen-rgb), 0.08);
@@ -264,7 +298,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   color: var(--gold-bright);
 }
 .card-toggle.unknown {
-  background: transparent;
+  background: var(--panel-lo);
   border-color: var(--border-strong);
   border-style: dashed;
   color: var(--border-strong);
@@ -291,7 +325,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   line-height: 1.5;
   border-radius: 3px;
   border: 1px solid var(--danger-text-strong);
-  background: linear-gradient(180deg, var(--badge-danger-top), var(--badge-danger-bottom));
+  background: var(--danger-strong);
   color: var(--text-inverse);
   text-shadow: 0 1px 1px rgba(var(--shadow-rgb), 0.45);
   box-shadow: 0 1px 4px rgba(var(--shadow-rgb), 0.5);
@@ -321,7 +355,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   line-height: 1.5;
   border-radius: 999px;
   border: 1px solid var(--line);
-  background: rgba(var(--badge-base-rgb), 0.82);
+  background: var(--panel-hi);
   color: var(--muted);
   white-space: nowrap;
   pointer-events: none;
@@ -329,22 +363,17 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
 .source-badge.tool {
   border-color: rgba(var(--accent-rgb), 0.6);
   color: var(--gold-bright);
-  background: rgba(var(--badge-tool-rgb), 0.88);
+  background: var(--panel-hi);
 }
 .source-badge.official {
   border-color: rgba(var(--info-rgb), 0.55);
   color: var(--info-text);
-  background: rgba(var(--badge-official-rgb), 0.88);
+  background: var(--panel-hi);
 }
 .source-badge.unknown {
   border-color: var(--line);
   color: var(--parch-dim);
-  background: rgba(var(--badge-plain-rgb), 0.88);
-}
-.source-badge.uninstalled-badge {
-  border-color: var(--gold-dim);
-  color: var(--gold-bright);
-  background: rgba(var(--accent-rgb), 0.22);
+  background: var(--panel-hi);
 }
 
 /* 数据模组角标 */
@@ -357,7 +386,7 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   line-height: 1.5;
   border-radius: 999px;
   border: 1px solid rgba(var(--accent-rgb), 0.75);
-  background: rgba(var(--badge-tool-rgb), 0.92);
+  background: var(--panel-hi);
   color: var(--gold-bright);
   white-space: nowrap;
   pointer-events: none;
@@ -395,9 +424,16 @@ const favorited = computed(() => isFavorite(props.mod.workshopId));
   line-height: 1.5;
   border-radius: 3px;
   border: 1px solid var(--danger-text-strong);
-  background: linear-gradient(180deg, var(--badge-danger-top), var(--badge-danger-bottom));
+  background: var(--danger-strong);
   color: var(--text-inverse);
   cursor: pointer;
+  white-space: nowrap;
+}
+
+.card-installed-time {
+  color: var(--text-dim);
+  font-size: calc(var(--card-font-size) * 0.82);
+  line-height: 1.5;
   white-space: nowrap;
 }
 .card-update-btn:disabled {

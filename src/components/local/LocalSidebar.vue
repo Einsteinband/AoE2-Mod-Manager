@@ -55,7 +55,7 @@ defineProps<{
   activeTag: string | null;
   officialTagList: TagOption[];
   inferredTagList: TagOption[];
-  sourceCounts: { all: number; local: number; subscribed: number };
+  sourceCounts: { all: number; local: number; subscribed: number; imported: number };
   statusCounts: { enabled: number; disabled: number; unknown: number };
   favoriteLocalCount: number;
 }>();
@@ -108,6 +108,14 @@ const { t } = useI18n();
         @click="emit('pick-source', 'subscribed')"
       >
         <span class="label">{{ t("sidebar.subscribed") }}</span>
+      </button>
+      <button
+        type="button"
+        class="side-item"
+        :class="{ active: source === 'imported' && !favoritesOnly }"
+        @click="emit('pick-source', 'imported')"
+      >
+        <span class="label">{{ t("sidebar.imported") }}</span>
       </button>
     </div>
   </div>

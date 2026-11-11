@@ -486,8 +486,20 @@ fn load_status_map(root: &Path, warnings: &mut Vec<String>) -> HashMap<String, S
     map
 }
 
+/// 封面候选：官方包固定名 + 遗留模组使用的 `_preview-icon.*` 命名（仅根目录文件）
+const THUMB_NAMES: &[&str] = &[
+    "thumbnail.jpg",
+    "thumbnail.jpeg",
+    "thumbnail.png",
+    "thumbnail.webp",
+    "_preview-icon.jpg",
+    "_preview-icon.jpeg",
+    "_preview-icon.png",
+    "_preview-icon.webp",
+];
+
 fn find_thumbnail(dir: &Path) -> Option<String> {
-    for name in ["thumbnail.jpg", "thumbnail.jpeg", "thumbnail.png", "thumbnail.webp"] {
+    for name in THUMB_NAMES {
         let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate.to_string_lossy().to_string());
@@ -608,7 +620,7 @@ fn collect_entry(
         categories,
         category_source,
         official_tags,
-        source: ModSource::classify(kind, workshop_id, metadata_recorded),
+        source: ModSource::classify(kind, workshop_id, recorded.as_ref().map(|m| m.source.as_str())),
         metadata_recorded,
         issues,
         info_json_present: info_read.info.is_some(),
@@ -645,6 +657,10 @@ fn scan_dir(
                             continue;
                         };
                         if name.starts_with('.') {
+                            continue;
+                        }
+                        // 排除覆盖安装产生的备份目录：<原名>.bak-<时间戳>
+                        if name.contains(".bak-") {
                             continue;
                         }
                         found += 1;
@@ -739,12 +755,13 @@ pub fn installed_index(root: &Path, meta: &Store) -> Vec<InstalledIndexEntry> {
                     .filter(|id| *id > 0)
             });
             let Some(id) = id else { continue };
+            let metadata_source = recorded.as_ref().map(|m| m.source.as_str());
             let recorded = recorded.is_some();
             out.push(InstalledIndexEntry {
                 workshop_id: id,
                 kind: kind.to_string(),
                 folder_name: name,
-                source: ModSource::classify(kind, workshop_id, recorded),
+                source: ModSource::classify(kind, workshop_id, metadata_source),
             });
         }
     }
@@ -904,6 +921,21 @@ mod tests {
     }
 
     #[test]
+    fn find_thumbnail_prefers_thumbnail_then_preview_icon() {
+        let dir = temp_mod_dir("thumb-names");
+        // 无 thumbnail.* 时，遗留 `_preview-icon.jpg` 必须被识别为封面
+        fs::write(dir.join("_preview-icon.jpg"), "jpg").unwrap();
+        let found = find_thumbnail(&dir).expect("应识别 _preview-icon.jpg");
+        assert!(found.ends_with("_preview-icon.jpg"));
+
+        // 同时存在时优先固定名 thumbnail.jpg
+        fs::write(dir.join("thumbnail.jpg"), "jpg").unwrap();
+        let found = find_thumbnail(&dir).expect("应识别 thumbnail.jpg");
+        assert!(found.ends_with("thumbnail.jpg"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn missing_root_is_reported_not_panicked() {
         let report = scan(Path::new(r"Z:\definitely\missing\path"), &Store::default());
         assert!(!report.root_exists);
@@ -959,16 +991,20 @@ mod tests {
 
     #[test]
     fn source_classification_covers_three_states() {
-        // 有元数据记录 → 本工具安装（与目录无关）
-        assert_eq!(ModSource::classify("subscribed", Some(7), true), ModSource::Tool);
+        // 有元数据记录（非第三方）→ 本工具安装
+        assert_eq!(ModSource::classify("subscribed", Some(7), Some("api.ageofempires.com")), ModSource::Tool);
         // local + WorkshopID → 本工具安装（旧版本安装未写元数据）
-        assert_eq!(ModSource::classify("local", Some(7), false), ModSource::Tool);
+        assert_eq!(ModSource::classify("local", Some(7), None), ModSource::Tool);
         // subscribed + WorkshopID 无记录 → 官方订阅
-        assert_eq!(ModSource::classify("subscribed", Some(7), false), ModSource::Official);
-        // 无 WorkshopID（0 / None）→ 无法确定
-        assert_eq!(ModSource::classify("local", None, false), ModSource::Unknown);
-        assert_eq!(ModSource::classify("local", Some(0), false), ModSource::Unknown);
-        assert_eq!(ModSource::classify("subscribed", None, false), ModSource::Unknown);
+        assert_eq!(ModSource::classify("subscribed", Some(7), None), ModSource::Official);
+        // 外部导入 ZIP → Imported（新值）
+        assert_eq!(ModSource::classify("local", Some(0), Some("imported-zip")), ModSource::Imported);
+        // 外部导入 ZIP → Imported（旧值兼容）
+        assert_eq!(ModSource::classify("local", Some(0), Some("thirdparty-zip")), ModSource::Imported);
+        // 无 WorkshopID（0 / None）且无记录 → 无法确定
+        assert_eq!(ModSource::classify("local", None, None), ModSource::Unknown);
+        assert_eq!(ModSource::classify("local", Some(0), None), ModSource::Unknown);
+        assert_eq!(ModSource::classify("subscribed", None, None), ModSource::Unknown);
     }
 
     #[test]
@@ -1212,5 +1248,29 @@ mod tests {
         assert!(is_core_data_file("empires2.dat"));
         assert!(!is_core_data_file("custom_text.dat"));
         assert!(!is_core_data_file("empires2_x2_p1.dat.bak"));
+    }
+
+    #[test]
+    fn backup_dirs_are_skipped_during_scan() {
+        let root = std::env::temp_dir().join(format!("aoe2mm-scan-bak-{}", std::process::id()));
+        let local = root.join("local");
+        fs::create_dir_all(local.join("MyMod")).unwrap();
+        fs::write(local.join("MyMod/info.json"), r#"{"Title":"MyMod"}"#).unwrap();
+
+        // 备份目录：同样带 info.json，名字是 <原名>.bak-<时间戳>
+        let bak = local.join("MyMod.bak-1794305575766");
+        fs::create_dir_all(&bak).unwrap();
+        fs::write(bak.join("info.json"), r#"{"Title":"MyMod Backup"}"#).unwrap();
+
+        let mut mods = Vec::new();
+        let mut warnings = Vec::new();
+        let status: HashMap<String, StatusRecord> = HashMap::new();
+        scan_dir("local", &local, &status, &Store::default(), &mut mods, &mut warnings);
+
+        assert_eq!(mods.len(), 1, "备份目录不应进入模组列表");
+        assert_eq!(mods[0].folder_name, "MyMod");
+        assert!(mods.iter().all(|m| !m.folder_name.contains(".bak-")), "不应有 .bak- 目录被扫到");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

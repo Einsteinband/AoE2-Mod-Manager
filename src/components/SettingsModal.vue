@@ -80,6 +80,9 @@ const cardSize = defineModel<number>("cardSize", { default: 200 });
 /** 界面主题："dark"（默认）| "light"；主界面 App.vue 持有真值并负责落盘 */
 const theme = defineModel<string>("theme", { default: "dark" });
 
+/** 强调色：真实颜色由前端注册表定义，默认 gold；主界面 App.vue 持有真值并负责落盘 */
+const accent = defineModel<string>("accent", { default: "gold" });
+
 /** 主题选项（文案跟随界面语言，不新增 i18n key） */
 const THEME_OPTIONS = computed(() => [
   { value: "dark", label: t("settingsUi.themeDark") },
@@ -117,6 +120,14 @@ const cardFontWeight = defineModel<number>("cardFontWeight", { default: 400 });
  * 值本身照常保存，切回英文后仍是用户上次的选择。
  */
 const latinFont = defineModel<boolean>("latinFont", { default: true });
+/** 已安装卡片：强调色信息区背景开关（主界面 App.vue 持有真值并落盘） */
+const installedCardBg = defineModel<boolean>("installedCardBg", { default: true });
+/** 已安装卡片：左侧主题色标识条开关 */
+const installedCardBar = defineModel<boolean>("installedCardBar", { default: true });
+/** 已安装卡片：右下角斜线装饰开关 */
+const installedCardStripes = defineModel<boolean>("installedCardStripes", { default: true });
+/** 详情页辅助按钮显示模式："icon"（默认）| "text"；真值由 App.vue 持有并经 localStorage 持久化 */
+const detailButtonMode = defineModel<string>("detailButtonMode", { default: "icon" });
 /** 当前是否英文界面（决定「西文字体」这一行是否出现） */
 const isEnglishUi = computed(() => String(locale.value) === "en");
 
@@ -204,8 +215,13 @@ function applyFontFamily(event: Event) {
 provide("appearanceSettings", {
   // 状态
   theme,
+  accent,
   uiFontFamily,
   latinFont,
+  installedCardBg,
+  installedCardBar,
+  installedCardStripes,
+  detailButtonMode,
   uiFontWeight,
   showAdvancedTypography,
   globalFontScale,
@@ -705,6 +721,11 @@ onBeforeUnmount(() => {
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel-lo);
+}
+/* 四档强调色 pills 较长，空间不足时允许换行，避免把右列撑出卡片 */
+.settings-segment--wrap {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .settings-segment-btn {
   min-width: 74px;

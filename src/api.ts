@@ -246,6 +246,18 @@ export function setTheme(theme: UiTheme): Promise<AppSettings> {
   return invoke<AppSettings>("set_theme", { theme });
 }
 
+/** 强调色主题：ID 由 `src/config/accentThemes.ts` 注册表统一推导，默认 gold 暖金黄 */
+import type { UiAccent } from "./config/accentThemes";
+export type { UiAccent };
+
+/**
+ * 保存强调色主题。后端只认 blue / amber / gold / brick，其余归一化成 gold，因此这里不做校验。
+ * 调用时机：App.vue 里确认强调色变化后写盘（写失败只提示，不回滚界面）。
+ */
+export function setAccent(accent: UiAccent): Promise<AppSettings> {
+  return invoke<AppSettings>("set_accent", { accent });
+}
+
 /* ================= v2.4：三层排版（界面 / 正文阅读 / 卡片列表） =================
    三个层级各自的取值范围与 Rust 侧 models.rs 的常量一一对应；
    前端只负责把归一化后的值写到 <html> 的 CSS 变量上，settings.json 是唯一真源。 */
@@ -450,6 +462,46 @@ export function saveTypographyPrefs(prefs: TypographyPrefs): Promise<AppSettings
   });
 }
 
+/** 已安装卡片三种独立装饰开关；默认全部开启，保持升级后的现有视觉 */
+export interface InstalledCardDecorPrefs {
+  cardBg: boolean;
+  sideBar: boolean;
+  cornerStripes: boolean;
+}
+
+/** 出厂默认值（与 Rust 侧 Settings::default() 一致） */
+export const INSTALLED_CARD_DECOR_DEFAULTS: InstalledCardDecorPrefs = {
+  cardBg: true,
+  sideBar: true,
+  cornerStripes: true,
+};
+
+function normalizeDecorBool(value: unknown): boolean {
+  return typeof value === "boolean" ? value : true;
+}
+
+/** 把 settings.json / localStorage / 局部对象归一化成合法装饰开关快照 */
+export function normalizeInstalledCardDecor(
+  input: Partial<Record<keyof InstalledCardDecorPrefs, unknown>> | null | undefined,
+): InstalledCardDecorPrefs {
+  return {
+    cardBg: normalizeDecorBool(input?.cardBg),
+    sideBar: normalizeDecorBool(input?.sideBar),
+    cornerStripes: normalizeDecorBool(input?.cornerStripes),
+  };
+}
+
+/** 保存已安装卡片装饰开关；App.vue 负责 300ms 防抖调用 */
+export function saveInstalledCardDecorPrefs(
+  prefs: InstalledCardDecorPrefs,
+): Promise<AppSettings> {
+  return invoke<AppSettings>("save_installed_card_decor_prefs", {
+    cardBgEnabled: prefs.cardBg,
+    sideBarEnabled: prefs.sideBar,
+    cornerStripesEnabled: prefs.cornerStripes,
+  });
+}
+
 export function candidateRoots(): Promise<string[]> {
   return invoke<string[]>("candidate_roots");
 }
@@ -637,6 +689,7 @@ export interface AnalyzeResult {
   author: string;
   description: string;
   targetFolder: string;
+  targetPath: string;
   fileCount: number;
   bytes: number;
   exists: boolean;

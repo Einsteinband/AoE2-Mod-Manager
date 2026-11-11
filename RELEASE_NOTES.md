@@ -1,3 +1,23 @@
+# v0.5.1
+
+## v0.5.1 - What's New
+
+- **✨Mod Details:** Improved the Mod detail page with clearer information and more convenient actions. Users can switch between icon and text button styles. Right-clicking the card allows for convenient module management.
+- **🎨Appearance:** Added 8 accent colors with light and dark themes. Improved color selection and added customizable card decorations, including installed-Mod background colors, accent borders, and corner stripes.
+- **🖼️Cover Images:** Improved cover image detection and fallback handling. Added a button to retry retrieving Mod covers.
+- **📦External Mods (Experimental):** External Mod importing and management with limited ZIP support. This feature is experimental; RAR, 7z, folders, and batch importing are not supported.
+- **🌐Browsing Experience:** Improved Mod card presentation, search, offline information access, and multilingual support.
+
+## v0.5.1 - 更新内容
+
+- **✨模组详情：** 优化详情页信息布局与操作体验，支持切换图标或文字按钮样式，右键卡片可以便捷地进行模组管理。
+- **🎨外观设置：** 新增 8 种强调色及浅色/深色主题；优化颜色选择，并支持自定义卡片装饰，包括已安装 Mod 的背景色、主题色边框和右下角斜线。
+- **🖼️封面图片：** 改进封面识别与加载失败回退机制，新增封面重新获取功能。
+- **📦外部 Mod（实验性）：** 外部 Mod 导入与管理，现阶段仅有限支持 ZIP 文件。该功能仍处于实验阶段，不支持 RAR、7z、文件夹及批量导入。
+- **🌐浏览体验：** 优化 Mod 卡片展示、搜索、离线信息查看及多语言支持。
+
+---
+
 # v0.5.0
 
 ## v0.5.0 - 更新内容

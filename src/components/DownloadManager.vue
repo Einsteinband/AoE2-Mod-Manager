@@ -282,7 +282,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
   display: grid;
   place-items: center;
   background: var(--gold);
-  color: #1a1409;
+  color: var(--text-on-accent);
   font-size: 10px;
   font-weight: var(--ui-font-weight-strong);
 }

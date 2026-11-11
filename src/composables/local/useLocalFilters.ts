@@ -62,8 +62,9 @@ export function useLocalFilters(deps: {
 
   const sourceCounts = computed(() => ({
     all: mods.value.length,
-    local: mods.value.filter((m) => m.kind === "local").length,
+    local: mods.value.filter((m) => m.kind === "local" && m.source !== "imported").length,
     subscribed: mods.value.filter((m) => m.kind === "subscribed").length,
+    imported: mods.value.filter((m) => m.source === "imported").length,
   }));
 
   const statusCounts = computed(() => {
@@ -93,7 +94,15 @@ export function useLocalFilters(deps: {
       if (fav && !isFavorite(m.workshopId)) return false;
       if (!fav) {
         if (updatesOnly.value && !updateIds.value.has(m.id)) return false;
-        if (source.value !== "all" && m.kind !== source.value) return false;
+        if (source.value !== "all") {
+          if (source.value === "imported") {
+            if (m.source !== "imported") return false;
+          } else if (source.value === "local") {
+            if (m.kind !== "local" || m.source === "imported") return false;
+          } else {
+            if (m.kind !== source.value) return false;
+          }
+        }
         if (status.value === "enabled" && m.enabled !== true) return false;
         if (status.value === "disabled" && m.enabled !== false) return false;
         if (status.value === "unknown" && m.enabled !== null) return false;

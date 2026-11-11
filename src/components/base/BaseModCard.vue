@@ -23,6 +23,10 @@ const props = withDefaults(
     workshopId?: string | number | null;
     /** 作者名 */
     author?: string | null;
+    /** 本机已安装状态：由调用方按本地扫描或统一安装索引传入，卡片不反推 */
+    installed?: boolean;
+    /** 卡片 meta 行附加信息（如本地模组安装时间），null/空时不渲染 */
+    extraMeta?: string | null;
     /** 是否激活态 */
     active?: boolean;
   }>(),
@@ -33,6 +37,8 @@ const props = withDefaults(
     favorited: false,
     workshopId: null,
     author: null,
+    installed: false,
+    extraMeta: null,
     active: false,
   },
 );
@@ -68,7 +74,7 @@ const displayId = computed(() => {
       <!-- 额外角标 slot：来源角标、可更新红标等 -->
       <slot name="badges" />
     </div>
-    <div class="card-body">
+    <div class="card-body" :class="{ 'is-installed': installed }">
       <div class="card-title" :title="title">{{ title }}</div>
       <div v-if="sub" class="card-sub" :title="sub">📝 {{ sub }}</div>
       <!-- 第一行 meta：状态开关、徽章等（由外部传入） -->
@@ -79,6 +85,7 @@ const displayId = computed(() => {
         <span>{{ displayId }}</span>
         <span v-if="author" class="author">{{ author }}</span>
         <span v-else class="author missing">{{ t("card.authorMissing") }}</span>
+        <span v-if="extraMeta" class="extra-meta">{{ extraMeta }}</span>
       </div>
     </div>
   </button>

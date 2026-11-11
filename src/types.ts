@@ -9,7 +9,7 @@ export type ModCategory = "ui" | "audio" | "map" | "data";
  * official = 官方订阅（无记录，但 subscribed 且 WorkshopID > 0）
  * unknown = 无法确定（无记录且无 WorkshopID：手动放入）
  */
-export type ModSource = "tool" | "official" | "unknown";
+export type ModSource = "tool" | "official" | "imported" | "unknown";
 
 export interface ModEntry {
   id: string;
@@ -134,6 +134,8 @@ export interface AppSettings {
   cardSize: number;
   /** v2.2 界面主题："dark" 深色羊皮纸（默认）| "light" 明亮米白 */
   theme: string;
+  /** v3.6 强调色主题：ID 由前端注册表定义，默认 gold；与明暗模式正交 */
+  accent: string;
   /**
    * v3.0 三层排版 —— 界面层：字体种类（"hei" | "youyuan" | "system" | "serif"，v3.3 加衬线）
    * 对应 CSS 变量 --app-font-family
@@ -158,6 +160,12 @@ export interface AppSettings {
    * 只在英文界面生效，中文界面忽略；默认 true。
    */
   latinFont: boolean;
+  /** 已安装卡片：强调色信息区背景开关，默认 true */
+  installedCardBgEnabled?: boolean;
+  /** 已安装卡片：左侧主题色标识条开关，默认 true */
+  installedCardBarEnabled?: boolean;
+  /** 已安装卡片：右下角斜线装饰开关，默认 true */
+  installedCardStripesEnabled?: boolean;
   /** v3.2：图片缓存目录（null / 缺省 = 默认 AppData 位置） */
   imageCacheDir?: string | null;
   /** v3.2：在线模组信息缓存（online_cache.json）目录；null = 应用配置目录 */
@@ -298,7 +306,7 @@ export interface BatchToggleReport {
   message: string;
 }
 
-export type SourceFilter = "all" | ModKind;
+export type SourceFilter = "all" | ModKind | "imported";
 /** v0.2 拖拽排序的写入结果（Rust 侧已进程检测 + 备份 + 回读校验） */
 export interface PriorityOutcome {
   statusPath: string;

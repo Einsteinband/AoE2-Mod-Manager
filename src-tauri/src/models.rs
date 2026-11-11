@@ -8,14 +8,20 @@ pub enum ModSource {
     Tool,
     /// 官方订阅（无记录，但在 subscribed 目录且 WorkshopID > 0）
     Official,
+    /// 外部导入 ZIP 安装（metadata.source = "imported-zip"）
+    Imported,
     /// 无法确定（无记录且无 WorkshopID：手动放入 / 手工整理过）
     Unknown,
 }
 
 impl ModSource {
     /// 唯一判定入口：scan 与在线页索引共用，避免两处规则漂移
-    pub fn classify(kind: &str, workshop_id: Option<u64>, metadata_recorded: bool) -> Self {
-        if metadata_recorded {
+    pub fn classify(kind: &str, workshop_id: Option<u64>, metadata_source: Option<&str>) -> Self {
+        // 识别外部导入模组：新值 imported-zip，兼容旧值 thirdparty-zip
+        if metadata_source == Some("imported-zip") || metadata_source == Some("thirdparty-zip") {
+            return ModSource::Imported;
+        }
+        if metadata_source.is_some() {
             return ModSource::Tool;
         }
         let has_id = workshop_id.map(|id| id > 0).unwrap_or(false);
@@ -186,6 +192,11 @@ pub struct Settings {
     /// 纯界面偏好，越界值由 `set_theme` 命令夹回 dark；老 settings.json 缺字段走默认值。
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// 强调色主题：自由格式 ID（小写字母 / 数字 / 连字符，≤32），真实颜色由前端注册表定义，默认 gold。
+    /// 与明暗模式正交：只驱动选中 / 主按钮 / 交互反馈 / Focus 等强调层，不大面积染色。
+    /// 纯界面偏好，格式非法的 ID 由 `set_accent` 命令归一化成 gold；老 settings.json 缺字段走默认值。
+    #[serde(default = "default_accent")]
+    pub accent: String,
     /// v3.0：界面字体种类 —— "hei"（黑体，默认）| "youyuan"（幼圆）| "system"（跟随系统）。
     /// 纯界面偏好：前端把它翻译成 CSS 变量 --app-font-family，不影响任何业务逻辑。
     /// v2.4 旧值 "sans-serif" / "serif" 载入时静默归一化为 hei，"system-ui" 归一化为 system。
@@ -219,6 +230,15 @@ pub struct Settings {
     /// 只在英文界面生效，中文界面一律忽略此值；默认 true —— 英文用中文字体的西文字形会明显偏宽。
     #[serde(default = "default_latin_font")]
     pub latin_font: bool,
+    /// 已安装卡片：强调色信息区背景开关，默认 true。
+    #[serde(default = "default_installed_card_bg")]
+    pub installed_card_bg_enabled: bool,
+    /// 已安装卡片：左侧主题色标识条开关，默认 true。
+    #[serde(default = "default_installed_card_bar")]
+    pub installed_card_bar_enabled: bool,
+    /// 已安装卡片：右下角斜线装饰开关，默认 true。
+    #[serde(default = "default_installed_card_stripes")]
+    pub installed_card_stripes_enabled: bool,
     /// v3.2：三类本地缓存的自定义存放目录（**None = 用默认 AppData 位置**）。
     /// 只存用户明确选过的路径；目录不存在 / 空串一律回退默认，判定统一在
     /// [`crate::get_cache_dir`] 里做，本结构不碰文件系统。
@@ -326,6 +346,18 @@ fn default_card_font_weight() -> u32 {
 
 fn default_latin_font() -> bool {
     LATIN_FONT_DEFAULT
+}
+
+fn default_installed_card_bg() -> bool {
+    INSTALLED_CARD_BG_DEFAULT
+}
+
+fn default_installed_card_bar() -> bool {
+    INSTALLED_CARD_BAR_DEFAULT
+}
+
+fn default_installed_card_stripes() -> bool {
+    INSTALLED_CARD_STRIPES_DEFAULT
 }
 
 /// 界面字体种类：黑体
@@ -446,6 +478,13 @@ pub const CARD_FONT_WEIGHT_DEFAULT: u32 = CARD_FONT_WEIGHT_NORMAL;
 /// true = 英文界面用 Segoe UI 等西文字体打头（更紧凑、更接近原生 Windows 应用）。
 pub const LATIN_FONT_DEFAULT: bool = true;
 
+/// 已安装卡片强调色背景开关的出厂默认值。
+pub const INSTALLED_CARD_BG_DEFAULT: bool = true;
+/// 已安装卡片左侧标识条开关的出厂默认值。
+pub const INSTALLED_CARD_BAR_DEFAULT: bool = true;
+/// 已安装卡片右下角斜线装饰开关的出厂默认值。
+pub const INSTALLED_CARD_STRIPES_DEFAULT: bool = true;
+
 /// 卡片字重归一化：只保留 400 / 700，阈值 600（与前端 normalizeCardFontWeight 一致）。
 pub fn normalize_card_font_weight(weight: u32) -> u32 {
     if weight >= 600 {
@@ -479,6 +518,53 @@ pub fn normalize_theme(theme: &str) -> String {
         THEME_LIGHT.to_string()
     } else {
         THEME_DARK.to_string()
+    }
+}
+
+/// 强调色默认值（gold 暖金黄）。Rust 不维护具体颜色白名单：真实存在哪些颜色由前端注册表定义，
+/// 这里只保证落盘字符串是安全的 ID 格式。
+pub const ACCENT_GOLD: &str = "gold";
+
+/// 强调色 ID 最大长度。
+const ACCENT_ID_MAX_LEN: usize = 32;
+
+fn default_accent() -> String {
+    ACCENT_GOLD.to_string()
+}
+
+/// 通用强调色 ID 格式校验：仅小写字母 / 数字 / 连字符；首尾不能是连字符；不允许连续连字符；长度 1..=32。
+fn is_valid_accent_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    if bytes.is_empty() || bytes.len() > ACCENT_ID_MAX_LEN {
+        return false;
+    }
+    if bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-') {
+        return false;
+    }
+    let mut prev_hyphen = false;
+    for &byte in bytes {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' => prev_hyphen = false,
+            b'-' => {
+                if prev_hyphen {
+                    return false;
+                }
+                prev_hyphen = true;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// 强调色归一化：trim 后做通用 ID 格式校验；合法 ID 原样保存，空 / 非法字符 / 超长等一律回退 gold
+///（不报错，避免坏值把界面卡死）。Rust 不把合法 ID 转成其他颜色名称。
+pub fn normalize_accent(accent: &str) -> String {
+    let trimmed = accent.trim();
+    if is_valid_accent_id(trimmed) {
+        trimmed.to_string()
+    } else {
+        ACCENT_GOLD.to_string()
     }
 }
 
@@ -535,6 +621,7 @@ impl Default for Settings {
             view_mode: default_view_mode(),
             card_size: default_card_size(),
             theme: default_theme(),
+            accent: default_accent(),
             // v3.0 三层排版默认值（与 style.css :root 里的变量初值一一对应）：
             // 界面 黑体 / 400 字重 / 100% 缩放；正文 14px / 1.6 / 400；卡片 12px
             ui_font_family: default_ui_font_family(),
@@ -546,6 +633,9 @@ impl Default for Settings {
             card_font_size: default_card_font_size(),
             card_font_weight: default_card_font_weight(),
             latin_font: default_latin_font(),
+            installed_card_bg_enabled: default_installed_card_bg(),
+            installed_card_bar_enabled: default_installed_card_bar(),
+            installed_card_stripes_enabled: default_installed_card_stripes(),
             // v3.2：三类缓存默认都放在 AppData 里（用户改过才写入具体路径）
             image_cache_dir: None,
             mod_info_cache_dir: None,
@@ -558,5 +648,52 @@ impl Default for Settings {
             ui_font_size: None,
             ui_line_height: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_card_decor_defaults_are_enabled() {
+        let settings = Settings::default();
+        assert!(settings.installed_card_bg_enabled);
+        assert!(settings.installed_card_bar_enabled);
+        assert!(settings.installed_card_stripes_enabled);
+    }
+
+    #[test]
+    fn normalize_accent_accepts_format_valid_ids() {
+        // 现有四色仍通过
+        assert_eq!(normalize_accent("blue"), "blue");
+        assert_eq!(normalize_accent("amber"), "amber");
+        assert_eq!(normalize_accent("gold"), "gold");
+        assert_eq!(normalize_accent("brick"), "brick");
+        // 格式合法的未来颜色 ID、数字与连字符组合均通过；首尾空格被 trim 后原样保存
+        assert_eq!(normalize_accent("purple"), "purple");
+        assert_eq!(normalize_accent("green"), "green");
+        assert_eq!(normalize_accent("cyan2"), "cyan2");
+        assert_eq!(normalize_accent("green-1"), "green-1");
+        assert_eq!(normalize_accent("a-b-c"), "a-b-c");
+        assert_eq!(normalize_accent("  brick "), "brick");
+    }
+
+    #[test]
+    fn normalize_accent_falls_back_to_gold_on_invalid_ids() {
+        assert_eq!(normalize_accent(""), "gold");
+        assert_eq!(normalize_accent("   "), "gold");
+        // 大写字母、内部空格、特殊字符、非 ASCII 字符
+        assert_eq!(normalize_accent("BLUE"), "gold");
+        assert_eq!(normalize_accent("Red"), "gold");
+        assert_eq!(normalize_accent("a b"), "gold");
+        assert_eq!(normalize_accent("red!"), "gold");
+        assert_eq!(normalize_accent("café"), "gold");
+        // 首尾连字符、连续连字符
+        assert_eq!(normalize_accent("-red"), "gold");
+        assert_eq!(normalize_accent("red-"), "gold");
+        assert_eq!(normalize_accent("red--blue"), "gold");
+        // 超长 ID（>32）
+        assert_eq!(normalize_accent(&"x".repeat(33)), "gold");
     }
 }

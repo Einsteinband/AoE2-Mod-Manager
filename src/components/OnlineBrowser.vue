@@ -6,13 +6,31 @@ import PageShell from "./layout/PageShell.vue";
 import ModGrid from "./common/ModGrid.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import RenameDialog from "./RenameDialog.vue";
+import ContextMenu from "./common/ContextMenu.vue";
+import type { ContextMenuItem } from "./common/contextMenuTypes";
 import OnlineSidebar from "./online/OnlineSidebar.vue";
 import OnlineDetailPanel from "./online/OnlineDetailPanel.vue";
 import { onIndexProgress } from "../online/service";
-import { onTaskSettled, type DownloadTask } from "../online/downloadQueue";
-import { onImagesReady } from "../online/images";
-import { hydrateTranslations, translationLangEpoch } from "../online/translation";
+import { openModWebpage } from "../online/service";
+import { activeTaskOfMod, enqueueDownload, onTaskSettled, type DownloadTask } from "../online/downloadQueue";
+import { fetchImages, onImagesReady, onImagesFailed, syncCoverToInstall, type FailedImage } from "../online/images";
+import {
+  canTranslateText,
+  currentTargetLanguageName,
+  ensureTranslation,
+  hydrateTranslations,
+  isQueued,
+  isShowingOriginal,
+  isTranslating,
+  translationLangEpoch,
+  translationErrorKind,
+  translationOf,
+  toggleOriginal,
+} from "../online/translation";
 import { tagLabel, type OnlineMod } from "../online/types";
+import type { InstalledIndexEntry } from "../types";
+import { messageOf } from "../online/errors";
+import { plainText } from "../composables/online/useOnlineDetail";
 import { normalizeBackendError } from "../format";
 import {
   ensureSession,
@@ -23,8 +41,10 @@ import {
   sessionPhase,
   setStatusMessageKey,
 } from "../sessionState";
-import { ensureUserData, favoriteCount } from "../userData";
+import { customNameOf, ensureUserData, favoriteCount, isFavorite, setCustomName, setFavorite } from "../userData";
+import { rememberOnlineMeta } from "../favoriteMeta";
 import { useToast } from "../composables/useToast";
+import { useContextMenu } from "../composables/useContextMenu";
 import { useOnlineThumbs } from "../composables/online/useOnlineThumbs";
 import { useOnlineSelection } from "../composables/online/useOnlineSelection";
 import { useInstalledIndex } from "../composables/online/useInstalledIndex";
@@ -32,10 +52,11 @@ import { PAGE_SIZE, useOnlineList } from "../composables/online/useOnlineList";
 import { useOnlineDetail } from "../composables/online/useOnlineDetail";
 import { useOnlineFavorite } from "../composables/online/useOnlineFavorite";
 import { useOnlineInstall } from "../composables/online/useOnlineInstall";
+import { buildOnlineMenuItems } from "../composables/online/useOnlineModMenu";
 import { useOnlineSession } from "../composables/online/useOnlineSession";
 import { useIndexSync } from "../composables/online/useIndexSync";
 import { useLocalSearch } from "../composables/online/useLocalSearch";
-import { openExternalUrl } from "../api";
+import { getSettings, openExternalUrl, revealModFolder } from "../api";
 
 /**
  * 在线页入口：只做**组件协调 + 状态连接 + 生命周期**。
@@ -157,6 +178,7 @@ const {
   titleSub,
   sizeText,
   diskText,
+  fileCountText,
   ratingText,
   versionText,
   createdText,
@@ -218,6 +240,254 @@ const {
   closeRename,
   applyRename,
 } = favorite;
+
+// ---------------- 卡片右键上下文菜单（目标快照，不改选中态） ----------------
+const cardMenu = useContextMenu<OnlineMod>();
+const menuOpen = cardMenu.open;
+const menuX = cardMenu.x;
+const menuY = cardMenu.y;
+
+/** 页面层托管的备注弹窗（作用于快照；详情面板原弹窗保留不动） */
+const renameTarget = ref<OnlineMod | null>(null);
+const renameTargetBusy = ref(false);
+const renameTargetError = ref<string | null>(null);
+
+/** 目录 / 官网瞬时忙碌标记（按 modId） */
+const revealingId = ref<number | null>(null);
+const webOpeningId = ref<number | null>(null);
+
+function onCardContextMenu(mod: OnlineMod, event: MouseEvent | KeyboardEvent): void {
+  cardMenu.openAt(event, mod);
+}
+
+/** 从列表原始字段提取描述（与详情面板同一组键），无可用描述时返回空串 */
+function modDescriptionText(mod: OnlineMod): string {
+  const raw = mod.raw ?? {};
+  const value = raw.description ?? raw.modDescription;
+  return typeof value === "string" ? plainText(value) : "";
+}
+
+function translationErrorMessage(error: unknown): string {
+  switch (translationErrorKind(error)) {
+    case "network":
+      return t("translate.failNetwork");
+    case "busy":
+      return t("translate.failBusy");
+    case "quota":
+      return t("translate.failQuota");
+    case "not_ready":
+      return t("translate.notReady");
+    default:
+      return t("translate.failGeneric", { msg: messageOf(error) });
+  }
+}
+
+/**
+ * 在线卡片「已安装」标签统一读本机安装索引（磁盘事实）。
+ * 在线列表与收藏视图复用同一判断，不从页面 / 分类 / 服务端 userInstalled 推断。
+ */
+function installedEntryOf(modId: number): InstalledIndexEntry | null {
+  return installed.localIndex.value[modId] ?? null;
+}
+
+const onlineMenuItems = computed<ContextMenuItem[]>(() => {
+  const mod = cardMenu.target.value;
+  if (!mod) return [];
+  const id = mod.modId;
+  const entry = installed.localIndex.value[id] ?? null;
+  const task = activeTaskOfMod(id);
+  const busy = task !== null && (task.status === "installing" || task.status === "downloading");
+  const queued = task?.status === "queued";
+  const fav = id > 0 && isFavorite(id);
+  const offline = sessionPhase.value !== "online";
+  const cached = id > 0 && translationOf(id) !== null;
+  const showing = id > 0 && isShowingOriginal(id);
+  const translating = id > 0 && isTranslating(id);
+  const translatingQueued = id > 0 && isQueued(id);
+  const canText = id > 0 && canTranslateText(modDescriptionText(mod));
+
+  return buildOnlineMenuItems(
+    id,
+    {
+      entry,
+      taskStatus: busy ? (task?.status === "installing" ? "installing" : "downloading") : queued ? "queued" : null,
+      favorited: fav,
+      offline,
+      cachedTranslation: cached,
+      showingOriginal: showing,
+      translating,
+      queued: translatingQueued,
+      canText,
+    },
+    {
+      installLocal: t("online.installLocal"),
+      reinstallLocal: t("online.reinstallLocal"),
+      installing: t("online.installing"),
+      downloading: t("online.downloading"),
+      enqueued: t("downloader.enqueued"),
+      favorite: t("favorites.favorite"),
+      favorited: t("favorites.favorited"),
+      rename: t("favorites.rename"),
+      translateBusy: t("translate.busy"),
+      translateQueued: t("translate.queued"),
+      translateTrigger: t("translate.trigger", { lang: currentTargetLanguageName() }),
+      translateShowTranslated: t("translate.showTranslated", { lang: currentTargetLanguageName() }),
+      translateShowOriginal: t("translate.showOriginal"),
+      waitingHint: t("translate.waitingContent"),
+      openFolder: t("detail.openFolder"),
+      browseSite: t("detail.browseSite"),
+      offlineHint: t("online.offlineBlocked"),
+    },
+  );
+});
+
+async function onMenuSelect(itemId: string): Promise<void> {
+  const mod = cardMenu.target.value;
+  if (!mod) return;
+  const id = mod.modId;
+
+  switch (itemId) {
+    case "install": {
+      cardMenu.close();
+      if (sessionPhase.value !== "online") {
+        showToast(t("online.offlineBlocked"), "error");
+        return;
+      }
+      const entry = installed.localIndex.value[id] ?? null;
+      const result = enqueueDownload({
+        modId: id,
+        title: mod.title,
+        kind: entry ? "reinstall" : "install",
+        tagIds: mod.tagIds,
+        tagNames: mod.tagNames,
+        creator: mod.creator,
+        description: null,
+        thumbnail: mod.thumbnail,
+        wasSubscribed: mod.userInstalled === true,
+        force: false,
+      });
+      if (!result.accepted) {
+        showToast(t("downloader.alreadyQueued"), "error");
+        return;
+      }
+      showToast(t("downloader.addedToast", { title: mod.title }));
+      return;
+    }
+    case "favorite": {
+      if (id <= 0) return;
+      cardMenu.close();
+      await ensureUserData();
+      try {
+        const next = await setFavorite(id, !isFavorite(id));
+        if (next) rememberOnlineMeta(mod);
+        showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
+      } catch (e) {
+        showToast(normalizeBackendError(e), "error");
+      }
+      return;
+    }
+    case "rename": {
+      if (id <= 0) return;
+      cardMenu.close();
+      renameTargetError.value = null;
+      renameTarget.value = mod;
+      return;
+    }
+    case "translate": {
+      if (id <= 0) return;
+      cardMenu.close();
+      // 已有译文：只切原文 / 译文，不发请求
+      if (translationOf(id)) {
+        toggleOriginal(id);
+        return;
+      }
+      if (isTranslating(id) || isQueued(id)) return;
+      const desc = modDescriptionText(mod);
+      if (!canTranslateText(desc)) {
+        showToast(t("translate.notReady"), "error");
+        return;
+      }
+      try {
+        const tr = await ensureTranslation({ modId: id, title: mod.title ?? "" }, desc);
+        showToast(
+          tr.truncated
+            ? t("translate.truncated", { chars: tr.charCount })
+            : tr.cached
+              ? t("translate.fromCacheToast")
+              : t("translate.okToast"),
+        );
+      } catch (e) {
+        showToast(translationErrorMessage(e), "error");
+      }
+      return;
+    }
+    case "folder": {
+      cardMenu.close();
+      await revealMenuFolder(mod);
+      return;
+    }
+    case "website": {
+      cardMenu.close();
+      await openMenuWebpage(mod);
+      return;
+    }
+  }
+}
+
+async function revealMenuFolder(mod: OnlineMod): Promise<void> {
+  const entry = installed.localIndex.value[mod.modId];
+  if (!entry || revealingId.value !== null) return;
+  revealingId.value = mod.modId;
+  try {
+    const settings = await getSettings();
+    const root = (settings.modRoot ?? "").trim();
+    if (!root) {
+      showToast(t("detail.errReveal"), "error");
+      return;
+    }
+    const sep = root.includes("\\") ? "\\" : "/";
+    const base = root.endsWith(sep) ? root : root + sep;
+    await revealModFolder(`${base}${entry.kind}${sep}${entry.folderName}`);
+  } catch (e) {
+    showToast(`${t("detail.errReveal")}: ${normalizeBackendError(e)}`, "error");
+  } finally {
+    revealingId.value = null;
+  }
+}
+
+async function openMenuWebpage(mod: OnlineMod): Promise<void> {
+  if (mod.modId <= 0 || webOpeningId.value !== null) return;
+  webOpeningId.value = mod.modId;
+  try {
+    const url = await openModWebpage(mod.modId);
+    showToast(t("online.openedBrowser", { url }));
+  } catch (e) {
+    showToast(t("online.openFailed", { msg: normalizeBackendError(e) }), "error");
+  } finally {
+    webOpeningId.value = null;
+  }
+}
+
+async function applyMenuRename(name: string): Promise<void> {
+  const mod = renameTarget.value;
+  if (!mod || renameTargetBusy.value) return;
+  renameTargetBusy.value = true;
+  renameTargetError.value = null;
+  try {
+    await setCustomName(mod.modId, name);
+    renameTarget.value = null;
+    showToast(t("favorites.savedToast"));
+  } catch (e) {
+    renameTargetError.value = normalizeBackendError(e);
+  } finally {
+    renameTargetBusy.value = false;
+  }
+}
+
+function closeMenuRename(): void {
+  renameTarget.value = null;
+}
+
 
 const {
   session,
@@ -327,6 +597,50 @@ const translateNote = computed(() => (waitingDetail.value && !selectedTranslated
 /** 详情面板：封面 */
 const selectedThumb = computed(() => thumbs.thumbOf(selected.value));
 
+/** 当前手动「重新加载封面」的 Mod（用于把后台下载失败回执对应到本次重试） */
+const retryCoverModId = ref<number | null>(null);
+
+/**
+ * 详情封面重试：移除本地缓存映射以回退官网缩略图 URL，再走现有后台下载链路强制重下。
+ * force=true 仅用于手动刷新：Rust 先删除既有（可能损坏的）本地 jpg 再下载；
+ * 普通批量缩略图下载不传 force，缓存命中即跳过。不新建下载系统。
+ */
+function refreshSelectedCover(): void {
+  const mod = selected.value;
+  if (!mod) return;
+  retryCoverModId.value = mod.modId;
+  delete thumbs.localThumbs[mod.modId];
+  if (mod.thumbnail) {
+    // 诊断日志（非用户可见）：记录本次重试实际使用的官网 URL 与排队情况
+    console.debug("[封面重试] modId", mod.modId, "fallback/请求 URL", mod.thumbnail);
+    void fetchImages([{ modId: mod.modId, url: mod.thumbnail, force: true }]).catch((e) => {
+      console.warn("[封面重试] 排队失败", mod.modId, e);
+      retryCoverModId.value = null;
+    });
+  } else {
+    retryCoverModId.value = null;
+  }
+  // 已安装到本地的模组：把有效封面同步到模组目录 thumbnail.jpg（缓存复用复制 / 缺失下载写两处）
+  const entry = installedEntryOf(mod.modId);
+  if (entry) {
+    void syncCoverToInstall(mod.modId, entry.kind, entry.folderName, mod.thumbnail)
+      .then((outcome) =>
+        console.debug("[封面同步] modId", mod.modId, "status", outcome.status, "install", outcome.installPath),
+      )
+      .catch((e) => showToast(normalizeBackendError(e), "error"));
+  }
+}
+
+/** 后台封面下载失败回执：仅把本次手动重试对应的失败提示为「下载失败」 */
+function handleImagesFailed(images: FailedImage[]): void {
+  for (const item of images) {
+    if (retryCoverModId.value === item.modId) {
+      retryCoverModId.value = null;
+      showToast(t("detail.coverDownloadFailed"), "error");
+    }
+  }
+}
+
 // ---------------- 交互 ----------------
 
 /** 列表一变就把已缓存的译文接回来（**只读缓存，零网络**） */
@@ -374,6 +688,7 @@ defineExpose({ refresh: manualRefresh });
 
 let unlisten: (() => void) | null = null;
 let unlistenImages: (() => void) | null = null;
+let unlistenImagesFailed: (() => void) | null = null;
 let unlistenIndex: (() => void) | null = null;
 let observer: IntersectionObserver | null = null;
 let scrollHandler: (() => void) | null = null;
@@ -528,8 +843,15 @@ async function boot(): Promise<void> {
   // ① 先渲染缓存（内部就是一次 invoke，命中就立刻出卡片，绝不转圈；缓存命中不联网）
   await reload(false);
 
-  // ①b 订阅「封面已落地」事件：后台下完一批就把本地 asset URL 补进映射
-  unlistenImages = await onImagesReady(thumbs.applyImages);
+  // ①b 订阅「封面已落地」事件：后台下完一批就把本地 asset URL 补进映射；
+  // 本次手动重试成功落地后清掉重试标记。
+  unlistenImages = await onImagesReady((images) => {
+    thumbs.applyImages(images);
+    for (const item of images) {
+      if (retryCoverModId.value === item.modId) retryCoverModId.value = null;
+    }
+  });
+  unlistenImagesFailed = await onImagesFailed(handleImagesFailed);
 
   // ② 静默校验登录态：App.vue 启动时已发起，这里复用同一个 Promise（并发去重）
   const online = await ensureSession();
@@ -569,6 +891,7 @@ onUnmounted(() => {
   stopIndexPoll();
   if (unlisten) unlisten();
   if (unlistenImages) unlistenImages();
+  if (unlistenImagesFailed) unlistenImagesFailed();
   if (unlistenIndex) unlistenIndex();
 });
 </script>
@@ -846,7 +1169,9 @@ onUnmounted(() => {
             :mod="mod"
             :thumb="thumbs.thumbOf(mod)"
             :active="selected?.modId === mod.modId"
+            :installed="installedEntryOf(mod.modId) !== null"
             @select="selectMod"
+            @context-menu="onCardContextMenu"
           />
         </template>
 
@@ -898,6 +1223,7 @@ onUnmounted(() => {
         :rename-busy="renameBusy"
         :rating-text="ratingText"
         :size-text="sizeText"
+        :file-count-text="fileCountText"
         :disk-text="diskText"
         :version-text="versionText"
         :created-text="createdText"
@@ -923,6 +1249,7 @@ onUnmounted(() => {
         :detail-uncached="detailUncached"
         v-model:need-force="needForce"
         v-model:force-overwrite="forceOverwrite"
+        @refresh-cover="refreshSelectedCover"
         @translate="onTranslateClick"
         @toggle-favorite="toggleFavorite"
         @rename="openRename"
@@ -963,6 +1290,27 @@ onUnmounted(() => {
       :error="deleteError"
       @confirm="confirmDeleteLocal"
       @cancel="cancelDeleteLocal"
+    />
+
+    <!-- 卡片右键：备注名弹窗（作用于快照 Mod，与详情面板弹窗互不影响） -->
+    <RenameDialog
+      v-if="renameTarget"
+      :original="renameTarget.title"
+      :initial="customNameOf(renameTarget.modId)"
+      :busy="renameTargetBusy"
+      :error="renameTargetError"
+      @save="applyMenuRename"
+      @cancel="closeMenuRename"
+    />
+
+    <!-- 卡片右键上下文菜单（fixed 浮层；关闭逻辑由共享组件统一处理） -->
+    <ContextMenu
+      v-if="menuOpen"
+      :x="menuX"
+      :y="menuY"
+      :items="onlineMenuItems"
+      @select="onMenuSelect"
+      @close="cardMenu.close"
     />
 
     </template>

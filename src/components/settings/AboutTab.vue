@@ -2,8 +2,12 @@
 /**
  * 关于 Tab：版本信息 + 更新检查 + 更新历史 + 诊断工具
  *
- * 自包含：自己加载版本、检查更新、拉取历史、复制诊断信息。
+ * 自包含：自己加载版本、检查更新、读取内置历史、复制诊断信息。
  * 冷却时间 lastCheckMs 保持模块作用域，切 Tab 不绕过。
+ *
+ * 「更新历史」与「检查更新」是两条互不相干的路径：
+ * - 历史：随包构建的本地记录（src/releaseHistory.ts），展开即渲染，不发网络请求；
+ * - 检查更新：仍走后端 checkUpdate（GitHub Releases API），失败只影响那一行状态。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
@@ -11,13 +15,12 @@ import {
   appVersion,
   checkUpdate,
   diagnosticsInfo,
-  fetchGithubReleases,
   openExternalUrl,
   openLogsDir,
   renderReleaseMarkdown,
 } from "../../api";
-import type { GithubRelease } from "../../api";
 import { msgText, normalizeBackendError, type Msg } from "../../format";
+import { releaseHistory, type ReleaseHistoryEntry } from "../../releaseHistory";
 import type { UpdateInfo } from "../../types";
 
 const { t } = useI18n();
@@ -137,40 +140,20 @@ async function openCloud(): Promise<void> {
   }
 }
 
-// ---------------- 更新历史 ----------------
+// ---------------- 更新历史（内置数据，展开即渲染） ----------------
 const historyOpen = ref(false);
-const historyLoading = ref(false);
-const historyError = ref<string | null>(null);
-const history = ref<GithubRelease[]>([]);
-let historyLoaded = false;
+/** 随包构建的本地记录；不排序、不请求网络，顺序由 RELEASE_NOTES.md 决定 */
+const history: ReleaseHistoryEntry[] = releaseHistory;
 
-async function toggleHistory(): Promise<void> {
+function toggleHistory(): void {
   historyOpen.value = !historyOpen.value;
-  if (!historyOpen.value) return;
-  if (historyLoaded || historyLoading.value) return;
-  await loadHistory();
 }
 
-async function loadHistory(): Promise<void> {
-  historyLoading.value = true;
-  historyError.value = null;
-  try {
-    const list = await fetchGithubReleases();
-    history.value = [...list].sort((a, b) =>
-      String(b.publishedAt ?? "").localeCompare(String(a.publishedAt ?? "")),
-    );
-    historyLoaded = true;
-  } catch (e) {
-    historyError.value = normalizeBackendError(e);
-  } finally {
-    historyLoading.value = false;
-  }
-}
-
-/** ISO8601 → 本地 YYYY-MM-DD（解析失败就直接截前 10 位） */
+/** 内置记录里的日期已经是 YYYY-MM-DD；只有旧数据是 ISO 时间时才换算成本地日期 */
 function formatReleaseDate(value: string): string {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
   const ts = Date.parse(raw);
   if (Number.isNaN(ts)) return raw.slice(0, 10);
   const d = new Date(ts);
@@ -379,16 +362,7 @@ onBeforeUnmount(() => {
     </div>
 
     <div v-if="historyOpen" class="about-history">
-      <p v-if="historyLoading" class="about-history-note">
-        {{ t("settings.changelogLoading") }}
-      </p>
-      <p v-else-if="historyError" class="about-history-note error">
-        {{ historyError }}
-        <button type="button" class="about-history-retry" @click="loadHistory">
-          {{ t("settings.changelogRetry") }}
-        </button>
-      </p>
-      <template v-else-if="history.length">
+      <template v-if="history.length">
         <article v-for="release in history" :key="release.tagName" class="about-history-item">
           <header class="about-history-item-head">
             <span class="about-history-version">v{{ release.version || release.tagName }}</span>
@@ -507,15 +481,6 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: calc(11.5px * var(--global-scale));
   color: var(--muted);
-}
-.about-history-note.error {
-  color: var(--danger-text);
-}
-.about-history-retry {
-  margin-left: 8px;
-  padding: 2px 8px;
-  font-size: calc(11px * var(--global-scale));
-  cursor: pointer;
 }
 .about-history-item {
   padding: 10px;

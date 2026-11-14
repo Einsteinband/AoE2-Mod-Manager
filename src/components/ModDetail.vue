@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry, ModStats, ModUpdateItem } from "../types";
-import { deleteModFiles, fileUrl, revealModFolder, toggleModEnabled } from "../api";
+import { deleteModFiles, fileUrl, refreshLocalCover, revealModFolder, toggleModEnabled } from "../api";
 import { activeTaskOfMod, latestTaskOfMod } from "../online/downloadQueue";
 import {
   formatBytes,
@@ -58,17 +58,19 @@ const emit = defineEmits<{
   (e: "download"): void;
   /** 数据模组的启用请求：互斥裁决在父组件，详情页自己不动磁盘 */
   (e: "request-enable", payload: { id: string }): void;
+  /** 本地封面已由 Rust 写入 Mod 文件夹：父组件局部更新 thumbnail 路径 */
+  (e: "cover-updated", payload: { id: string; path: string }): void;
 }>();
 
 const { t } = useI18n();
 
 const imgFailed = ref(false);
-/** 封面重试阶段：本地模组无网络下载源，只有重新加载 / 完成 / 失败 */
+/** 封面恢复阶段：请求官方 Detail / 下载图片 / 写入目录 / 完成 / 失败 */
 type CoverStage = "idle" | "reloading" | "done" | "failed";
 const coverStage = ref<CoverStage>("idle");
-/** 封面重新加载中：防止短时间重复点击 */
+/** 封面恢复中：防止短时间重复点击触发并发下载 */
 const coverReloading = computed(() => coverStage.value === "reloading");
-/** 强制 <img> 重建重渲同一资源（本地文件 / 缓存 asset URL 无网络重下链路） */
+/** 成功写入后强制 <img> 重建，读取新的本地 thumbnail 文件 */
 const coverReloadKey = ref(0);
 const revealing = ref(false);
 const revealError = ref<string | null>(null);
@@ -462,10 +464,9 @@ const coverUrl = computed(() => {
   return props.mod.thumbnail ? fileUrl(props.mod.thumbnail) : null;
 });
 
-/** 封面加载成功：结束重试态并提示已更新 */
+/** 封面加载成功：结束重试态；成功只在封面区域内部体现，不再弹成功 Toast */
 function onCoverLoad(): void {
   coverStage.value = "done";
-  showToast(t("detail.coverUpdated"));
 }
 
 /** 封面加载失败：回到失败态，按钮保留可再次点击 */
@@ -475,18 +476,39 @@ function onCoverError(): void {
   showToast(t("detail.coverLoadFailed"), "error");
 }
 
-/** 重新尝试读取现有封面资源；本地模组无网络下载链路，仅强制重渲 */
-function reloadCover(): void {
+/** 本地详情：按官方 Mod ID 请求 Detail、下载有效图片并写入当前 Mod 文件夹 */
+async function refreshCover(): Promise<void> {
   if (coverReloading.value) return;
-  imgFailed.value = false;
-  // 清失败态后仍无资源（本地确实缺文件 / 无缓存 URL）：给出获取失败提示，按钮保持可点
-  if (!coverUrl.value) {
+  if (uninstalled.value) {
     coverStage.value = "failed";
-    showToast(t("detail.coverFetchFailed"), "error");
+    showToast(t("detail.coverNoOfficialId"), "error");
     return;
   }
+
+  const modId = props.mod.workshopId;
+  if (!modId || modId <= 0) {
+    coverStage.value = "failed";
+    showToast(t("detail.coverNoOfficialId"), "error");
+    return;
+  }
+
   coverStage.value = "reloading";
-  coverReloadKey.value += 1;
+  try {
+    const result = await refreshLocalCover(modId, props.mod.kind, props.mod.folderName);
+    if (!result.installPath) {
+      throw new Error("aoe2mm:err:cover.syncFailed");
+    }
+    emit("cover-updated", { id: props.mod.id, path: result.installPath });
+    imgFailed.value = false;
+    coverReloadKey.value += 1;
+    coverStage.value = "done";
+    showToast(t("detail.coverUpdated"), "ok");
+  } catch (e) {
+    coverStage.value = "failed";
+    showToast(translateBackendMessage(errorText(e, "cover.syncFailed")), "error");
+  } finally {
+    coverStage.value = coverStage.value === "reloading" ? "idle" : coverStage.value;
+  }
 }
 
 watch(
@@ -512,10 +534,6 @@ watch(
 <template>
   <div class="detail-header">
     <h2>{{ t("detail.title") }}</h2>
-    <span class="badge" :class="'source-' + mod.source">
-      {{ sourceLabel(mod.source) }}
-    </span>
-    <span class="badge" :class="mod.kind === 'local' ? 'local' : 'sub'">{{ kindLabel(mod.kind) }}</span>
   </div>
 
   <div class="detail-body">
@@ -536,15 +554,36 @@ watch(
           {{ t("detail.coverMissingDetail") }}
         </div>
         <button
-          v-if="!coverUrl || imgFailed"
+          v-if="!uninstalled && (!coverUrl || imgFailed)"
           type="button"
           class="cover-reload-btn"
           :disabled="coverReloading"
           :aria-label="t('detail.refreshCover')"
+          :aria-busy="coverReloading"
           :title="t('detail.refreshCoverHint')"
-          @click="reloadCover"
+          @click="refreshCover"
         >
-          <span :class="{ 'is-spinning': coverReloading }" aria-hidden="true">🔄</span>
+          <svg
+            :class="{ 'is-spinning': coverReloading }"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path
+              d="M20 12a8 8 0 1 1-2.34-5.66"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+            <path
+              d="M20 3v4h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
         </button>
       </div>
       <p v-if="coverStage === 'reloading'" class="cover-status">{{ t("detail.coverReloading") }}</p>
@@ -553,6 +592,8 @@ watch(
       <div v-if="titleSub" class="detail-title-orig">{{ titleSub }}</div>
 
       <div class="detail-badges">
+        <span class="badge" :class="'source-' + mod.source">{{ sourceLabel(mod.source) }}</span>
+        <span class="badge" :class="mod.kind === 'local' ? 'local' : 'sub'">{{ kindLabel(mod.kind) }}</span>
         <span v-if="conflictHint" class="conflict-badge">{{ conflictHint }}</span>
         <span v-for="tag in mod.contentTags" :key="tag" class="badge">{{ localizedTagName(tag) }}</span>
       </div>
@@ -755,6 +796,14 @@ watch(
       </div>
       <div v-else-if="mod.enabled === null" class="path-actions">
         <span class="path-error">{{ t("detail.statusNoRecord") }}</span>
+      </div>
+      <!-- 加载优先级（只读）：数值来自 mod-status.json 的 Priority（scan → ModEntry.priority）。
+           调整加载顺序走工具栏「排序」模式，详情内不提供修改控件。 -->
+      <div class="field">
+        <span class="k">{{ t("detail.priority") }}</span>
+        <span class="v" :class="{ missing: mod.priority === null }">
+          {{ mod.priority ?? t("labels.unknown") }}
+        </span>
       </div>
       <div v-if="mod.issues.length" class="dv-issues">
         <h5 class="dv-sub-title">{{ t("detail.dataIssues") }}</h5>

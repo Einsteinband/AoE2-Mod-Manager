@@ -102,6 +102,16 @@ export function useLocalScan() {
     );
   }
 
+  /** 封面写入成功后的局部刷新：只更新这一条记录的磁盘封面路径，不重扫目录。 */
+  function patchModCover(id: string, path: string): void {
+    const list = report.value?.mods;
+    if (!list) return;
+    const mod = list.find((m) => m.id === id);
+    if (!mod) return;
+    mod.thumbnail = path;
+    mod.coverUrl = null;
+  }
+
   /** 引导完成：后端已写入 settings.json 并吐回完整扫描结果 */
   function handleWizardDone(next: ScanReport): void {
     report.value = next;
@@ -129,6 +139,7 @@ export function useLocalScan() {
     refresh,
     chooseRoot,
     patchModEnabled,
+    patchModCover,
     handleWizardDone,
   };
 }

@@ -589,7 +589,10 @@ async function runTask(task: DownloadTask): Promise<void> {
           ? e.message
           : String(e);
       const looksModRemoved = /invalid download url|relative url/i.test(rawMessage);
-      const looksOverwriteRequired = rawMessage.startsWith("aoe2mm:err:install.overwriteRequired");
+      // Rust 实际发射的是 install.targetExistsForeign（install.rs：目标目录存在且不是本工具装的、
+      // 且调用方没传 force）。旧代码判 install.overwriteRequired —— Rust 全仓从不存在该码，
+      // 结果是「强制覆盖」按钮永远不出现，用户只能反复失败。
+      const looksOverwriteRequired = rawMessage.startsWith("aoe2mm:err:install.targetExistsForeign");
       const message = messageOf(e);
       task.status = "failed";
       task.error = looksModRemoved ? translate("downloader.modRemoved") : message;

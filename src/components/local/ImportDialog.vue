@@ -125,7 +125,7 @@ function formatBytes(bytes: number): string {
       <div class="import-dialog">
         <div class="import-header">
           <h3>{{ t("import.title") }}</h3>
-          <button class="import-close" @click="close" aria-label="Close">✕</button>
+          <button class="import-close" @click="close" :aria-label="t('common.close')">✕</button>
         </div>
 
         <div class="import-body">

@@ -508,6 +508,57 @@ fn find_thumbnail(dir: &Path) -> Option<String> {
     None
 }
 
+/// 列表扫描阶段的目录字节统计：返回 `(字节总量, 是否完整)`。
+///
+/// 规则与详情统计 `dir_stats` 一致：只累加普通文件元数据长度；空目录为 0 且完整。
+/// 符号链接目录/文件直接跳过，避免循环遍历或重复统计。任一目录、文件元数据不可读，
+/// 或达到文件数上限时返回 `(None, false)`，不把部分总量伪装成完整大小。
+fn list_dir_size(root: &Path) -> (Option<u64>, bool) {
+    const MAX_FILES: u64 = 500_000;
+    let mut stack = vec![root.to_path_buf()];
+    let mut size: u64 = 0;
+    let mut file_count: u64 = 0;
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => return (None, false),
+        };
+
+        for entry in entries.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => return (None, false),
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => return (None, false),
+            };
+            size = match size.checked_add(metadata.len()) {
+                Some(next) => next,
+                None => return (None, false),
+            };
+            file_count += 1;
+            if file_count >= MAX_FILES {
+                return (None, false);
+            }
+        }
+    }
+
+    (Some(size), true)
+}
+
 fn collect_entry(
     kind: &str,
     dir: &Path,
@@ -598,6 +649,7 @@ fn collect_entry(
 
     // 数据模组判定：与分类来源无关，必须每次都做（官方标签里也可能有 Data Mod）
     let is_data_mod = detect_data_mod(dir);
+    let (size_bytes, size_complete) = list_dir_size(dir);
 
     ModEntry {
         id: format!("{kind}:{folder_name}"),
@@ -625,6 +677,8 @@ fn collect_entry(
         issues,
         info_json_present: info_read.info.is_some(),
         is_data_mod,
+        size_bytes,
+        size_complete,
     }
 }
 
@@ -986,6 +1040,52 @@ mod tests {
         fs::write(dir.join("widgetui/layouts/hud.json"), "{}").unwrap();
         let probe = probe_dir(&dir);
         assert_eq!(probe.categories(), vec!["ui".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_dir_size_counts_nested_regular_files_and_empty_dir() {
+        let empty = temp_mod_dir("size-empty");
+        assert_eq!(list_dir_size(&empty), (Some(0), true));
+        let _ = fs::remove_dir_all(&empty);
+
+        let dir = temp_mod_dir("size-nested");
+        fs::create_dir_all(dir.join("resources/sound")).unwrap();
+        fs::write(dir.join("info.json"), "{}").unwrap();
+        fs::write(dir.join("top.bin"), "abc").unwrap();
+        fs::write(dir.join("resources/sound/deep.bin"), "").unwrap();
+        fs::write(dir.join("resources/sound/mid.bin"), "de").unwrap();
+
+        assert_eq!(list_dir_size(&dir), (Some(7), true));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_dir_size_marks_missing_root_incomplete() {
+        let missing = Path::new(r"Z:\aoe2mm-definitely-missing-size-root");
+        assert_eq!(list_dir_size(missing), (None, false));
+    }
+
+    #[test]
+    fn collect_entry_reports_complete_list_size() {
+        let dir = temp_mod_dir("collect-size");
+        let mod_dir = dir.join("subscribed/9001_Size Mod");
+        fs::create_dir_all(mod_dir.join("sub")).unwrap();
+        fs::write(mod_dir.join("info.json"), "{}").unwrap();
+        fs::write(mod_dir.join("a.bin"), "abc").unwrap();
+        fs::write(mod_dir.join("sub/b.bin"), "de").unwrap();
+
+        let entry = collect_entry(
+            "subscribed",
+            &mod_dir,
+            "9001_Size Mod",
+            &HashMap::new(),
+            &Store::default(),
+            &mut Vec::new(),
+        );
+
+        assert_eq!(entry.size_bytes, Some(7));
+        assert!(entry.size_complete);
         let _ = fs::remove_dir_all(&dir);
     }
 

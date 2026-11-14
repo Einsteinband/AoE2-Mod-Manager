@@ -30,11 +30,24 @@ import {
 } from "../sessionState";
 
 /**
- * v0.4.7：右侧的「本地 N 个」与「本地/在线」两枚标签已移除 —— 当前页面本身已经说明
- * 自己在哪个模式，模组总数在顶栏也有，这里属于重复信息。
- * 仍保留声明：不改 App.vue 的调用签名，多余 prop 无害。
+ * 右侧统计组（原顶部 rootbar 五项，2026-11-13 迁移到底栏右侧）：
+ * 根目录 / 本地数 / 已订阅数 / 显示数·总数 / 上次扫描时间；仅本地模式显示。
+ * 数据全部由 App.vue 从 LocalBrowser expose 透传，这里不重复建统计状态。
  */
-defineProps<{ localCount: number; mode: "local" | "online" }>();
+defineProps<{
+  localCount: number;
+  mode: "local" | "online";
+  /** 游戏根目录路径（长路径截断，悬停看全量） */
+  rootPath?: string;
+  subscribedCount?: number;
+  showingCount?: number;
+  totalCount?: number;
+  scannedAt?: string;
+  warningCount?: number;
+}>();
+const emit = defineEmits<{
+  (event: "toggle-warnings"): void;
+}>();
 const { t } = useI18n();
 
 const root = ref<HTMLElement | null>(null);
@@ -396,7 +409,28 @@ onBeforeUnmount(() => {
     <span class="sb-mid" :title="middleText">{{ middleText }}</span>
 
     <span class="sb-right">
-      <!-- v0.4.7：只保留代理链路；「本地 N 个」与「本地/在线」两枚标签已移除 -->
+      <!-- 本地页统计组：原顶部 rootbar 五项迁移至此；在线模式不显示 -->
+      <span v-if="mode === 'local'" class="sb-stats">
+        <span class="sb-stat sb-root" :title="rootPath || t('rootbar.notSet')">
+          <span class="sb-stat-label">{{ t("rootbar.root") }}</span>
+          <span class="sb-stat-value">{{ rootPath || t("rootbar.notSet") }}</span>
+        </span>
+        <span class="sb-stat">{{ t("rootbar.local", { n: localCount }) }}</span>
+        <span class="sb-stat" data-collapsible>{{ t("rootbar.subscribed", { n: subscribedCount ?? 0 }) }}</span>
+        <span class="sb-stat">
+          {{ t("rootbar.showing", { shown: showingCount ?? 0, total: totalCount ?? 0 }) }}
+        </span>
+        <span class="sb-stat" data-collapsible>{{ t("rootbar.scannedAt", { time: scannedAt ?? "" }) }}</span>
+        <button
+          v-if="(warningCount ?? 0) > 0"
+          type="button"
+          class="sb-stat sb-warn"
+          @click="emit('toggle-warnings')"
+        >
+          ⚠ {{ t("rootbar.warnings", { n: warningCount ?? 0 }) }}
+        </button>
+      </span>
+      <!-- 代理链路 -->
       <span v-if="proxyText" class="sb-pill">{{ proxyText }}</span>
     </span>
   </footer>
@@ -416,10 +450,11 @@ onBeforeUnmount(() => {
   color: var(--muted);
   background: linear-gradient(180deg, var(--statusbar-top), var(--statusbar-bottom));
   border-top: 1px solid var(--line-soft);
-  box-shadow: inset 0 1px 0 rgba(var(--accent-rgb), 0.12);
   user-select: none;
+  /* 去掉原来 12% 强调色的顶部内高光：底栏是中性信息区，不随 Accent Color 变色 */
 }
 
+/* 账号与网络区不继承强调色：正文用常规文字色，状态用语义色，其余一律中性 */
 .sb-account {
   flex: 0 0 auto;
   display: inline-flex;
@@ -430,21 +465,28 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 0;
   background: transparent;
-  color: var(--parch-dim);
+  color: var(--parch);
   font-size: calc(11.5px * var(--global-scale));
   font-weight: var(--ui-font-weight-strong);
   letter-spacing: normal;
   cursor: pointer;
 }
 .sb-account:hover {
-  color: var(--gold-bright);
-  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--text-bright);
+  background: var(--bg-hover);
+}
+.sb-account:active {
+  background: var(--bg-panel-hi);
+}
+/* 全局 focus-visible 用的是 --accent-dim（会随强调色变），这里改回中性描边 */
+.sb-account:focus-visible {
+  outline-color: var(--text-soft);
 }
 .sb-account.online {
-  color: var(--gold);
+  color: var(--ok-text);
 }
 .sb-account.checking {
-  color: var(--gold-dim);
+  color: var(--muted);
 }
 .sb-account.offline {
   color: var(--muted);
@@ -477,7 +519,7 @@ onBeforeUnmount(() => {
   letter-spacing: calc(0.3px * var(--ui-tracking));
 }
 .sb-state.online {
-  color: var(--gold-dim);
+  color: var(--ok-text);
 }
 .sb-state.error {
   color: var(--danger-text);
@@ -521,6 +563,50 @@ onBeforeUnmount(() => {
   color: var(--gold-dim);
 }
 
+/* 右侧统计组（原顶部 rootbar 五项）：紧凑横排，长路径截断 + 悬停全量 */
+.sb-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.sb-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--parch-dim);
+  font-size: calc(10.5px * var(--global-scale));
+  white-space: nowrap;
+}
+.sb-root {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sb-root .sb-stat-label {
+  color: var(--muted);
+}
+.sb-root .sb-stat-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sb-warn {
+  padding: 1px 8px;
+  border: 1px solid rgba(var(--danger-rgb), 0.55);
+  border-radius: 999px;
+  background: rgba(var(--danger-rgb), 0.1);
+  color: var(--danger-text);
+  font-size: calc(10px * var(--global-scale));
+  cursor: pointer;
+}
+/* 窄窗口：隐藏订阅数与扫描时间等次要文字，根目录与本地/显示计数保留，避免与左侧状态重叠 */
+@media (max-width: 920px) {
+  .sb-stats .sb-stat[data-collapsible] {
+    display: none;
+  }
+}
+
 /* 登录弹层：向上弹出，不挤压布局 */
 .sb-menu {
   position: fixed;
@@ -552,7 +638,8 @@ onBeforeUnmount(() => {
   line-height: 1.5;
   word-break: break-word;
 }
-/* v3.3：平台选项已收敛为单一微软 / Xbox 入口，所以不再需要 hover / active 态 */
+/* v3.3：平台选项已收敛为单一微软 / Xbox 入口，所以不再需要 hover / active 态。
+   这里只是账号来源说明，不是强调控件，故走中性边框与中性文字。 */
 .sb-menu-platform {
   display: flex;
   flex-direction: column;
@@ -560,14 +647,14 @@ onBeforeUnmount(() => {
   width: 100%;
   margin-bottom: 6px;
   padding: 7px 9px;
-  border: 1px solid var(--gold);
+  border: 1px solid var(--line);
   border-radius: 3px;
-  background: linear-gradient(180deg, var(--item-active-top), var(--bg-hover));
+  background: var(--bg-panel);
   text-align: left;
 }
 .sb-menu-label {
   font-size: calc(12px * var(--global-scale));
-  color: var(--gold-bright);
+  color: var(--parch);
 }
 .sb-menu-hint {
   font-size: calc(10px * var(--global-scale));
@@ -604,11 +691,12 @@ onBeforeUnmount(() => {
   padding: 6px 8px;
   font-size: calc(11px * var(--global-scale));
 }
+/* 普通状态说明走中性；错误态由 `.err` 覆盖为语义红 */
 .sb-menu-note {
   margin-top: 8px;
   font-size: calc(10.5px * var(--global-scale));
   line-height: 1.6;
-  color: var(--gold);
+  color: var(--parch-dim);
   word-break: break-all;
 }
 .sb-menu-note.err {

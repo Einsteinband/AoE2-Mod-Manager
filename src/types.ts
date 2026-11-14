@@ -45,6 +45,10 @@ export interface ModEntry {
   infoJsonPresent: boolean;
   /** 数据模组：模组内含游戏核心数据库文件（如 empires2_x2_p1.dat），同一时间只能启用一个 */
   isDataMod: boolean;
+  /** 列表扫描统计到的普通文件字节总量；不完整或不可读时为 null */
+  sizeBytes: number | null;
+  /** 大小统计是否完整；false 时不得按真实字节参与排序 */
+  sizeComplete: boolean;
   /**
    * v0.6：占位条目 —— 只存在于「我的收藏」里的已卸载 / 未安装模组。
    * true 时 path / folderName 为空，enabled 恒为 null，点击卡片走“下载并安装”，不打开本地详情。
@@ -321,7 +325,7 @@ export interface PriorityOutcome {
 }
 
 export type StatusFilter = "all" | "enabled" | "disabled" | "unknown";
-export type SortKey = "name" | "updated" | "priority" | "folder" | "download";
+export type SortKey = "name" | "updated" | "priority" | "folder" | "download" | "size";
 
 /** v0.4：GitHub 最新 Release 的检测结果（Rust 侧已比对好版本号） */
 export interface UpdateInfo {

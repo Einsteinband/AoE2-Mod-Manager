@@ -79,6 +79,8 @@ function setView(next: "grid" | "list") {
   line-height: 1;
   letter-spacing: calc(0.8px * var(--ui-tracking));
   white-space: nowrap;
+  flex: 0 0 auto;
+  flex-shrink: 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -105,16 +107,5 @@ function setView(next: "grid" | "list") {
 }
 .view-switch .view-btn:active {
   transform: none;
-}
-
-/* 窄窗口：只显示图标，隐藏文字 */
-@media (max-width: 920px) {
-  .view-switch .view-text {
-    display: none;
-  }
-  .view-switch .view-btn {
-    width: 28px;
-    padding: 0;
-  }
 }
 </style>

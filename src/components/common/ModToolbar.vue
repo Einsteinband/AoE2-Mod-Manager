@@ -80,6 +80,18 @@ const showClear = computed(() =>
   props.clearVisible === undefined ? search.value.length > 0 : props.clearVisible,
 );
 
+const isDescending = computed(() => order.value === "DESC");
+const orderToggleTitle = computed(() => {
+  if (!props.orderLabels) return props.orderTitle;
+  const current = isDescending.value ? props.orderLabels.desc : props.orderLabels.asc;
+  const next = isDescending.value ? props.orderLabels.asc : props.orderLabels.desc;
+  return t("online.orderToggleTitle", { current, next });
+});
+
+function toggleOrder(): void {
+  order.value = isDescending.value ? "ASC" : "DESC";
+}
+
 function clearSearch() {
   search.value = "";
   emit("clear");
@@ -88,7 +100,10 @@ function clearSearch() {
 
 <template>
   <div class="mod-toolbar">
-    <div class="search-box" :class="{ 'official-search': submitMode }">
+    <div
+      class="search-box"
+      :class="{ 'official-search': submitMode, 'has-order': Boolean(orderLabels) }"
+    >
       <span class="glyph">⌕</span>
       <input
         v-model="search"
@@ -97,8 +112,38 @@ function clearSearch() {
         :title="searchTitle"
         :disabled="searchDisabled"
         spellcheck="false"
-        @keyup.enter="emit('submit')"
+        @keyup.enter="submitMode && emit('submit')"
       />
+      <button
+        v-if="orderLabels"
+        class="order-toggle"
+        type="button"
+        :aria-pressed="isDescending"
+        :title="orderToggleTitle"
+        :aria-label="orderToggleTitle"
+        @click="toggleOrder"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path
+            v-if="isDescending"
+            d="M8 2v11M3.5 8.5 8 13l4.5-4.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <path
+            v-else
+            d="M8 14V3M3.5 7.5 8 3l4.5 4.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
       <button
         v-if="showClear"
         class="clear"
@@ -121,11 +166,6 @@ function clearSearch() {
         </option>
       </select>
 
-      <select v-if="orderLabels" v-model="order" :title="orderTitle">
-        <option value="DESC">{{ orderLabels.desc }}</option>
-        <option value="ASC">{{ orderLabels.asc }}</option>
-      </select>
-
       <!-- 页面专属按钮：固定插在排序之后、视图切换之前，两个页面占位顺序一致 -->
       <slot name="extra" />
 
@@ -143,32 +183,60 @@ function clearSearch() {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 本地 / 在线共用同一中栏：外层面板按同一 flex 权重占用剩余空间，
+     内部搜索框再吸收剩余宽度，避免两个页面因控件内在宽度不同形成外宽漂移。 */
+  flex: 1 1 auto;
   flex-wrap: nowrap;
   min-width: 0;
   overflow: visible;
 }
+/* 搜索框是唯一的弹性空间承担者：优先收缩搜索，操作按钮不参与压缩；
+   96px 为保证输入框可辨识的最小宽度，不再按固定视口断点分档。 */
 .mod-toolbar .search-box {
   flex: 1 1 180px;
-  min-width: 140px;
+  min-width: 96px;
   max-width: 480px;
 }
-/* 窄窗口：搜索框缩到最小 */
-@media (max-width: 1000px) {
-  .mod-toolbar .search-box {
-    flex: 1 1 120px;
-    min-width: 100px;
-    max-width: 320px;
-  }
+.mod-toolbar .search-box.has-order {
+  min-width: 112px;
 }
-@media (max-width: 820px) {
-  .mod-toolbar .search-box {
-    flex: 1 1 80px;
-    min-width: 80px;
-    max-width: 200px;
-  }
+.mod-toolbar .search-box.has-order input {
+  padding-right: 72px;
+}
+.mod-toolbar .search-box.has-order .clear {
+  right: 38px;
+}
+.mod-toolbar .search-box input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.mod-toolbar .search-box .order-toggle {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  margin: 0 6px 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-text);
+  background: var(--bg-panel-deep);
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.mod-toolbar .search-box .order-toggle[aria-pressed="true"] {
+  color: var(--accent-bright);
+  background: rgba(var(--accent-rgb), 0.16);
+  border-color: var(--accent);
+}
+.mod-toolbar .search-box .order-toggle svg {
+  width: 16px;
+  height: 16px;
 }
 .mod-toolbar .toolbar {
   flex: 0 0 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -181,16 +249,12 @@ function clearSearch() {
   min-width: 70px;
   max-width: 120px;
 }
-/* extra 插槽里的按钮也不收缩 */
+/* extra 插槽里的按钮不收缩，保持常驻图标按钮宽度（Refresh / Rescan 必须始终可点）；
+   文字不换行、不被省略号截断，图标化只由顶栏明确的布局状态切换 */
 .mod-toolbar .toolbar ::slotted(button) {
   flex: 0 0 auto;
+  min-width: 36px;
   white-space: nowrap;
-}
-/* 窗口较窄时搜索框仍可缩到 css 里的 120px 下限，工具栏整体不换行 */
-@media (max-width: 1100px) {
-  .mod-toolbar .search-box {
-    flex: 1 1 150px;
-    max-width: none;
-  }
+  overflow: visible;
 }
 </style>

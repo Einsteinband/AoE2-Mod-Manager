@@ -65,7 +65,7 @@ let inflight: Promise<boolean> | null = null;
 function describe(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
-  return "aoe2mm:err:labels.unknown";
+  return "aoe2mm:err:common.unknownError";
 }
 
 /**

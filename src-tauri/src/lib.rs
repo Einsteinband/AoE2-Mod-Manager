@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager, Theme};
 use tauri_plugin_window_state::{AppHandleExt, WindowExt};
 
@@ -142,7 +143,7 @@ async fn check_update(app: tauri::AppHandle) -> Result<update::UpdateInfo, Strin
 
     tauri::async_runtime::spawn_blocking(move || update::fetch_latest(proxy))
         .await
-        .map_err(|e| format!("更新检查线程异常：{e}"))?
+        .map_err(|e| user_err("lib.updateThreadFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 启动静默检查：24 小时内已自动查过就直接跳过（不发请求、不打日志）。
@@ -157,7 +158,7 @@ async fn check_update_auto(app: tauri::AppHandle) -> Result<Option<update::Updat
 
     tauri::async_runtime::spawn_blocking(move || update::fetch_latest_auto(&app, proxy))
         .await
-        .map_err(|e| format!("更新检查线程异常：{e}"))?
+        .map_err(|e| user_err("lib.updateThreadFailed", json!({ "error": e.to_string() })))?
 }
 // ---------------- v3.1：GitHub Releases 全量列表（更新历史 / 首启「新版本特性」） ----------------
 
@@ -266,7 +267,7 @@ async fn fetch_github_releases(app: tauri::AppHandle) -> Result<Vec<GithubReleas
 
     tauri::async_runtime::spawn_blocking(move || fetch_releases_blocking(proxy))
         .await
-        .map_err(|e| format!("更新历史线程异常：{e}"))?
+        .map_err(|e| user_err("lib.releaseThreadFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- v0.4：本地模组批量更新检测 ----------------
@@ -459,7 +460,7 @@ async fn run_scan(app: tauri::AppHandle, root: PathBuf) -> Result<models::ScanRe
     let meta = metadata::load_for_app(&app);
     let report = tauri::async_runtime::spawn_blocking(move || scan::scan(&target, &meta))
         .await
-        .map_err(|e| format!("扫描任务执行失败：{e}"))?;
+        .map_err(|e| user_err("lib.scanThreadFailed", json!({ "error": e.to_string() })))?;
 
     if let Ok(path) = settings_path(&app) {
         let mut current = settings::load(&path);
@@ -615,10 +616,16 @@ async fn online_session_status(app: tauri::AppHandle) -> SessionStatus {
             if e.contains("account.notLoggedIn") {
                 session_status_logged_out(None)
             } else {
-                session_status_logged_out(Some(format!("读取会话 Cookie 失败：{e}")))
+                session_status_logged_out(Some(user_err(
+                    "session.cookieReadFailed",
+                    json!({ "error": e.to_string() }),
+                )))
             }
         }
-        Err(e) => session_status_logged_out(Some(format!("会话线程异常：{e}"))),
+        Err(e) => session_status_logged_out(Some(user_err(
+            "session.threadFailed",
+            json!({ "error": e.to_string() }),
+        ))),
     }
 }
 
@@ -691,15 +698,21 @@ async fn online_startup_session(app: tauri::AppHandle) -> SessionStatus {
 
     match checked {
         Ok(status) => status,
-        Err(e) => session_status_logged_out(Some(format!("会话线程异常：{e}"))),
+        Err(e) => session_status_logged_out(Some(user_err(
+            "session.threadFailed",
+            json!({ "error": e.to_string() }),
+        ))),
     }
 }
 
 /// 打开登录窗口。v3.3 起只保留**微软 / Xbox** 一条入口（用户指令：移除 Steam 与 PlayStation）。
 ///
 /// auth.ageofempires.com 会 302 到 login.microsoftonline.com，这是官方行为，不是 bug。
+///
+/// `title`：窗口标题，由前端按当前界面语言传入（i18n key `online.loginWindowTitle`）。
+/// 这是**可选参数**，旧调用方不传时回落到通用标题，不构成破坏性协议变更。
 #[tauri::command]
-async fn online_open_login(app: tauri::AppHandle) -> Result<(), String> {
+async fn online_open_login(app: tauri::AppHandle, title: Option<String>) -> Result<(), String> {
     let url = online::session::LOGIN_URL;
     log::info!(target: "account-window", "前端请求打开登录窗口 url={url}");
     // v3.2 回归修复：**不再销毁窗口**。旧代码走 invalidate_cached_session（内部 destroy），
@@ -710,11 +723,14 @@ async fn online_open_login(app: tauri::AppHandle) -> Result<(), String> {
         Ok(n) => log::info!(target: "account-window", "登录前已清理 AoE Cookie {n} 条"),
         Err(e) => log::warn!(target: "account-window", "登录前清理 AoE Cookie 未完成：{e}"),
     }
-    let window = online::session::ensure_account_window(&app, url, true)?;
+    let window = online::session::ensure_account_window(&app, url, true, title.as_deref())?;
     // show() 失败必须冒泡：否则前端拿到 Ok(()) 会一直停在 waitingLogin
-    window
-        .show()
-        .map_err(|e| format!("登录窗口无法显示：{e}"))?;
+    window.show().map_err(|e| {
+        user_err(
+            "session.loginWindowShowFailed",
+            json!({ "error": e.to_string() }),
+        )
+    })?;
     let _ = window.unminimize();
     let _ = window.set_focus();
     log::info!(
@@ -734,7 +750,7 @@ async fn online_open_login_silent(app: tauri::AppHandle) -> Result<(), String> {
     let url = online::session::LOGIN_URL;
     log::info!(target: "account-window", "后台静默登录 url={url}");
     // 注意：不调用 invalidate_cached_session，失败时仍保留 DPAPI 兜底
-    let window = online::session::ensure_account_window(&app, url, false)?;
+    let window = online::session::ensure_account_window(&app, url, false, None)?;
     // 已有隐藏窗口时 ensure_account_window 不会导航，这里补一次，保证真的触发 SSO 回跳
     if let Ok(parsed) = tauri::Url::parse(url) {
         if let Err(e) = window.navigate(parsed) {
@@ -756,7 +772,7 @@ async fn online_close_login_window(app: tauri::AppHandle) {
 /// 登录/退出后让 WebView 回到普通页面（不接触账号数据）
 #[tauri::command]
 async fn online_reset_login_view(app: tauri::AppHandle) -> Result<(), String> {
-    let win = online::session::ensure_account_window(&app, online::session::HOME_URL, false)?;
+    let win = online::session::ensure_account_window(&app, online::session::HOME_URL, false, None)?;
     if let Ok(url) = tauri::Url::parse(online::session::HOME_URL) {
         let _ = win.navigate(url);
     }
@@ -771,6 +787,7 @@ async fn online_probe_account_window(app: tauri::AppHandle) -> Result<String, St
         &app,
         online::session::HOME_URL,
         false,
+        None,
     )?;
     let label = window.label().to_string();
     let url = window
@@ -783,10 +800,13 @@ async fn online_probe_account_window(app: tauri::AppHandle) -> Result<String, St
         online::session::collect_cookie_header(&handle)
     })
     .await
-    .map_err(|e| format!("会话线程异常：{e}"))??;
+    .map_err(|e| user_err("session.threadFailed", json!({ "error": e.to_string() })))??;
 
     let count = if header.is_empty() { 0 } else { header.split(';').count() };
-    Ok(format!("隐藏窗口已创建：label={label} url={url} ageofempires Cookie 数={count}"))
+    Ok(user_err(
+        "session.probeOk",
+        json!({ "label": label, "url": url, "count": count }),
+    ))
 }
 
 // ---------------- 网络与登录缓存（高级设置） ----------------
@@ -1597,6 +1617,124 @@ async fn online_cover_sync(
     inner
 }
 
+static LOCAL_COVER_REFRESH_LOCK: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+
+/// 本地封面独立恢复结果：只写当前 Mod 文件夹，不要求先经过应用图片缓存。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalCoverOutcome {
+    pub status: String,
+    pub bytes: u64,
+    pub install_path: Option<String>,
+    pub source_url: Option<String>,
+}
+
+/// 本地详情页「重新获取封面」：现有官方 Detail 客户端 → Detail JSON 提取图片地址 →
+/// 现有 `fetch_bytes` 下载 → 魔数校验 → 模组目录临时文件原子替换。
+/// 不读/写 `image_cache`，不请求列表，不下载 Mod 压缩包。
+#[tauri::command]
+async fn local_cover_refresh(
+    app: tauri::AppHandle,
+    mod_id: i64,
+    kind: String,
+    folder_name: String,
+) -> Result<LocalCoverOutcome, String> {
+    if mod_id <= 0 {
+        return Err(user_err("cover.missingModId", json!({})));
+    }
+    if kind != "local" && kind != "subscribed" {
+        return Err(user_err("modOps.unknownKind", json!({ "kind": kind })));
+    }
+    let folder = folder_name.trim().to_string();
+    if folder.is_empty() || folder.contains('/') || folder.contains('\\') || folder.contains("..") {
+        return Err(user_err("modOps.illegalFolder", json!({})));
+    }
+
+    let root = settings::load_for_app(&app)
+        .mod_root
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| user_err("lib.modRootNotSet", json!({})))?;
+    let root_canon = fs::canonicalize(&root)
+        .map_err(|e| user_err("lib.modRootNotSet", json!({ "error": e.to_string() })))?;
+    let kind_dir = root_canon.join(&kind);
+    let raw_dir = kind_dir.join(&folder);
+    if !raw_dir.is_dir() {
+        return Err(user_err("modOps.dirNotExist", json!({ "path": raw_dir.display().to_string() })));
+    }
+    let mod_dir = fs::canonicalize(&raw_dir)
+        .map_err(|e| user_err("modOps.dirNotExist", json!({ "path": raw_dir.display().to_string(), "error": e.to_string() })))?;
+    if !mod_dir.starts_with(&kind_dir) {
+        return Err(user_err("modOps.illegalFolder", json!({})));
+    }
+
+    {
+        let mut guard = LOCAL_COVER_REFRESH_LOCK
+            .lock()
+            .map_err(|_| user_err("cover.busy", json!({ "modId": mod_id })))?;
+        if guard.contains(&mod_id) {
+            return Err(user_err("cover.busy", json!({ "modId": mod_id })));
+        }
+        guard.push(mod_id);
+    }
+
+    let inner = tauri::async_runtime::spawn_blocking(move || {
+        let client = client(&app).map_err(|e| {
+            user_err(
+                "cover.detailFailed",
+                json!({ "modId": mod_id, "kind": e.kind, "message": e.message, "status": e.status }),
+            )
+        })?;
+
+        let detail = client.detail(mod_id).map_err(|e| {
+            user_err(
+                "cover.detailFailed",
+                json!({ "modId": mod_id, "kind": e.kind, "message": e.message, "status": e.status }),
+            )
+        })?;
+        let url = online::models::detail_cover_url(&detail)
+            .ok_or_else(|| user_err("cover.noDetailThumbnail", json!({ "modId": mod_id })))?;
+
+        let bytes = client
+            .fetch_bytes(&url, images::MAX_IMAGE_BYTES)
+            .map_err(|e| {
+                user_err(
+                    "cover.imageDownloadFailed",
+                    json!({ "modId": mod_id, "kind": e.kind, "message": e.message, "status": e.status }),
+                )
+            })?;
+        if !images::looks_valid_image(&bytes) {
+            return Err(user_err("cover.imageInvalid", json!({ "modId": mod_id, "bytes": bytes.len() })));
+        }
+
+        let install_path = install::write_thumbnail_atomic(&mod_dir, &bytes)?;
+        log::info!(
+            target: "local-cover-refresh",
+            "本地封面恢复 modId={} bytes={} install={} url={}",
+            mod_id,
+            bytes.len(),
+            install_path,
+            url
+        );
+        Ok(LocalCoverOutcome {
+            status: "refreshed".to_string(),
+            bytes: bytes.len() as u64,
+            install_path: Some(install_path),
+            source_url: Some(url),
+        })
+    })
+    .await;
+
+    {
+        let mut guard = LOCAL_COVER_REFRESH_LOCK
+            .lock()
+            .map_err(|_| user_err("cover.busy", json!({ "modId": mod_id })))?;
+        guard.retain(|id| *id != mod_id);
+    }
+
+    inner
+        .map_err(|e| user_err("cover.syncFailed", json!({ "error": e.to_string() })))?
+}
+
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1858,20 +1996,26 @@ async fn online_install(
                     final_path = install::status_rel_path("local", &final_folder);
                     localize_target = Some(target);
                     if let Some(backup) = backup {
-                        localize_note = format!(
-                            "local 下的同名旧目录已备份为 {}（未删除）",
-                            backup.display()
+                        localize_note = user_err(
+                            "install.localBackupNote",
+                            json!({ "path": backup.display().to_string() }),
                         );
                     }
                     log::info!(target: "install", "modId={mod_id} 已转入本地目录：{final_dir}");
                 }
                 Err(e) => {
-                    localize_note = format!("已安装到 subscribed，但转为本地失败：{e}");
+                    localize_note = user_err(
+                        "install.localizeFailed",
+                        json!({ "error": e.to_string() }),
+                    );
                     log::warn!(target: "install", "modId={mod_id} {localize_note}");
                 }
             },
             Err(e) => {
-                localize_note = format!("已安装到 subscribed，但转为本地失败：{e}");
+                localize_note = user_err(
+                    "install.localizeFailed",
+                    json!({ "error": e.to_string() }),
+                );
                 log::warn!(target: "install", "modId={mod_id} {localize_note}");
             }
         }
@@ -1917,14 +2061,27 @@ async fn online_install(
                     false,
                 ) {
                     Ok((note, backup)) => (
-                        format!("{note}（首次写入失败后已回退：{e}；{rollback_note}）"),
+                        user_err(
+                            "install.statusRetryNote",
+                            json!({
+                                "note": note,
+                                "error": e,
+                                "rollback": rollback_note,
+                            }),
+                        ),
                         backup,
                     ),
                     Err(e2) => {
                         return Err(ApiFailure::new(
                             "install",
-                            format!(
-                                "文件已就位（{final_dir}），但 mod-status.json 写入失败：{e}；回退后重试也失败：{e2}；{rollback_note}"
+                            user_err(
+                                "install.statusWriteFailed",
+                                json!({
+                                    "path": final_dir,
+                                    "error": e,
+                                    "retryError": e2,
+                                    "rollback": rollback_note,
+                                }),
                             ),
                             None,
                         ))
@@ -1960,12 +2117,16 @@ async fn online_install(
         }
 
         let mut note_parts = vec![
-            format!("已解压 {} 个文件（{} 字节的解压数据）", files, extracted_bytes),
+            user_err(
+                "install.extractedSummary",
+                json!({ "files": files, "bytes": extracted_bytes }),
+            ),
             assets.message.clone(),
         ];
         if localized {
-            note_parts.push(format!(
-                "已移入 local/{final_folder} 并置为启用（目录已去掉 ID 前缀、WorkshopID=0）。账号订阅状态不会因本地化而改变：若仍订阅该模组，游戏下次启动会重新下载一份到 subscribed，请到官网或游戏内取消订阅"
+            note_parts.push(user_err(
+                "install.localizedNote",
+                json!({ "folder": final_folder }),
             ));
             if !localize_note.is_empty() {
                 note_parts.push(localize_note.clone());
@@ -2239,7 +2400,7 @@ async fn installed_local_index(
         scan::installed_index(PathBuf::from(root).as_path(), &meta)
     })
     .await
-    .map_err(|e| format!("索引任务执行失败：{e}"))
+    .map_err(|e| user_err("index.taskFailed", json!({ "error": e.to_string() })))
 }
 
 // ---------------- 在网站浏览 ----------------
@@ -2367,7 +2528,7 @@ async fn preset_apply(
 ) -> Result<presets::ApplyReport, String> {
     tauri::async_runtime::spawn_blocking(move || presets::apply_for_app(&app, &id))
         .await
-        .map_err(|e| format!("恢复任务执行失败：{e}"))?
+        .map_err(|e| user_err("lib.presetThreadFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- 需求 1：单条启用 / 禁用 ----------------
@@ -2799,7 +2960,7 @@ async fn open_cache_dir(app: tauri::AppHandle, kind: String) -> Result<String, S
             std::process::Command::new("explorer.exe")
                 .arg(&dir)
                 .spawn()
-                .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+                .map_err(|e| user_err("lib.explorerFailed", json!({ "error": e.to_string() })))?;
             Ok(shown)
         }
         #[cfg(not(windows))]
@@ -2833,7 +2994,7 @@ async fn migrate_data_dir(
 ) -> Result<data_dir::DataDirView, String> {
     tauri::async_runtime::spawn_blocking(move || data_dir::migrate(&app, &new_path))
         .await
-        .map_err(|e| format!("迁移任务异常：{e}"))?
+        .map_err(|e| user_err("dataDir.migrateThreadFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 在资源管理器中打开当前数据目录（不存在就先建出来）
@@ -2842,8 +3003,12 @@ async fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let dir = data_dir::data_root(&app)?;
         if !dir.is_dir() {
-            fs::create_dir_all(&dir)
-                .map_err(|e| format!("无法创建数据目录 {}：{e}", dir.display()))?;
+            fs::create_dir_all(&dir).map_err(|e| {
+                user_err(
+                    "dataDir.createTargetFailed",
+                    json!({ "path": dir.display().to_string(), "error": e.to_string() }),
+                )
+            })?;
         }
         let shown = dir.display().to_string();
         #[cfg(windows)]
@@ -2851,7 +3016,7 @@ async fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
             std::process::Command::new("explorer.exe")
                 .arg(&dir)
                 .spawn()
-                .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+                .map_err(|e| user_err("lib.explorerFailed", json!({ "error": e.to_string() })))?;
             Ok(shown)
         }
         #[cfg(not(windows))]
@@ -2861,7 +3026,7 @@ async fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
         }
     })
     .await
-    .map_err(|e| format!("打开数据目录失败：{e}"))?
+    .map_err(|e| user_err("lib.openDataDirFailed", json!({ "error": e.to_string() })))?
 }
 
 // ---------------- v0.4.5：本地日志与「复制诊断信息给 AI」 ----------------
@@ -2946,7 +3111,7 @@ fn prune_old_logs(dir: &std::path::Path) {
 fn logs_dir_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_log_dir()
-        .map_err(|e| format!("无法定位日志目录：{e}"))
+        .map_err(|e| user_err("lib.logsDirLocateFailed", json!({ "error": e.to_string() })))
 }
 
 /// 取日志目录里最新的 `aoe2mm*.log`。
@@ -3010,8 +3175,12 @@ async fn open_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let dir = logs_dir_for(&app)?;
         if !dir.is_dir() {
-            fs::create_dir_all(&dir)
-                .map_err(|e| format!("无法创建日志目录 {}：{e}", dir.display()))?;
+            fs::create_dir_all(&dir).map_err(|e| {
+                user_err(
+                    "lib.logsDirCreateFailed",
+                    json!({ "path": dir.display().to_string(), "error": e.to_string() }),
+                )
+            })?;
         }
         log::info!(target: "diagnostics", "用户请求打开日志目录：{}", dir.display());
         #[cfg(windows)]
@@ -3020,7 +3189,7 @@ async fn open_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
             std::process::Command::new("explorer.exe")
                 .arg(&dir)
                 .spawn()
-                .map_err(|e| format!("无法启动资源管理器：{e}"))?;
+                .map_err(|e| user_err("lib.explorerFailed", json!({ "error": e.to_string() })))?;
             Ok(shown)
         }
         #[cfg(not(windows))]
@@ -3030,7 +3199,7 @@ async fn open_logs_dir(app: tauri::AppHandle) -> Result<String, String> {
         }
     })
     .await
-    .map_err(|e| format!("打开日志目录失败：{e}"))?
+    .map_err(|e| user_err("lib.logsDirOpenFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 「复制诊断信息给 AI」的后端数据包：版本 / 系统 / 日志路径 / 最近 100 行日志。
@@ -3083,7 +3252,7 @@ async fn diagnostics_info(app: tauri::AppHandle) -> Result<DiagnosticsInfo, Stri
         })
     })
     .await
-    .map_err(|e| format!("读取诊断信息失败：{e}"))?
+    .map_err(|e| user_err("lib.diagnosticsReadFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 「启动游戏」的错误码：后端没有配置游戏根目录（game_root_dir 为空）时返回它，
@@ -3216,7 +3385,7 @@ async fn launch_game(app: tauri::AppHandle, exe_path: Option<String>) -> Result<
         Ok(url)
     })
     .await
-    .map_err(|e| format!("启动游戏失败：{e}"))?
+    .map_err(|e| user_err("game.launchFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 设置「游戏根目录」（设置 → 通用）。`None` / 空串 = 清除配置。
@@ -3245,7 +3414,7 @@ async fn set_game_root_dir(
         Ok(settings)
     })
     .await
-    .map_err(|e| format!("保存游戏根目录失败：{e}"))?
+    .map_err(|e| user_err("settings.gameRootSaveFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 自动检测游戏根目录（设置页「自动检测」按钮）：只读探测，**不写配置**。
@@ -3484,6 +3653,7 @@ pub fn run() {
             online_images_local,
             online_images_fetch,
             online_cover_sync,
+            local_cover_refresh,
             online_install,
             online_cancel_install,
             online_uninstall,

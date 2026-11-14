@@ -42,6 +42,7 @@ import {
   normalizeUiFontWeight,
   type UiFontFamily,
 } from "../api";
+import type { ScanReport } from "../types";
 
 /** 全局视图偏好：卡片大小与主界面用同一个 v-model（设置里拖完，列表立即跟着变） */
 const props = withDefaults(
@@ -60,7 +61,10 @@ const props = withDefaults(
   },
 );
 
-const emit = defineEmits<{ close: []; "change-root": [] }>();
+const emit = defineEmits<{
+  close: [];
+  "root-changed": [report: ScanReport];
+}>();
 const { t, locale } = useI18n();
 
 /**
@@ -493,7 +497,7 @@ onBeforeUnmount(() => {
             v-if="tab === 'general'"
             ref="generalTabRef"
             :root-path="props.rootPath"
-            @change-root="emit('change-root')"
+            @root-changed="emit('root-changed', $event)"
           />
 
           <!-- 外观（v2.0 新增）：主题模式 + 卡片大小滑块 -->

@@ -10,7 +10,7 @@ export default {
     nameShort2: "AoE II · Mod Manager",
     mediumName: "AoE II · MM",
     shortName: "AoE II",
-    taglinePrefix: "v0.5.1 · by ",
+    taglinePrefix: "v0.5.2 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -45,6 +45,11 @@ export default {
       "When enabled, a pure-local search box appears above the mod grid on the Online page. It searches cached and indexed mods by Chinese title or author, without any network request.",
     localSearchOn: "Enabled",
     localSearchOff: "Disabled",
+    onlineSizeSort: "Enable online mod file-size sorting",
+    onlineSizeSortNote:
+      "Uses only cached file sizes. Missing sizes are not fetched from the website or detail API; sorting applies only to currently loaded results.",
+    onlineSizeSortOn: "Enabled",
+    onlineSizeSortOff: "Disabled",
     translateTarget: "Target language",
     translateTargetNote: "🌐 Translate to {lang}",
     translateFollowUi: "Follow UI language ({lang})",
@@ -213,6 +218,7 @@ export default {
     sortDownload: "Download order",
     sortPriority: "Load priority",
     sortFolder: "Folder name",
+    sortFileSize: "File size",
     rescan: "Rescan",
     changeRoot: "Change root folder",
     presets: "Preset manager",
@@ -223,6 +229,7 @@ export default {
     viewToList: "Switch to list view",
     viewToGrid: "Switch to grid view",
     cardSize: "Card size: {n}px",
+    more: "More actions",
     launchGame: "Launch game",
     launchGameTitle: "Launch AoE2: DE through Steam (steam://rungameid/813780) so launch options, playtime and achievements all work. You will be sent to Settings if the game folder is not configured",
     launchGameBusy: "Launching…",
@@ -423,11 +430,14 @@ export default {
     statusUnknown: "Unknown",
     sourceTool: "Installed by this app",
     sourceOfficial: "Official subscription",
-    sourceUnknown: "Unknown local",
+    sourceImported: "Imported externally",
+    sourceUnknown: "Imported externally",
     sourceToolHint: "Has an install record from this app (or sits in local/ with a Workshop ID)",
     sourceOfficialHint:
       "No record from this app; located in subscribed/ with a Workshop ID — downloaded by the official service",
-    sourceUnknownHint: "No record from this app and no Workshop ID — probably added manually",
+    sourceImportedHint: "Installed from a ZIP with this app's import feature — not downloaded through the official subscription",
+    sourceUnknownHint:
+      "No install record from this app and no Workshop ID — a folder placed into local/ by hand",
   },
   card: {
     noCover: "No cover",
@@ -469,11 +479,12 @@ export default {
     title: "Mod details",
     coverMissing: "No cover",
     coverMissingDetail: "This mod folder has no thumbnail.jpg",
-    refreshCover: "Reload cover",
-    refreshCoverHint: "Click to fetch the cover again when it fails to load",
+    refreshCover: "Fetch cover again",
+    refreshCoverHint: "Fetch the cover again from the official details when it fails to load",
     coverFetching: "Fetching cover…",
     coverDownloading: "Downloading cover…",
-    coverReloading: "Reloading cover…",
+    coverReloading: "Fetching cover…",
+    coverNoOfficialId: "The official source of this mod cannot be determined; it was not matched by title.",
     coverUpdated: "Cover updated",
     coverFetchFailed: "Failed to get the cover, please retry",
     coverDownloadFailed: "Cover download failed, please retry",
@@ -604,6 +615,10 @@ export default {
     use: "Use this folder",
     validating: "Checking…",
     badgeGame: "Game install folder",
+    /* These chips show the on-disk subfolder names, so they are not translated; they live in
+       the locale files only to keep the template free of hardcoded text. */
+    chipLocal: "local",
+    chipSubscribed: "subscribed",
     none:
       "No game folder was detected. Please choose it manually — the folder that contains local and subscribed, or the one holding AoE2DE_s.exe.",
     browse: "Choose folder…",
@@ -735,9 +750,6 @@ export default {
     recheck: "Re-check sign-in",
     clearCache: "Sign out / clear cache",
     clearing: "Clearing…",
-    logoutCleared:
-      "Signed out: the AoE cookies and the WebView2 data folder were both cleared ({path})",
-    logoutClearedNoPath: "Signed out: the AoE cookies and the WebView2 data folder were both cleared",
     logoutFailed:
       "Sign-out failed: some files are in use — restart the app and try again",
     network: "Network",
@@ -758,6 +770,7 @@ export default {
     sortDesc: "Descending",
     sortAsc: "Ascending",
     orderLabel: "Order",
+    orderToggleTitle: "Current: {current}; click to switch to {next}",
     refreshTitle: "Refresh: re-check sign-in and reload the first page",
     refresh: "Refresh",
     loading: "Loading…",
@@ -773,6 +786,7 @@ export default {
       "Browsing and downloads use api.ageofempires.com, which requires a sign-in. Credentials are typed on the official page only — this app never asks for or sees them.",
     waitingLogin: "Waiting for sign-in…",
     openLogin: "Open sign-in window",
+    loginWindowTitle: "Sign in to Age of Empires",
     cancel: "Cancel",
     probing: "Diagnosing…",
     probe: "Diagnose: create hidden session window",
@@ -923,6 +937,7 @@ export default {
     sortCreateDate: "Publish date",
     sortModName: "Name",
     sortCreatorName: "Author",
+    sortFileSize: "File size",
     cardUpdate: "Update",
     cardSubscribed: "Subscribed",
     cardInstalled: "Installed",
@@ -1080,6 +1095,7 @@ export default {
     rootNote: "Changing the root rescans automatically and is saved to settings.json.",
     changeRoot: "Change root folder",
     rootEmpty: "No root folder set yet",
+    rootSaved: "Mod root saved — the list has been rescanned",
     rootPath:
       "The mod scan root is now managed by \"Change root folder\" in the General tab.",
   },
@@ -1087,8 +1103,41 @@ export default {
   /* ---------- Backend error text (the only lookup table used by src/format.ts) ----------
      pattern: keyword fallback for the old Chinese strings Rust still returns (non-Chinese UI only).
      code: text for the `aoe2mm:err:<code>:<json>` protocol; keys mirror the Rust code path. */
+  /* Three-language names for mod categories. A category's identity is always the
+     official id or the raw name (data layer is never translated); this section only
+     supplies display text, so adding a language means filling in this block. */
+  tagNames: {
+    artificialIntelligence: "Artificial Intelligence",
+    campaign: "Campaign",
+    dataMod: "Data Mod",
+    graphics: "Graphics",
+    movie: "Movie",
+    music: "Music",
+    randomMaps: "Random Maps",
+    scenarios: "Scenarios",
+    sounds: "Sounds",
+    speech: "Speech",
+    taunt: "Taunt",
+    terrain: "Terrain",
+    menuBackground: "Menu Background",
+    userInterface: "User Interface",
+    text: "Text",
+    other: "Other",
+    returnOfRome: "Return of Rome",
+    audio: "Audio",
+    textures: "Textures",
+    materials: "Materials",
+    maps: "Maps",
+    data: "Data",
+    dataOther: "Data / Other",
+    historyEntries: "History Entries",
+    localization: "Localization",
+    dataTables: "Data Tables",
+  },
   backendErrors: {
     protocolUnknown: "Unhandled backend error ({code}). Please report this code.",
+    /* Separator used when Rust joins several error strings with a full-width semicolon */
+    segmentSeparator: "; ",
     pattern: {
       pathNotExist: "Path does not exist: {detail}",
       notFolder: "Not a folder: {detail}",
@@ -1118,9 +1167,13 @@ export default {
       presetDataModNote: "; only one data mod can be loaded at a time, {n} skipped ({list})",
     },
     /* Sample entries (only used once Rust migrates to the error-code protocol):
-       Rust returns aoe2mm:err:install.extractFailed:{"modId":45427}
-       → backendErrors.code.install.extractFailed with {modId} filled from the JSON payload */
+       Rust returns aoe2mm:err:install.targetExistsForeign:{"path":"…"}
+       → backendErrors.code.install.targetExistsForeign with {path} filled from the JSON payload */
     code: {
+      /* Front-end fallback sentinel (not a code emitted by Rust) */
+      common: {
+        unknownError: "Something went wrong. Please try again.",
+      },
       api: {
         resourceInvalid: "Invalid resource URL: {error}",
         resourceNotHttps: "Resource URL is not HTTPS; rejected.",
@@ -1141,7 +1194,13 @@ export default {
       },
       cover: {
         cacheInvalid: "The local cover cache is corrupted and there is no downloadable URL.",
+        missingModId: "This mod has no reliable official Mod ID.",
+        busy: "The cover is already being fetched; wait for the current task.",
+        detailFailed: "Failed to fetch official mod details: {message}",
+        noDetailThumbnail: "The official details do not contain a usable cover URL.",
         network: "Cover download failed: {error}",
+        imageDownloadFailed: "Cover image download failed: {message}",
+        imageInvalid: "The downloaded content is not a valid image; the old cover was kept.",
         syncFailed: "Failed to sync the cover to the mod folder: {error}",
       },
       metadata: {
@@ -1150,7 +1209,6 @@ export default {
         writeFailed: "Failed to write metadata file {path}: {error}",
       },
       net: {
-        timeout: "The network request timed out.",
         configInvalid: "Network configuration is invalid: {error}",
         proxyEmpty: "The proxy address cannot be empty.",
         proxySocksUnsupported: "SOCKS proxies are not supported. Please enter an HTTP proxy, e.g. http://127.0.0.1:7897.",
@@ -1221,6 +1279,7 @@ export default {
         sameAsCurrent: "The target directory is already the current data directory; no migration needed.",
         nestedWithCurrent: "The target directory cannot be a child or parent of the current data directory.",
         targetHasExisting: "The target directory already contains an entry named {name}. Please choose an empty folder, or rename/delete it first.",
+        migrateThreadFailed: "Migration task failed: {error}",
       },
       scan: {
         cannotReadFolder: "Cannot read this mod folder (permission problem?): {path}",
@@ -1281,9 +1340,9 @@ export default {
       },
       game: {
         steamLaunchFailed: "Failed to launch the game via Steam: {error} (make sure Steam is installed and you are logged in).",
+        launchFailed: "Could not launch the game: {error}",
       },
       install: {
-        extractFailed: "Could not extract the archive (mod {modId}).",
         zipNulByte: "The archive entry contains a NUL byte; rejected.",
         zipAbsolute: "Archive entry is an absolute path; rejected: {name}",
         zipDriveLetter: "Archive entry contains a drive letter; rejected: {name}",
@@ -1309,7 +1368,10 @@ export default {
         resourcesCreateFailed: "Could not create the resources directory ({path}): {error}",
         infoJsonSerializeFailed: "Failed to serialize info.json: {error}",
         infoJsonWriteFailed: "Failed to write info.json: {error}",
+        statusRetryNote: "{note} (rolled back after the first write failed: {error}; {rollback})",
+        statusWriteFailed: "Files are in place ({path}), but writing mod-status.json failed: {error}; retrying after the rollback also failed: {retryError}; {rollback}",
         thumbnailEmpty: "Thumbnail content is empty.",
+        thumbnailInvalid: "The downloaded content is not a valid image; the old cover was kept.",
         thumbnailWriteFailed: "Failed to write thumbnail: {error}",
         badModId: "Invalid WorkshopID; uninstall refused.",
         noLocalDir: "No local directory for this mod (no folder starting with “{prefix}” under subscribed / local).",
@@ -1347,6 +1409,10 @@ export default {
         notUnderLocal: "Target directory is not under local; move refused: {path}",
         backupAlreadyExists: "The backup directory already exists; aborted: {path}",
         localBackupFailed: "Could not back up the existing local folder ({path}): {error}",
+        localBackupNote: "The existing local folder was backed up as {path} (not deleted)",
+        localizeFailed: "Installed to subscribed, but moving it to local failed: {error}",
+        extractedSummary: "Extracted {files} files ({bytes} bytes of unpacked data)",
+        localizedNote: "Moved to local/{folder} and enabled (ID prefix removed, WorkshopID=0). The subscription is unchanged: while you are still subscribed, the game will download another copy into subscribed on the next launch — unsubscribe on the website or in-game",
         revertFailed: "Rollback failed: {from} → {to}: {error}",
         revertRestoreFailed: "Could not restore the old version directory to {path}: {error}",
         recordAdded: "Created a local record and enabled it.",
@@ -1407,7 +1473,6 @@ export default {
         configDirNotFound: "Could not locate the app config directory: {error}",
         createDirFailed: "Could not create the config directory {path}: {error}",
         serializeFailed: "Failed to serialize the settings: {error}",
-        writeFailed: "Failed to write the settings file {path}: {error}",
         writeTmpFailed: "Failed to write the settings temporary file: {error}",
         syncTmpFailed: "Failed to flush the settings temporary file to disk: {error}",
         renameFailed: "Failed to replace the settings file ({path}): {error}",
@@ -1415,6 +1480,7 @@ export default {
         gameRootNotAbsolute: "Please choose a full game root path (e.g. D:\\SteamLibrary\\steamapps\\common\\AoE2DE): {path}",
         gameRootNotDir: "Invalid game root: the path does not exist ({path}).",
         gameRootNoExe: "Invalid game root: AoE2DE_s.exe was not found in the folder ({path}).",
+        gameRootSaveFailed: "Could not save the game folder: {error}",
       },
       userData: {
         createDirFailed: "Could not create the config directory {path}: {error}",
@@ -1500,6 +1566,15 @@ export default {
         batchCheckFailed: "Batch check task failed: {error}",
         taskRequestFailed: "Task request failed: {error}",
         taskQueryFailed: "Task query failed: {error}",
+        updateThreadFailed: "Update check thread failed: {error}",
+        releaseThreadFailed: "Release history thread failed: {error}",
+        scanThreadFailed: "Scan task failed: {error}",
+        presetThreadFailed: "Preset restore task failed: {error}",
+        openDataDirFailed: "Could not open the data folder: {error}",
+        logsDirLocateFailed: "Could not locate the log folder: {error}",
+        logsDirCreateFailed: "Could not create the log folder {path}: {error}",
+        logsDirOpenFailed: "Could not open the log folder: {error}",
+        diagnosticsReadFailed: "Could not read diagnostics: {error}",
       },
       session: {
         storageWebview: "WebView2 session cookies (data directory persisted)",
@@ -1513,6 +1588,25 @@ export default {
         getCookiesFailed: "Failed to read cookies ({url}): {error}",
         getCookiesCallFailed: "Failed to call GetCookies ({url}): {error}",
         autoReloginIncomplete: "Automatic re-login did not complete; please click Sign in manually in settings.",
+        cookieReadFailed: "Could not read the session cookies: {error}",
+        threadFailed: "The session check thread failed: {error}",
+        dataDirLocateFailed: "Could not locate the app data directory: {error}",
+        dataDirCreateFailed: "Could not create the WebView2 data directory {path}: {error}",
+        loginUrlInvalid: "Invalid sign-in URL: {error}",
+        loginWindowFailed: "Could not create the sign-in window: {error}",
+        loginWindowShowFailed: "The sign-in window could not be shown: {error}",
+        cacheClearFailed: "Failed to delete the encrypted session cache: {error}",
+        reloadBlockFailed: "Failed to block the account window reload: {error}",
+        blankUrlInvalid: "Could not parse about:blank: {error}",
+        windowDestroyFailed: "Failed to destroy the account window: {error}",
+        cookiesClearFailed: "Could not access WebView2; AoE cookies were not cleared: {error}",
+        logoutFailed: "Sign-out failed: files are in use. Please restart the app and clean up ({detail})",
+        logoutDone: "Signed out: AoE cookies and the WebView2 data directory are cleared ({path})",
+        probeOk: "Hidden window created: label={label} url={url} — {count} ageofempires cookies",
+        cookieClearTimeout: "Clearing AoE cookies timed out ({replies}/{total} domains answered, {deleted} deleted)",
+        cookieClearFailed: "Failed to clear AoE cookies: {error} ({deleted} deleted)",
+        cookieCountFailed: "Could not read the cookie list length: {error}",
+        reloginNavigateFailed: "Automatic re-sign-in navigation failed: {error}",
       },
       uninstall: {
         recordRemoved: "Removed this record from mod-status.json.",

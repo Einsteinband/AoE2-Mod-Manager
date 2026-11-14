@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { translate } from "../i18n";
 import { noteRequestFailure, noteRequestSuccess } from "./networkError";
 import type {
   DownloadProgress,
@@ -47,9 +48,10 @@ export function uiLog(level: "info" | "warn" | "error", message: string): Promis
   return invoke<void>("ui_log", { level, message });
 }
 
-/** 打开登录窗口（v3.3 起只保留微软 / Xbox 一条入口） */
+/** 打开登录窗口（v3.3 起只保留微软 / Xbox 一条入口）
+ *  窗口标题由前端按当前界面语言传入：原生窗口标题不在 Vue 模板里，只能这样接入 i18n。 */
 export function openLogin(): Promise<void> {
-  return invoke<void>("online_open_login");
+  return invoke<void>("online_open_login", { title: translate("online.loginWindowTitle") });
 }
 
 /** 后台静默登录：隐藏窗口走一遍 SSO，用于启动时自动恢复会话（不清缓存） */

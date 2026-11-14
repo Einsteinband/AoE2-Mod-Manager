@@ -53,7 +53,7 @@ import {
   setCustomName,
   setFavorite,
 } from "../../userData";
-import { translateBackendMessage } from "../../format";
+import { normalizeBackendError, normalizeError, translateBackendMessage } from "../../format";
 import type { ModEntry, SortKey } from "../../types";
 
 /**
@@ -74,6 +74,8 @@ const props = defineProps<{
   search?: string;
   /** 排序字段（v-model，App.vue 顶栏 ModToolbar 持有） */
   sortModel?: string;
+  /** 文件大小排序方向（v-model，App.vue 顶栏 ModToolbar 持有） */
+  orderModel?: "DESC" | "ASC";
   /** 视图模式（grid/list，App.vue 顶栏 ViewSwitch 持有） */
   viewMode: "grid" | "list";
   /** 卡片大小 */
@@ -83,6 +85,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:search", v: string): void;
   (e: "update:sortModel", v: string): void;
+  (e: "update:orderModel", v: "DESC" | "ASC"): void;
 }>();
 
 const { t, locale } = useI18n();
@@ -96,6 +99,10 @@ const searchModel = computed({
 const sortModelModel = computed({
   get: () => props.sortModel ?? "name",
   set: (v: string) => emit("update:sortModel", v),
+});
+const orderModelModel = computed({
+  get: () => props.orderModel ?? "DESC",
+  set: (v: "DESC" | "ASC") => emit("update:orderModel", v),
 });
 
 // ---------------- 扫描状态 ----------------
@@ -176,6 +183,12 @@ watch(sortModelModel, (v) => {
 watch(filters.sortKey, (v) => {
   if (sortModelModel.value !== v) emit("update:sortModel", v);
 });
+watch(orderModelModel, (v) => {
+  if (filters.order.value !== v) filters.order.value = v;
+});
+watch(filters.order, (v) => {
+  if (orderModelModel.value !== v) emit("update:orderModel", v);
+});
 
 // ---------------- 排序模式 ----------------
 const sort = useSortMode({
@@ -215,7 +228,7 @@ const actions = useLocalModActions({
   selectedId: scan.selectedId,
   patchModEnabled: scan.patchModEnabled,
   sort,
-  normalizeError: scan.normalizeError,
+  normalizeError,
   showToast,
 });
 
@@ -332,7 +345,7 @@ async function onMenuSelect(itemId: string): Promise<void> {
         const result = await toggleModEnabled(id, mod.kind, mod.folderName, target);
         scan.patchModEnabled(mod.id, result.enabled);
       } catch (e) {
-        showToast(scan.normalizeError(e), "error");
+        showToast(normalizeBackendError(e), "error");
       }
       return;
     }
@@ -349,7 +362,7 @@ async function onMenuSelect(itemId: string): Promise<void> {
         const next = await setFavorite(id, !isFavorite(id));
         showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
       } catch (e) {
-        showToast(scan.normalizeError(e), "error");
+        showToast(normalizeBackendError(e), "error");
       }
       return;
     }
@@ -436,7 +449,7 @@ async function revealFromMenu(mod: ModEntry): Promise<void> {
   try {
     await revealModFolder(mod.path);
   } catch (e) {
-    showToast(scan.normalizeError(e), "error");
+    showToast(normalizeBackendError(e), "error");
   } finally {
     revealingId.value = null;
   }
@@ -449,7 +462,7 @@ async function openWebsiteFromMenu(mod: ModEntry): Promise<void> {
   try {
     await openModWebpage(id);
   } catch (e) {
-    showToast(scan.normalizeError(e), "error");
+    showToast(normalizeBackendError(e), "error");
   } finally {
     webOpeningId.value = null;
   }
@@ -536,6 +549,10 @@ function downloadSelected(): void {
   downloadUninstalledFavorite(mod);
 }
 
+function handleCoverUpdated(payload: { id: string; path: string }): void {
+  scan.patchModCover(payload.id, payload.path);
+}
+
 // ---------------- 数据模组互斥 + 批量操作 ----------------
 const dataModMutex = useDataModMutex({
   scan,
@@ -581,7 +598,7 @@ const { showPresets, lastAppliedPresetId, handlePresetApplied } = presets;
 const update = useLocalUpdate({
   blocksRescan: sort.blocksRescan,
   rescan: () => refresh(),
-  normalizeError: scan.normalizeError,
+  normalizeError,
   showToast,
 });
 const { updateNotice, updatingEntryId, handleUpdateMod, runStartupUpdateCheck, openUpdatePage, dismissUpdateNotice } = update;
@@ -651,7 +668,7 @@ async function openLanzouPage() {
   try {
     await openExternalUrl(LANZOU_URL);
   } catch (e) {
-    showToast(scan.normalizeError(e), "error");
+    showToast(normalizeBackendError(e), "error");
   }
 }
 
@@ -801,6 +818,8 @@ defineExpose({
   loading,
   hasReport: computed(() => !!report.value),
   toggleWarnings,
+  /** 外部（设置 → 通用「更换根目录」）换根后，把后端返回的完整扫描结果直接接管 */
+  applyReport: scan.handleWizardDone,
 });
 </script>
 
@@ -1100,6 +1119,7 @@ defineExpose({
         @download="downloadSelected"
         @update="handleUpdateMod(detailMod)"
         @request-enable="requestEnableDataMod"
+        @cover-updated="handleCoverUpdated"
       />
       <div v-else class="detail-empty">
         {{ t("state.detailEmpty") }}<br />
@@ -1180,7 +1200,7 @@ defineExpose({
     :original="renameTarget.displayName"
     :initial="customNameOf(renameTarget.workshopId)"
     :busy="renameBusy"
-    :error="renameError"
+    :error="renameError ? translateBackendMessage(renameError) : null"
     @save="applyMenuRename"
     @cancel="closeMenuRename"
   />
@@ -1193,7 +1213,7 @@ defineExpose({
     :detail="deleteTarget.path"
     :confirm-label="t('detail.deleteConfirmLabel')"
     :busy="deleting"
-    :error="deleteError"
+    :error="deleteError ? translateBackendMessage(deleteError) : null"
     @confirm="confirmMenuDelete"
     @cancel="cancelMenuDelete"
   />

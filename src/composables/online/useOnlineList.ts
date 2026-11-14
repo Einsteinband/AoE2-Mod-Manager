@@ -19,6 +19,7 @@ import { messageOf } from "../../online/errors";
 import { isNetworkError, isNetworkFailure } from "../../online/networkError";
 import { findMods, installedMods } from "../../online/service";
 import { isApiFailure, type OnlineMod } from "../../online/types";
+import { ONLINE_SIZE_SORT, validSize } from "./sortOnlineMods";
 import { sessionPhase, setStatusMessageKey } from "../../sessionState";
 import { ensureUserData, favoriteIdSet, isFavorite } from "../../userData";
 import { favoriteMetaOf } from "../../favoriteMeta";
@@ -137,6 +138,8 @@ export function useOnlineList(deps: {
   const favoritesOnly = ref(false);
   /** 收藏视图的本地候选池（online_cache.json 里的全部条目，只读一次） */
   const favoritePool = ref<OnlineMod[] | null>(null);
+  /** 当前 query/tag/服务端排序条件命中的本地列表缓存大小映射；只按 modId 补当前列表缺失大小。 */
+  const cachedSizeByModId = ref<Map<number, number>>(new Map());
   /** true = 断网且该分类无缓存：显示“暂无本地缓存”的空态，不发任何请求 */
   const noCacheOffline = ref(false);
   /** 当前列表的筛选签名：变了说明是「另一个列表」，数据整体替换而不是合并 */
@@ -172,14 +175,23 @@ export function useOnlineList(deps: {
     return mod.tagIds.includes(effectiveTag.value);
   }
 
+  /** 文件大小是前端已加载子集排序；官方 /Find 无该参数，请求与缓存回落到默认服务端排序。 */
+  function serverSort(): string {
+    return deps.sort.value === ONLINE_SIZE_SORT ? "recentpopular" : deps.sort.value;
+  }
+
+  function serverOrder(): "DESC" | "ASC" {
+    return deps.sort.value === ONLINE_SIZE_SORT ? "DESC" : deps.order.value;
+  }
+
   function requestChunk(start: number) {
     if (onlySubscribed.value) return installedMods(start, PAGE_SIZE);
     return findMods({
       query: deps.query.value.trim(),
       start,
       count: PAGE_SIZE,
-      sort: deps.sort.value,
-      order: deps.order.value,
+      sort: serverSort(),
+      order: serverOrder(),
       tags: effectiveTag.value === null ? [] : [effectiveTag.value],
     });
   }
@@ -193,6 +205,15 @@ export function useOnlineList(deps: {
       deps.order.value,
       effectiveTag.value === null ? "" : String(effectiveTag.value),
     ].join("|");
+  }
+
+  function updateCachedSizeMap(mods: OnlineMod[], replace: boolean): void {
+    const next = replace ? new Map<number, number>() : new Map(cachedSizeByModId.value);
+    for (const mod of mods) {
+      const size = validSize(mod.fileSize);
+      if (size !== null) next.set(mod.modId, size);
+    }
+    cachedSizeByModId.value = next;
   }
 
   /**
@@ -220,8 +241,8 @@ export function useOnlineList(deps: {
             query: deps.query.value.trim(),
             start: from,
             count: PAGE_SIZE,
-            sort: deps.sort.value,
-            order: deps.order.value,
+            sort: serverSort(),
+            order: serverOrder(),
             tags: effectiveTag.value === null ? [] : [effectiveTag.value],
             maxPages: CACHE_PAGE_LIMIT,
           });
@@ -245,6 +266,7 @@ export function useOnlineList(deps: {
           break;
         }
       }
+      updateCachedSizeMap(merged, from === 1);
       if (total !== null) totalCount.value = total;
       // 结束判定：服务端报过总数就以「已取回条数 ≥ 总数」为准，否则才退回「本页不满一页」。
       // 旧实现只看「本页不满一页」，一页半截缓存就会把列表永久判成「已到最后一页」（6 条卡死）。
@@ -252,6 +274,7 @@ export function useOnlineList(deps: {
       // hit = 这个 key 在缓存里真实存在（哪怕结果是 0 条）
       return { hit: pages.length > 0, items: merged, nextStart, complete, savedAtMs };
     } catch {
+      if (from === 1) cachedSizeByModId.value = new Map();
       return { hit: false, items: [], nextStart: from, complete: false, savedAtMs: 0 };
     }
   }
@@ -407,6 +430,8 @@ export function useOnlineList(deps: {
       loadingMore.value = false;
       setStatusMessageKey("statusbar.cacheLoaded");
       deps.syncImages(visibleOfficialItems.value);
+      // 过期或手动强制刷新时，旧缓存里的缺失大小不继续作为补充来源，等待本次响应结果。
+      if (expired || forceNetwork) cachedSizeByModId.value = new Map();
     } else {
       // ② 从未缓存过
       listSignature = signature;
@@ -712,6 +737,7 @@ export function useOnlineList(deps: {
     hasMore,
     onlySubscribed,
     favoritesOnly,
+    cachedSizeByModId,
     noCacheOffline,
     activeTag,
     effectiveTag,

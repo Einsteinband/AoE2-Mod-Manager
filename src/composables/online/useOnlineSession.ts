@@ -162,33 +162,23 @@ export function useOnlineSession(deps: {
     }
   }
 
-  /**
-   * 退出登录成功的提示交给 i18n（英文界面不能出现后端中文原文）。
-   * 后端成功的返回值形如“… 均已清空（<数据目录>）”，这里只把括号里的路径抽出来做 {path}，
-   * 抽不到（换语言 / 改文案）就退到无路径的那条键，不把中文整包拼进英文界面。
-   */
-  function logoutClearedText(raw: string): string {
-    const match = raw.match(/[（(]([^（）()]+)[）)]\s*$/);
-    return match ? t("online.logoutCleared", { path: match[1] }) : t("online.logoutClearedNoPath");
-  }
-
   async function doLogout(): Promise<void> {
     if (netClearing.value) return;
     netClearing.value = true;
     netError.value = null;
     netMessage.value = null;
     try {
+      // Rust 侧已改为协议码（session.logoutDone，带 {path}），不再拼中文整句
       const text = await withTimeout(clearLoginCache(), 30_000, t("online.clearCache"));
-      netMessage.value = logoutClearedText(text);
+      netMessage.value = translateBackendMessage(text);
       session.value = null;
       deps.resetFavoritePool();
       await refreshSession();
       // 退出登录不清空列表：直接用缓存重绘，离线也能继续看
       await deps.reloadAfterLogout();
     } catch (e) {
-      const raw = messageOf(e);
-      // 后端“退出登录失败：文件被占用…”走独立键，避免把中文原因原样带到英文界面
-      netError.value = /退出登录失败|退出登录未完成/.test(raw) ? t("online.logoutFailed") : raw;
+      // session.logoutFailed 自带 {detail}，由语言包决定文案；不再按中文关键词特判
+      netError.value = messageOf(e);
     } finally {
       netClearing.value = false;
     }

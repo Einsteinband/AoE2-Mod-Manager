@@ -50,7 +50,7 @@ export function useDataModMutex(options: {
       await writeModEnabled(mod, true);
       showToast(t("dataMod.enabledToast", { name: mod.displayName }));
     } catch (e) {
-      showToast(scan.normalizeError(e), "error");
+      showToast(translateBackendMessage(scan.normalizeError(e)), "error");
     } finally {
       dataModBusy.value = false;
     }
@@ -175,7 +175,7 @@ export function useDataModMutex(options: {
         await writeModEnabled(stale, false);
       } catch (e) {
         // 弹窗不关：用户可以重试或取消，绝不带着两个数据模组继续下去
-        showToast(scan.normalizeError(e), "error");
+        showToast(translateBackendMessage(scan.normalizeError(e)), "error");
         return;
       }
     }

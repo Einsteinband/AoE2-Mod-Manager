@@ -150,10 +150,14 @@ pub fn webview_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
         .app_local_data_dir()
-        .map_err(|e| format!("无法定位应用数据目录：{e}"))?;
+        .map_err(|e| user_err("session.dataDirLocateFailed", json!({ "error": e.to_string() })))?;
     let dir = base.join(WEBVIEW_DIR);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("无法创建 WebView2 数据目录 {}：{e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        user_err(
+            "session.dataDirCreateFailed",
+            json!({ "path": dir.display().to_string(), "error": e.to_string() }),
+        )
+    })?;
     Ok(dir)
 }
 
@@ -163,7 +167,10 @@ fn resolve_net(app: &AppHandle) -> net::NetResolution {
         Ok(resolved) => resolved,
         Err(e) => {
             log::warn!(target: "account-window", "网络配置解析失败（{e}），本次按直连处理");
-            net::NetResolution::direct(Some(format!("网络配置无效（{e}），已按直连处理")))
+            net::NetResolution::direct(Some(user_err(
+                "net.configInvalid",
+                json!({ "error": e.to_string() }),
+            )))
         }
     }
 }
@@ -172,6 +179,7 @@ pub fn ensure_account_window(
     app: &AppHandle,
     url: &str,
     visible: bool,
+    title: Option<&str>,
 ) -> Result<WebviewWindow, String> {
     if let Some(existing) = app.get_webview_window(ACCOUNT_WINDOW) {
         log::info!(
@@ -194,7 +202,7 @@ pub fn ensure_account_window(
         return Ok(existing);
     }
 
-    let parsed = Url::parse(url).map_err(|e| format!("登录地址无效：{e}"))?;
+    let parsed = Url::parse(url).map_err(|e| user_err("session.loginUrlInvalid", json!({ "error": e.to_string() })))?;
     let data_dir = webview_data_dir(app)?;
     let resolved = resolve_net(app);
     let browser_args = net::webview_args(&resolved);
@@ -209,7 +217,9 @@ pub fn ensure_account_window(
     );
 
     let mut builder = WebviewWindowBuilder::new(app, ACCOUNT_WINDOW, WebviewUrl::External(parsed))
-        .title("登录《帝国时代》账号")
+        // 标题由前端按当前界面语言传入（i18n key：online.loginWindowTitle）；
+        // 静默登录窗口不可见，调用方传 None，沿用下面的通用默认标题。
+        .title(title.unwrap_or("Age of Empires"))
         .inner_size(520.0, 780.0)
         .min_inner_size(420.0, 600.0)
         .visible(visible)
@@ -246,7 +256,7 @@ pub fn ensure_account_window(
             ACCOUNT_WINDOW,
             visible
         );
-        format!("无法创建登录窗口：{e}")
+        user_err("session.loginWindowFailed", json!({ "error": e.to_string() }))
     })?;
 
     attach_window_logging(&window);
@@ -285,7 +295,10 @@ pub fn clear_login_cache(app: &AppHandle) -> Result<String, String> {
         if cache_path.exists() {
             if let Err(e) = secure::clear(&cache_path) {
                 log::error!(target: "session-cache", "删除加密会话缓存失败：{e}");
-                failures.push(format!("删除加密会话缓存失败：{e}"));
+                failures.push(user_err(
+                    "session.cacheClearFailed",
+                    json!({ "error": e.to_string() }),
+                ));
             }
         }
     }
@@ -334,16 +347,18 @@ pub fn clear_login_cache(app: &AppHandle) -> Result<String, String> {
             "退出登录未完成：{}",
             failures.join("；")
         );
-        return Err(format!(
-            "退出登录失败：文件被占用，请重启软件后清理（{}）",
-            failures.join("；")
+        // detail 里可能又是一串 aoe2mm:err 子错误（同样用「；」拼接），
+        // 前端 translateBackendMessage 会逐段翻译，不会把协议串甩给用户。
+        return Err(user_err(
+            "session.logoutFailed",
+            json!({ "detail": failures.join("；") }),
         ));
     }
     let _ = std::fs::create_dir_all(&dir);
 
-    Ok(format!(
-        "已退出登录：AoE Cookie 与 WebView2 数据目录均已清空（{}）",
-        dir.display()
+    Ok(user_err(
+        "session.logoutDone",
+        json!({ "path": dir.display().to_string() }),
     ))
 }
 
@@ -538,7 +553,7 @@ pub fn clear_sync_cancel() {
 pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
     let settings: Settings = settings::load_for_app(app);
     log_remember_login_once(settings.remember_login);
-    let window = ensure_account_window(app, HOME_URL, false)?;
+    let window = ensure_account_window(app, HOME_URL, false, None)?;
     let header = collect_cookie_header(&window)?;
 
     if !header.is_empty() && has_real_credential(&header) {
@@ -658,10 +673,16 @@ pub fn invalidate_cached_session(app: &AppHandle) -> Result<(), String> {
                 Ok(blank) => {
                     if let Err(e) = window.navigate(blank) {
                         log::error!(target: "session-cookie", "阻断账号窗口重载失败：{e}");
-                        failures.push(format!("阻断窗口重载失败：{e}"));
+                        failures.push(user_err(
+                            "session.reloadBlockFailed",
+                            json!({ "error": e.to_string() }),
+                        ));
                     }
                 }
-                Err(e) => failures.push(format!("about:blank 解析失败：{e}")),
+                Err(e) => failures.push(user_err(
+                    "session.blankUrlInvalid",
+                    json!({ "error": e.to_string() }),
+                )),
             }
 
             // ③ 清 AoE Cookie（需要活窗口才拿得到 CookieManager），失败必须冒泡
@@ -673,7 +694,10 @@ pub fn invalidate_cached_session(app: &AppHandle) -> Result<(), String> {
             // ④ 销毁窗口且不重建：销毁后网页不可能再回来下发凭证
             if let Err(e) = window.destroy() {
                 log::error!(target: "account-window", "销毁账号窗口失败：{e}");
-                failures.push(format!("销毁账号窗口失败：{e}"));
+                failures.push(user_err(
+                    "session.windowDestroyFailed",
+                    json!({ "error": e.to_string() }),
+                ));
             }
         }
         None => log::info!(target: "session-cookie", "没有账号窗口，跳过 Cookie 清理"),
@@ -684,7 +708,10 @@ pub fn invalidate_cached_session(app: &AppHandle) -> Result<(), String> {
         if path.exists() {
             if let Err(e) = secure::clear(&path) {
                 log::error!(target: "session-cache", "删除加密会话缓存失败：{e}");
-                failures.push(format!("删除加密会话缓存失败：{e}"));
+                failures.push(user_err(
+                    "session.cacheClearFailed",
+                    json!({ "error": e.to_string() }),
+                ));
             }
         }
     }
@@ -947,13 +974,16 @@ fn persist_in_window(
 
     let controller = webview.controller();
     let core = unsafe { controller.CoreWebView2() }
-        .map_err(|e| format!("取 CoreWebView2 失败：{e}"))?;
+        .map_err(|e| user_err("session.coreFailed", json!({ "error": e.to_string() })))?;
     // CookieManager 在 ICoreWebView2_2 上（与 wry 内部做法一致，ICoreWebView2 本身没有）
-    let core = core
-        .cast::<ICoreWebView2_2>()
-        .map_err(|e| format!("升级到 ICoreWebView2_2 失败：{e}"))?;
+    let core = core.cast::<ICoreWebView2_2>().map_err(|e| {
+        user_err(
+            "session.interfaceUpgradeFailed",
+            json!({ "error": e.to_string() }),
+        )
+    })?;
     let manager = unsafe { core.CookieManager() }
-        .map_err(|e| format!("取 CookieManager 失败：{e}"))?;
+        .map_err(|e| user_err("session.cookieManagerFailed", json!({ "error": e.to_string() })))?;
 
     let deadline = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1038,7 +1068,10 @@ fn purge_webview_cookies(app: &AppHandle) -> Result<usize, String> {
     if let Err(e) = window.with_webview(move |webview| {
         delete_aoe_cookies_in_window(webview, tx);
     }) {
-        let msg = format!("无法访问 WebView2，AoE Cookie 未清理：{e}");
+        let msg = user_err(
+            "session.cookiesClearFailed",
+            json!({ "error": e.to_string() }),
+        );
         log::error!(target: "session-cookie", "{msg}");
         return Err(msg);
     }
@@ -1067,15 +1100,22 @@ fn purge_webview_cookies(app: &AppHandle) -> Result<usize, String> {
     }
 
     if replies < AOE_COOKIE_URLS.len() {
-        let msg = format!(
-            "清空 AoE Cookie 超时（{replies}/{} 个域已回，已删 {deleted} 条）",
-            AOE_COOKIE_URLS.len()
+        let msg = user_err(
+            "session.cookieClearTimeout",
+            json!({
+                "replies": replies,
+                "total": AOE_COOKIE_URLS.len(),
+                "deleted": deleted,
+            }),
         );
         log::error!(target: "session-cookie", "{msg}");
         return Err(msg);
     }
     if let Some(e) = last_err {
-        let msg = format!("清空 AoE Cookie 失败：{e}（已删 {deleted} 条）");
+        let msg = user_err(
+            "session.cookieClearFailed",
+            json!({ "error": e, "deleted": deleted }),
+        );
         log::error!(target: "session-cookie", "{msg}");
         return Err(msg);
     }
@@ -1189,7 +1229,8 @@ fn delete_aoe_cookies_from_list(
         return Ok(0);
     };
     let mut total = 0u32;
-    unsafe { list.Count(&mut total) }.map_err(|e| format!("读取 Cookie 列表长度失败：{e}"))?;
+    unsafe { list.Count(&mut total) }
+        .map_err(|e| user_err("session.cookieCountFailed", json!({ "error": e.to_string() })))?;
 
     let mut deleted = 0usize;
     let mut failed = 0usize;
@@ -1279,7 +1320,7 @@ fn is_aoe_host(host: &str) -> bool {
 /// 否则拿着刚被 401 的旧 Cookie 直接返回，重试必然再 401。
 /// **必须在非主线程调用**（内部会创建/复用 WebView2 窗口）。
 pub fn ensure_session(app: &AppHandle) -> Result<String, String> {
-    let before = match ensure_account_window(app, HOME_URL, false) {
+    let before = match ensure_account_window(app, HOME_URL, false, None) {
         Ok(win) => collect_cookie_header(&win).unwrap_or_default(),
         Err(e) => {
             log::warn!(target: "account", "自动重登前读取旧 Cookie 失败：{e}");
@@ -1293,11 +1334,16 @@ pub fn ensure_session(app: &AppHandle) -> Result<String, String> {
         "自动重登：旧 Cookie 共 {} 条，开始隐藏窗口跑 SSO",
         before_sig.len()
     );
-    let window = ensure_account_window(app, LOGIN_URL, false)?;
+    let window = ensure_account_window(app, LOGIN_URL, false, None)?;
     if let Ok(parsed) = Url::parse(LOGIN_URL) {
         window
             .navigate(parsed)
-            .map_err(|e| format!("自动重登导航失败：{e}"))?;
+            .map_err(|e| {
+                user_err(
+                    "session.reloginNavigateFailed",
+                    json!({ "error": e.to_string() }),
+                )
+            })?;
     }
 
     let started = Instant::now();

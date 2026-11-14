@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   mockTranslationOf: vi.fn(() => null),
   mockEnsureTranslation: vi.fn(),
   mockLoadCachedTranslation: vi.fn(() => Promise.resolve()),
+  mockRefreshLocalCover: vi.fn(),
 }));
 
 // ---- Mock external dependencies (paths resolved from __tests__/) ----
@@ -21,6 +22,7 @@ vi.mock("../../api", () => ({
   toggleModEnabled: vi.fn(),
   deleteModFiles: vi.fn(),
   revealModFolder: vi.fn(),
+  refreshLocalCover: mocks.mockRefreshLocalCover,
   fileUrl: vi.fn((p: string) => p),
 }));
 
@@ -69,7 +71,7 @@ vi.mock("../../online/types", () => ({
 }));
 
 // ---- Import mocked fns for assertions ----
-import { toggleModEnabled, deleteModFiles } from "../../api";
+import { toggleModEnabled, deleteModFiles, refreshLocalCover } from "../../api";
 
 // ---- Helper: build a valid mock mod ----
 function makeMod(overrides: Partial<ModEntry> = {}): ModEntry {
@@ -99,6 +101,8 @@ function makeMod(overrides: Partial<ModEntry> = {}): ModEntry {
     issues: [],
     infoJsonPresent: true,
     isDataMod: false,
+    sizeBytes: null,
+    sizeComplete: false,
     uninstalled: false,
     ...overrides,
   };
@@ -267,3 +271,111 @@ describe("ModDetail: 翻译按钮事件链", () => {
     expect(mocks.mockEnsureTranslation).not.toHaveBeenCalled();
   });
 });
+
+// ============================================================
+// Test 4: Local cover refresh event chain
+// ============================================================
+describe("ModDetail: 本地封面重新获取链路", () => {
+  it("成功后调用本地封面命令并上抛写入路径", async () => {
+    mocks.mockRefreshLocalCover.mockResolvedValue({
+      status: "refreshed",
+      bytes: 123,
+      installPath: "F:/Games/AoE2DE/mods/local/test_mod_12345/thumbnail.jpg",
+      sourceUrl: "https://cdn.example/cover.webp",
+    });
+
+    const wrapper = mountDetail();
+    const button = wrapper.find(".cover-reload-btn");
+    expect(button.exists()).toBe(true);
+
+    await button.trigger("click");
+    await flushPromises();
+
+    expect(refreshLocalCover).toHaveBeenCalledWith(12345, "local", "test_mod_12345");
+    expect(wrapper.emitted("cover-updated")).toEqual([
+      [{ id: "local/test_mod_12345", path: "F:/Games/AoE2DE/mods/local/test_mod_12345/thumbnail.jpg" }],
+    ]);
+  });
+
+  it("下载或写入失败时不发出 cover-updated 事件", async () => {
+    mocks.mockRefreshLocalCover.mockRejectedValue(new Error("aoe2mm:err:cover.imageInvalid"));
+
+    const wrapper = mountDetail();
+    await wrapper.find(".cover-reload-btn").trigger("click");
+    await flushPromises();
+
+    expect(refreshLocalCover).toHaveBeenCalledTimes(1);
+    expect(wrapper.emitted("cover-updated")).toBeFalsy();
+  });
+
+  it("缺少可靠官方 ID 时不调用后端下载", async () => {
+    const wrapper = mountDetail(makeMod({ workshopId: null }));
+    await wrapper.find(".cover-reload-btn").trigger("click");
+    await flushPromises();
+
+    expect(refreshLocalCover).not.toHaveBeenCalled();
+    expect(wrapper.emitted("cover-updated")).toBeFalsy();
+  });
+
+  it("请求进行中按钮禁用，重复点击不会触发第二次命令", async () => {
+    mocks.mockRefreshLocalCover.mockReturnValue(new Promise(() => {}));
+
+    const wrapper = mountDetail();
+    const button = wrapper.find(".cover-reload-btn");
+    await button.trigger("click");
+    await flushPromises();
+
+    expect((button.element as HTMLButtonElement).disabled).toBe(true);
+    await button.trigger("click");
+    expect(refreshLocalCover).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================
+// 回归：加载优先级只读展示（v0.5.1 改版曾静默删除该行）
+// t() 在本 spec 中被 mock 成「返回键名」，因此断言的是真实渲染出的 DOM 文本。
+// ============================================================
+function priorityField(wrapper: ReturnType<typeof mountDetail>) {
+  return wrapper
+    .findAll(".dv-zone-status .field")
+    .find((field) => field.find(".k").text() === "detail.priority");
+}
+
+describe("ModDetail: 加载优先级只读展示", () => {
+  it("有优先级时在状态区渲染出数字", () => {
+    const wrapper = mountDetail(makeMod({ priority: 100 }));
+
+    const field = priorityField(wrapper);
+    expect(field).toBeTruthy();
+    expect(field!.find(".v").text()).toBe("100");
+    // 已知优先级不应命中「未知」样式
+    expect(field!.find(".v").classes()).not.toContain("missing");
+    // 只读：状态区内不提供任何修改优先级的输入或按钮
+    expect(field!.find("input").exists()).toBe(false);
+    expect(field!.find("button").exists()).toBe(false);
+  });
+
+  it("优先级为空时显示未知值并标记 missing", () => {
+    const wrapper = mountDetail(makeMod({ priority: null }));
+
+    const field = priorityField(wrapper);
+    expect(field).toBeTruthy();
+    expect(field!.find(".v").text()).toBe("labels.unknown");
+    expect(field!.find(".v").classes()).toContain("missing");
+  });
+
+  it("未安装占位条目整个状态区不渲染，不会显示虚假优先级", () => {
+    const wrapper = mountDetail(makeMod({ uninstalled: true, enabled: null, priority: null }));
+
+    expect(wrapper.find(".dv-zone-status").exists()).toBe(false);
+    expect(priorityField(wrapper)).toBeFalsy();
+  });
+
+  it("优先级行不影响已有的启停/卸载入口", () => {
+    const wrapper = mountDetail(makeMod({ priority: 7 }));
+
+    expect(wrapper.find("button.toggle.dv-toggle").exists()).toBe(true);
+    expect(priorityField(wrapper)!.find(".v").text()).toBe("7");
+  });
+});
+

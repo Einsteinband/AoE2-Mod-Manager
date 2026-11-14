@@ -64,6 +64,8 @@ function buildGhost(modId: number, cover: string | null): ModEntry {
     issues: [],
     infoJsonPresent: false,
     isDataMod: false,
+    sizeBytes: null,
+    sizeComplete: false,
     uninstalled: true,
   };
 }

@@ -160,6 +160,30 @@ fn is_placeholder_thumbnail(url: &str) -> bool {
     lower.ends_with("thumb_") || lower.is_empty()
 }
 
+/// 从官方 Detail 原始 JSON 提取封面地址。
+/// Detail 模板使用 `imageUrls[].imageThumbnail`；同时保留列表兼容键作为兜底。
+pub fn detail_cover_url(raw: &Value) -> Option<String> {
+    if let Some(items) = raw.get("imageUrls").and_then(|v| v.as_array()) {
+        for item in items {
+            let keys = ["imageThumbnail", "thumbnail", "imageName", "imageUrl", "url"];
+            if let Some(url) = pick_str(item, &keys) {
+                if !is_placeholder_thumbnail(&url) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+
+    let direct_keys = ["thumbnail", "thumbnailUrl", "image", "modIcon", "imageUrl"];
+    if let Some(url) = pick_str(raw, &direct_keys) {
+        if !is_placeholder_thumbnail(&url) {
+            return Some(url);
+        }
+    }
+
+    None
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FindResult {
@@ -270,5 +294,40 @@ mod tests {
         let parsed = OnlineModSummary::from_value(&item(json!({ "thumbnail": "https://cdn.ageofempires.com/aoe/mods/thumb_" })))
             .unwrap();
         assert_eq!(parsed.thumbnail, None);
+    }
+
+    #[test]
+    fn detail_cover_prefers_image_thumbnail_then_direct_key() {
+        let detail = json!({
+            "thumbnail": "https://cdn.example/list.jpg",
+            "imageUrls": [{
+                "imageThumbnail": "https://cdn.example/detail-thumb.webp",
+                "imageName": "https://cdn.example/detail-full.png"
+            }]
+        });
+        assert_eq!(
+            detail_cover_url(&detail).as_deref(),
+            Some("https://cdn.example/detail-thumb.webp")
+        );
+
+        let fallback = json!({ "thumbnailUrl": "https://cdn.example/fallback.jpg" });
+        assert_eq!(
+            detail_cover_url(&fallback).as_deref(),
+            Some("https://cdn.example/fallback.jpg")
+        );
+    }
+
+    #[test]
+    fn detail_cover_drops_placeholder_and_missing_url() {
+        let detail = json!({
+            "thumbnail": "https://cdn.ageofempires.com/aoe/mods/thumb_",
+            "imageUrls": [{ "imageThumbnail": null, "imageName": "https://cdn.example/full.png" }]
+        });
+        assert_eq!(
+            detail_cover_url(&detail).as_deref(),
+            Some("https://cdn.example/full.png")
+        );
+
+        assert_eq!(detail_cover_url(&json!({})), None);
     }
 }

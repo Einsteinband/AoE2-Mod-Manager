@@ -59,6 +59,8 @@ function makeMod(overrides: Partial<ModEntry> = {}): ModEntry {
     issues: [],
     infoJsonPresent: true,
     isDataMod: false,
+    sizeBytes: null,
+    sizeComplete: false,
     uninstalled: false,
     ...overrides,
   };

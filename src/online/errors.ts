@@ -12,7 +12,7 @@ export function rawMessageOf(e: unknown): string {
   if (isApiFailure(e)) return e.message;
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
-  return "aoe2mm:err:labels.unknown";
+  return "aoe2mm:err:common.unknownError";
 }
 
 /** 即时翻译（事件回调里弹 toast 用，不进 ref）。 */

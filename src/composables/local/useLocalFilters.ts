@@ -11,7 +11,7 @@
 import { computed, ref, watch, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { customNameOf, displayTitle, isFavorite } from "../../userData";
-import { TAG_ZH } from "../../online/types";
+import { TAG_RANK_BY_NAME } from "../../online/types";
 import { updateIds } from "../../modUpdates";
 import type { ModEntry, SortKey, SourceFilter, StatusFilter } from "../../types";
 
@@ -27,14 +27,40 @@ export interface FilterSnapshot {
   status: StatusFilter;
   activeTag: string | null;
   sortKey: SortKey;
+  order: "DESC" | "ASC";
   favoritesOnly: boolean;
   updatesOnly: boolean;
 }
 
-/** 官方 17 项分类的固定顺序（直接复用在线页的 TAG_ZH，保证两侧排列一致） */
-const TAG_ORDER: Record<string, number> = Object.fromEntries(
-  Object.values(TAG_ZH).map((name, index) => [name, index]),
-);
+/** 官方 17 项分类的固定顺序（复用在线页的分类身份表，保证两侧排列一致）。
+ *  注意：这是排序权重，键是原始分类名 —— 筛选身份仍是原始名，不随界面语言变化。 */
+const TAG_ORDER: Record<string, number> = TAG_RANK_BY_NAME;
+
+function localSizeBytes(mod: ModEntry): number | null {
+  if (
+    !mod.sizeComplete ||
+    typeof mod.sizeBytes !== "number" ||
+    !Number.isFinite(mod.sizeBytes) ||
+    mod.sizeBytes < 0
+  ) {
+    return null;
+  }
+  return mod.sizeBytes;
+}
+
+function stableTitleCompare(
+  a: ModEntry,
+  b: ModEntry,
+  collator: Intl.Collator,
+): number {
+  const byTitle = collator.compare(
+    displayTitle(a.workshopId, a.displayName),
+    displayTitle(b.workshopId, b.displayName),
+  );
+  if (byTitle !== 0) return byTitle;
+  const byFolder = collator.compare(a.folderName, b.folderName);
+  return byFolder !== 0 ? byFolder : a.id.localeCompare(b.id);
+}
 
 export function useLocalFilters(deps: {
   mods: ComputedRef<ModEntry[]>;
@@ -57,6 +83,8 @@ export function useLocalFilters(deps: {
   /** v0.7：只看有更新的模组（matched && has_update=true） */
   const updatesOnly = ref(false);
   const sortKey = ref<SortKey>("name");
+  /** 仅文件大小排序使用：DESC = 从大到小，ASC = 从小到大；其他排序键方向固定 */
+  const order = ref<"DESC" | "ASC">("DESC");
   /** 左侧选中的官方/推断标签；null = 全部内容 */
   const activeTag = ref<string | null>(null);
 
@@ -151,6 +179,17 @@ export function useLocalFilters(deps: {
           const av = a.priority ?? Number.MAX_SAFE_INTEGER;
           const bv = b.priority ?? Number.MAX_SAFE_INTEGER;
           return av - bv;
+        }
+        case "size": {
+          const av = localSizeBytes(a);
+          const bv = localSizeBytes(b);
+          if (av === null || bv === null) {
+            if (av === null && bv === null) return stableTitleCompare(a, b, collator);
+            return av === null ? 1 : -1;
+          }
+          let cmp = av < bv ? -1 : av > bv ? 1 : 0;
+          if (order.value === "DESC") cmp = -cmp;
+          return cmp !== 0 ? cmp : stableTitleCompare(a, b, collator);
         }
         case "folder":
           return collator.compare(a.folderName, b.folderName);
@@ -294,6 +333,7 @@ export function useLocalFilters(deps: {
       status: status.value,
       activeTag: activeTag.value,
       sortKey: sortKey.value,
+      order: order.value,
       favoritesOnly: favoritesOnly.value,
       updatesOnly: updatesOnly.value,
     };
@@ -305,6 +345,7 @@ export function useLocalFilters(deps: {
     status.value = snap.status;
     activeTag.value = snap.activeTag;
     sortKey.value = snap.sortKey;
+    order.value = snap.order;
     favoritesOnly.value = snap.favoritesOnly;
     updatesOnly.value = snap.updatesOnly;
   }
@@ -325,6 +366,7 @@ export function useLocalFilters(deps: {
     favoritesOnly,
     updatesOnly,
     sortKey,
+    order,
     activeTag,
     sourceCounts,
     statusCounts,

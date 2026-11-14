@@ -797,6 +797,32 @@ pub fn write_thumbnail(dir: &Path, bytes: &[u8]) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// 本地封面恢复专用：先在模组目录内写临时文件，魔数校验通过后再 rename 替换正式封面。
+/// 校验失败或替换失败时删除临时文件，不覆盖旧封面。
+pub fn write_thumbnail_atomic(dir: &Path, bytes: &[u8]) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err(user_err("install.thumbnailEmpty", json!({})));
+    }
+    if !crate::images::looks_valid_image(bytes) {
+        return Err(user_err("install.thumbnailInvalid", json!({})));
+    }
+
+    let final_path = dir.join("thumbnail.jpg");
+    let tmp_path = dir.join("thumbnail.jpg.tmp");
+    if let Err(e) = fs::write(&tmp_path, bytes) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(user_err("install.thumbnailWriteFailed", json!({ "error": e.to_string() })));
+    }
+
+    if let Err(e) = fs::rename(&tmp_path, &final_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(user_err("install.thumbnailWriteFailed", json!({ "error": e.to_string() })));
+    }
+
+    log::info!(target: "install", "已原子替换缩略图：{}（{} 字节）", final_path.display(), bytes.len());
+    Ok(final_path.to_string_lossy().to_string())
+}
+
 // ---------------- 卸载：先解析校验，再删且只删那一个目录 ----------------
 
 /// 校验通过的卸载目标（`dir` 与 `parent` 都已规范化）
@@ -1902,6 +1928,24 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn thumbnail_atomic_replace_keeps_old_on_invalid() {
+        let dir = temp_dir("thumb-atomic");
+        let jpg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+        fs::write(dir.join("thumbnail.jpg"), b"old").unwrap();
+
+        let path = write_thumbnail_atomic(&dir, &jpg).unwrap();
+        assert!(path.ends_with("thumbnail.jpg"));
+        assert_eq!(fs::read(&path).unwrap(), jpg);
+        assert!(!dir.join("thumbnail.jpg.tmp").exists());
+
+        assert!(write_thumbnail_atomic(&dir, b"not-an-image").is_err());
+        assert_eq!(fs::read(&path).unwrap(), jpg);
+        assert!(!dir.join("thumbnail.jpg.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ---- 兜底：移动到 local ----

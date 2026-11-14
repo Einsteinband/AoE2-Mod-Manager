@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 通用设置 Tab：语言选择 + 模组根目录 + 游戏根目录
+ * 通用设置 Tab：语言选择 + 在线大小排序开关 + 模组根目录 + 游戏根目录
  *
  * 自包含：自己加载、保存、校验、交互，SettingsModal 只负责 Tab 组织和外部协调。
  */
@@ -8,19 +8,35 @@ import { computed, nextTick, onMounted, ref } from "vue";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import { LOCALE_OPTIONS, applyLocale, type Locale } from "../../i18n";
-import { detectGameRoot, getSettings, setGameRootDir, setLocale } from "../../api";
+import {
+  detectGameRoot,
+  getSettings,
+  pickFolder,
+  setGameRootDir,
+  setLocale,
+  setModRoot,
+} from "../../api";
+import type { ScanReport } from "../../types";
 import { msgText, normalizeBackendError, type Msg } from "../../format";
+import {
+  onlineSizeSortEnabled,
+  setOnlineSizeSortEnabled,
+} from "../../composables/online/onlineSizeSortSetting";
 
 const { t, locale } = useI18n();
+
+function toggleOnlineSizeSort(event: Event): void {
+  setOnlineSizeSortEnabled((event.target as HTMLInputElement).checked);
+}
 
 const props = defineProps<{
   /** 当前模组根目录（外部传入，只用于展示） */
   rootPath?: string;
 }>();
-void props;
 
 const emit = defineEmits<{
-  (e: "change-root"): void;
+  /** 模组根目录已改（后端已写 settings.json 并返回完整扫描结果） */
+  (e: "root-changed", report: ScanReport): void;
 }>();
 
 // ---------------- 语言 ----------------
@@ -44,6 +60,40 @@ async function applyAndSaveLocale(next: Locale): Promise<void> {
 function onLocaleChange(e: Event): void {
   const next = (e.target as HTMLSelectElement).value as Locale;
   void applyAndSaveLocale(next);
+}
+
+// ---------------- 模组根目录 ----------------
+const modRootBusy = ref(false);
+const modRootMessage = ref<Msg | null>(null);
+const modRootError = ref<Msg | null>(null);
+
+/**
+ * 换模组根目录：选目录 → 后端 `set_mod_root` 写 settings.json 并直接返回完整扫描结果。
+ * 之前这里只 emit 一个 `change-root`，App 那边把它接到「打开设置 + 闪烁游戏根目录」，
+ * 而按钮本来就在设置页内，于是点下去没有任何可见反应（也没有真正改根目录）。
+ */
+async function pickModRoot(): Promise<void> {
+  if (modRootBusy.value) return;
+  modRootError.value = null;
+  modRootMessage.value = null;
+  let picked: string | null = null;
+  try {
+    picked = await pickFolder(props.rootPath || null);
+  } catch (e) {
+    modRootError.value = normalizeBackendError(e);
+    return;
+  }
+  if (!picked) return;
+  modRootBusy.value = true;
+  try {
+    const next = await setModRoot(picked);
+    emit("root-changed", next);
+    modRootMessage.value = { key: "settingsUi.rootSaved" };
+  } catch (e) {
+    modRootError.value = normalizeBackendError(e);
+  } finally {
+    modRootBusy.value = false;
+  }
 }
 
 // ---------------- 游戏根目录 ----------------
@@ -173,13 +223,39 @@ onMounted(() => {
 
     <div class="settings-sep"></div>
 
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settings.onlineSizeSort") }}</span>
+        <span class="row-note">{{ t("settings.onlineSizeSortNote") }}</span>
+      </div>
+      <label class="settings-check-line">
+        <input
+          type="checkbox"
+          :checked="onlineSizeSortEnabled"
+          :aria-label="t('settings.onlineSizeSort')"
+          @change="toggleOnlineSizeSort"
+        />
+        {{ onlineSizeSortEnabled ? t("settings.onlineSizeSortOn") : t("settings.onlineSizeSortOff") }}
+      </label>
+    </div>
+
+    <div class="settings-sep"></div>
+
     <!-- v2.1：模组根目录从「外观」搬回「通用」 -->
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settingsUi.rootTitle") }}</span>
         <span class="row-note mono">{{ rootPath || t("settingsUi.rootEmpty") }}</span>
+        <span v-if="modRootError" class="game-root-warn">{{ msgText(modRootError) }}</span>
+        <span v-else-if="modRootMessage" class="game-root-ok">{{ msgText(modRootMessage) }}</span>
       </div>
-      <button type="button" class="settings-check" @click="emit('change-root')">
+      <button
+        type="button"
+        class="settings-check"
+        :disabled="modRootBusy"
+        @click="pickModRoot"
+      >
+        <span v-if="modRootBusy" class="spinner"></span>
         {{ t("settingsUi.changeRoot") }}
       </button>
     </div>
@@ -308,6 +384,13 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+.settings-check-line input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--gold);
+  cursor: pointer;
 }
 .settings-check {
   padding: 6px 12px;

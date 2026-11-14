@@ -2,10 +2,12 @@ import { describe, it, expect } from "vitest";
 import zh from "../locales/zh";
 import en from "../locales/en";
 import es from "../locales/es";
+import de from "../locales/de";
+import ru from "../locales/ru";
 
-const locales = { zh, en, es };
+const locales = { zh, en, es, de, ru };
 
-/** 菜单直接复用 / 依赖的既有 key（三语必须齐全） */
+/** 菜单直接复用 / 依赖的既有 key（五语必须齐全） */
 const REQUIRED_PATHS = [
   "menu.enable",
   "menu.disable",
@@ -26,6 +28,7 @@ const REQUIRED_PATHS = [
   "detail.confirmLocalOnly",
   "detail.deleteConfirmLabel",
   "detail.downloadInstall",
+  "toolbar.sortFileSize",
   "detail.errReveal",
   "detail.errOpenWebsite",
   "detail.errDelete",
@@ -42,6 +45,11 @@ const REQUIRED_PATHS = [
   "translate.failBusy",
   "translate.failQuota",
   "translate.failGeneric",
+  "online.sortFileSize",
+  "settings.onlineSizeSort",
+  "settings.onlineSizeSortNote",
+  "settings.onlineSizeSortOn",
+  "settings.onlineSizeSortOff",
   "online.installLocal",
   "online.reinstallLocal",
   "online.installing",

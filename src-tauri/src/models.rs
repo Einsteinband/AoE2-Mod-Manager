@@ -84,6 +84,12 @@ pub struct ModEntry {
     /// 是否数据模组：模组内含游戏核心数据库文件（如 empires2_x2_p1.dat）。
     /// 游戏同一时间只能加载一个数据模组，前端启用前必须做互斥拦截。
     pub is_data_mod: bool,
+    /// 列表扫描阶段统计到的普通文件字节总量；不完整或不可读时为 None。
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    /// 大小统计是否完整遍历；False 时 size_bytes 不得作为真实大小参与排序。
+    #[serde(default)]
+    pub size_complete: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]

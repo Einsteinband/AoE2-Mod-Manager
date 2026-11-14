@@ -2,7 +2,7 @@
  *  字段名来自官网列表模板实际使用的键；详情接口的完整 schema 未经认证验证，
  *  因此详情统一用 `Record<string, unknown>` + 原始的已知字段兜底展示。 */
 
-import { i18n } from "../i18n";
+import { translate } from "../i18n";
 import { translateBackendMessage } from "../format";
 
 export interface OnlineMod {
@@ -56,83 +56,150 @@ export const FALLBACK_TAGS: ModTag[] = [
   { modTypeId: 30, modTypeName: "Return of Rome", gameTitleId: 2 },
 ];
 
-/** 官方分类的中文名（仅用于展示，id 已对官方字典逐一核对） */
-export const TAG_ZH: Record<number, string> = {
-  9: "人工智能",
-  10: "战役",
-  11: "数据模组",
-  12: "图像",
-  13: "影片",
-  14: "音乐",
-  15: "随机地图",
-  16: "场景",
-  17: "音效",
-  18: "语音",
-  19: "嘲讽音",
-  20: "地形",
-  21: "菜单背景",
-  22: "用户界面",
-  23: "文本",
-  26: "其他",
-  30: "罗马复兴",
+/**
+ * 分类的「身份」与「显示」彻底分离：
+ * - 身份 = 官方 modTypeId，或数据层里的那个原始名称（中文名 / 英文名 / scan.rs 兜底名）。
+ *   筛选、排序、mod_metadata.json 持久化都用身份，绝不翻译。
+ * - 显示 = 语言包 `tagNames.*`，随界面语言切换，三语齐全。
+ *
+ * 以前只有「中文 ↔ 英文」二值映射，西班牙语界面会退化成英文或中文原文，
+ * 新增第三种语言时必须再补两套映射表；现在只补语言包即可。
+ */
+
+/** 官方 17 项：id + 官方英文名（FALLBACK_TAGS 的 modTypeName）+ 数据层中文名 + tagNames.* 后缀 */
+const OFFICIAL_TAGS: { id: number; name: string; zh: string; key: string }[] = [
+  { id: 9, name: "Artificial Intelligence", zh: "人工智能", key: "artificialIntelligence" },
+  { id: 10, name: "Campaign", zh: "战役", key: "campaign" },
+  { id: 11, name: "Data Mod", zh: "数据模组", key: "dataMod" },
+  { id: 12, name: "Graphics", zh: "图像", key: "graphics" },
+  { id: 13, name: "Movie", zh: "影片", key: "movie" },
+  { id: 14, name: "Music", zh: "音乐", key: "music" },
+  { id: 15, name: "Random Maps", zh: "随机地图", key: "randomMaps" },
+  { id: 16, name: "Scenarios", zh: "场景", key: "scenarios" },
+  { id: 17, name: "Sounds", zh: "音效", key: "sounds" },
+  { id: 18, name: "Speech", zh: "语音", key: "speech" },
+  { id: 19, name: "Taunt", zh: "嘲讽音", key: "taunt" },
+  { id: 20, name: "Terrain", zh: "地形", key: "terrain" },
+  { id: 21, name: "Menu Background", zh: "菜单背景", key: "menuBackground" },
+  { id: 22, name: "User Interface", zh: "用户界面", key: "userInterface" },
+  { id: 23, name: "Text", zh: "文本", key: "text" },
+  { id: 26, name: "Other", zh: "其他", key: "other" },
+  { id: 30, name: "Return of Rome", zh: "罗马复兴", key: "returnOfRome" },
+];
+
+/** 官方分类 id → tagNames.* 后缀 */
+export const TAG_KEY_BY_ID: Record<number, string> = OFFICIAL_TAGS.reduce(
+  (acc, item) => {
+    acc[item.id] = item.key;
+    return acc;
+  },
+  {} as Record<number, string>,
+);
+
+/**
+ * 原始分类名 → tagNames.* 后缀。
+ * 覆盖：官方中文名、官方英文名、历史别名（美术贴图 / 界面 UI / 界面 …）、
+ * 以及 scan.rs 本地特征推断出的兜底分类名。未知名字不做猜测，原样显示。
+ */
+export const TAG_KEY_BY_NAME: Record<string, string> = {
+  // 官方中文名
+  人工智能: "artificialIntelligence",
+  战役: "campaign",
+  数据模组: "dataMod",
+  图像: "graphics",
+  影片: "movie",
+  音乐: "music",
+  随机地图: "randomMaps",
+  场景: "scenarios",
+  音效: "sounds",
+  语音: "speech",
+  嘲讽音: "taunt",
+  地形: "terrain",
+  菜单背景: "menuBackground",
+  用户界面: "userInterface",
+  文本: "text",
+  其他: "other",
+  罗马复兴: "returnOfRome",
+  // 官方英文名（接口偶尔回英文，界面是中文/西语时也要能显示）
+  "Artificial Intelligence": "artificialIntelligence",
+  Campaign: "campaign",
+  "Data Mod": "dataMod",
+  Graphics: "graphics",
+  Movie: "movie",
+  Music: "music",
+  "Random Maps": "randomMaps",
+  Scenarios: "scenarios",
+  Sounds: "sounds",
+  Speech: "speech",
+  Taunt: "taunt",
+  Terrain: "terrain",
+  "Menu Background": "menuBackground",
+  "User Interface": "userInterface",
+  Text: "text",
+  Other: "other",
+  "Return of Rome": "returnOfRome",
+  // 历史别名 / scan.rs 兜底分类名
+  美术贴图: "textures",
+  材质: "materials",
+  音频: "audio",
+  地图: "maps",
+  数据: "data",
+  "数据/其他": "dataOther",
+  "数据 / 其他": "dataOther",
+  数据表: "dataTables",
+  历史条目: "historyEntries",
+  本地化: "localization",
+  "界面 UI": "userInterface",
+  界面: "userInterface",
 };
 
-export function tagLabel(tag: { modTypeId: number; modTypeName: string }): string {
-  return localizedTagName(TAG_ZH[tag.modTypeId] ?? tag.modTypeName);
+/**
+ * 本地侧栏分类的固定顺序：只给官方 17 项排位（原始中文名 → 序号），
+ * 其它兜底分类不排位，排序时统一落到末尾（与改造前行为一致）。
+ * 注意：这里只是「排序权重」，不参与显示，也不改变筛选身份。
+ */
+export const TAG_RANK_BY_NAME: Record<string, number> = OFFICIAL_TAGS.reduce(
+  (acc, item, index) => {
+    acc[item.zh] = index;
+    return acc;
+  },
+  {} as Record<string, number>,
+);
+
+/** 取某名字对应的 tagNames.* 后缀（无匹配返回 null） */
+export function tagKeyOfName(name: string): string | null {
+  const raw = (name ?? "").trim();
+  if (!raw) return null;
+  return TAG_KEY_BY_NAME[raw] ?? null;
 }
 
 /**
- * 分类名本地化：官方 API / mod_metadata.json 里存的是**中文名**（游戏客户端语言），
- * 英文界面必须自己映射；反向（接口偶尔回英文名、界面是中文）也一并处理。
- * 未知名字原样返回，绝不吞掉数据。
+ * 分类名本地化：优先按 tagNames.* 显示；未知名字（含 Rust 抛来的分类协议串）原样返回，
+ * 绝不吞掉数据。
  */
-export const TAG_EN_BY_ZH: Record<string, string> = {
-  // 官方网站字典（TAG_ZH）
-  人工智能: "Artificial Intelligence",
-  战役: "Campaign",
-  数据模组: "Data Mod",
-  图像: "Graphics",
-  美术贴图: "Graphics",
-  影片: "Movie",
-  音乐: "Music",
-  随机地图: "Random Maps",
-  场景: "Scenarios",
-  音效: "Sounds",
-  音频: "Audio",
-  语音: "Speech",
-  嘲讽音: "Taunt",
-  地形: "Terrain",
-  材质: "Materials",
-  菜单背景: "Menu Background",
-  用户界面: "User Interface",
-  "界面 UI": "User Interface",
-  界面: "User Interface",
-  文本: "Text",
-  其他: "Other",
-  罗马复兴: "Return of Rome",
-  // 本地特征推断可能出现的名字（scan.rs 兜底分类）
-  地图: "Maps",
-  数据: "Data",
-  "数据/其他": "Data / Other",
-};
-
-const TAG_ZH_BY_EN: Record<string, string> = Object.entries(TAG_EN_BY_ZH).reduce(
-  (acc, [zh, en]) => {
-    // 多个中文名指向同一个英文名时，保留第一个（官方字典的写法优先）
-    if (!acc[en]) acc[en] = zh;
-    return acc;
-  },
-  {} as Record<string, string>,
-);
-
 export function localizedTagName(name: string): string {
   const raw = (name ?? "").trim();
   if (!raw) return raw;
-  // Rust scan.rs 把"其他"等分类也走了 aoe2mm:err: 协议串，这里统一翻译
+  // 数据层偶尔把分类名也走了 aoe2mm:err: 协议串，交给后端错误翻译统一处理
   if (raw.startsWith("aoe2mm:err:")) return translateBackendMessage(raw);
-  if (i18n.global.locale.value === "zh") return TAG_ZH_BY_EN[raw] ?? raw;
-  return TAG_EN_BY_ZH[raw] ?? raw;
+  const key = tagKeyOfName(raw);
+  if (key) {
+    const text = translate(`tagNames.${key}`);
+    // 语言包缺这个 key 时 translate 会原样返回 key，此时退回原始名字
+    if (text && text !== `tagNames.${key}`) return text;
+  }
+  return raw;
 }
+
+export function tagLabel(tag: { modTypeId: number; modTypeName: string }): string {
+  const key = TAG_KEY_BY_ID[tag.modTypeId];
+  if (key) {
+    const text = translate(`tagNames.${key}`);
+    if (text && text !== `tagNames.${key}`) return text;
+  }
+  return localizedTagName(tag.modTypeName);
+}
+
 
 export interface FindResult {
   totalCount: number | null;
@@ -362,6 +429,7 @@ export const SORT_OPTIONS: { value: string; labelKey: string }[] = [
   { value: "createDate", labelKey: "online.sortCreateDate" },
   { value: "modName", labelKey: "online.sortModName" },
   { value: "creatorName", labelKey: "online.sortCreatorName" },
+  { value: "fileSize", labelKey: "online.sortFileSize" },
 ];
 
 export function isApiFailure(value: unknown): value is ApiFailure {

@@ -2,7 +2,7 @@
 
 # AoE2 Mod Manager
 
-🌍 Now supports English, Español, and 中文!
+🌍 Now supports English, Español, Deutsch, Русский and 中文!
 
 <table>
   <tr>
@@ -35,6 +35,7 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 - Shows the **enable state, load priority, last update and checksum exactly as `mod-status.json` records them** — never inferred.
 - Toggle a mod on/off: the app first verifies the game is not running, backs up `mod-status.json`, changes only the `Enabled` field, then reads the file back and rolls back automatically if verification fails.
 - Reveal any mod folder in Explorer, open its official page, or delete just that one local folder (with an explicit confirmation that explains the consequences).
+- Mods imported from a ZIP archive (experimental — RAR, 7z and batch import are not supported) and folders you drop into `local/` by hand are both listed, and labelled **imported externally** in the detail panel.
 
 ### Presets & batch restore
 - Save the current set of enabled mods as a named preset.
@@ -43,6 +44,7 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 
 ### Online mods (official service)
 - Search, browse and install mods from `api.ageofempires.com`, with the official categories, sort options and pagination.
+- Sort online mods by file size (opt-in via *Settings → General*). Sizes come from cached mod info, so a mod only shows a size after its info has been cached — nothing is downloaded just to measure it.
 - Sign-in happens in an embedded WebView2 window on the official Microsoft / Xbox page. **This app never asks for or stores your password.** The session cookie can optionally be cached locally with Windows DPAPI (remember-me).
 - Installed mods are placed in `local/` so the game can enable them immediately.
 - Network settings: follow the Windows system proxy automatically, or set a manual proxy (useful for players behind a proxy).
@@ -56,7 +58,7 @@ It reads the real files the game writes (`local/`, `subscribed/`, `info.json`, `
 - **Portable ZIP**: extract anywhere, no installation, no admin rights.
 
 ### Localization
-- Ships with English, Spanish (Español) and Simplified Chinese; the UI language can be switched in the top bar and is remembered in `settings.json`.
+- Ships with English, Spanish (Español), German (Deutsch), Russian (Русский) and Simplified Chinese (中文); the UI language can be switched in the top bar and is remembered in `settings.json`.
 - Language packs are loaded automatically from `src/i18n/locales/*.ts`, so adding a new language is a single drop-in file (see [Adding a language](#adding-a-language)).
 
 ---

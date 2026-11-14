@@ -2310,9 +2310,19 @@ mod tests {
         assert_eq!(lang_from_locale("zh-TW"), "zh-tw");
         assert_eq!(lang_from_locale("en"), "en");
         assert_eq!(lang_from_locale(""), DEFAULT_LANG);
+        // v0.6：新增界面语言 de / ru 必须原样透传，不能回退到 en 或 zh-cn；
+        // 区域变体（de-AT / ru-RU）也不做猜测，交给供应商按主语言处理。
+        assert_eq!(lang_from_locale("de"), "de");
+        assert_eq!(lang_from_locale("ru"), "ru");
+        assert_eq!(lang_from_locale("de-AT"), "de-at");
+        assert_eq!(lang_from_locale("ru-RU"), "ru-ru");
+        assert!(SUPPORTED_LANGS.contains(&"de"));
+        assert!(SUPPORTED_LANGS.contains(&"ru"));
         // 供应商字串
         assert_eq!(provider_target("zh-cn"), "zh-CN");
         assert_eq!(provider_target("ja"), "ja");
+        assert_eq!(provider_target("de"), "de");
+        assert_eq!(provider_target("ru"), "ru");
     }
 
     /// 历史 bug 的残留：详情未加载完就点翻译 → 空描述被写进缓存。

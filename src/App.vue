@@ -30,6 +30,7 @@ import {
   type UiAccent,
   type UiFontFamily,
 } from "./api";
+import type { ScanReport } from "./types";
 import {
   ACCENT_CSS_VARS,
   DEFAULT_ACCENT,
@@ -42,9 +43,15 @@ import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
 import { initDownloadQueue, onTaskSettled } from "./online/downloadQueue";
 import { hydrateFavoriteMeta } from "./favoriteMeta";
+import { normalizeBackendError } from "./format";
 import { SORT_OPTIONS } from "./online/types";
 import { useToast } from "./composables/useToast";
 import { useViewPrefs } from "./composables/useViewPrefs";
+import {
+  normalizeOnlineSortForSetting,
+  onlineSizeSortEnabled,
+  visibleOnlineSortOptions,
+} from "./composables/online/onlineSizeSortSetting";
 import {
   applyTranslateSettings,
   syncUiLocale,
@@ -81,19 +88,29 @@ const onlineSort = ref(SORT_OPTIONS[0].value);
 const onlineOrder = ref<"DESC" | "ASC">("DESC");
 const onlineRef = ref<InstanceType<typeof OnlineBrowser> | null>(null);
 
-function submitOnlineSearch() {
+/** 官方搜索防抖：输入停顿后才把词写入已提交 query，避免连续输入刷请求 */
+const ONLINE_SEARCH_DEBOUNCE_MS = 350;
+let onlineSearchTimer: number | null = null;
+
+function applyOnlineSearch(): void {
   const next = onlineQueryDraft.value.trim();
-  onlineQueryDraft.value = next;
-  if (next === onlineQuery.value) {
-    if (next) void onlineRef.value?.refresh?.();
-    return;
-  }
-  onlineQuery.value = next;
+  // 与当前已提交词一致就不重复触发；清空也会走到这里，恢复默认官方列表
+  if (next !== onlineQuery.value) onlineQuery.value = next;
 }
+
+watch(onlineQueryDraft, () => {
+  if (onlineSearchTimer !== null) window.clearTimeout(onlineSearchTimer);
+  onlineSearchTimer = window.setTimeout(applyOnlineSearch, ONLINE_SEARCH_DEBOUNCE_MS);
+});
+
 function resetOnlineSearch() {
   onlineQueryDraft.value = "";
   onlineQuery.value = "";
 }
+
+onBeforeUnmount(() => {
+  if (onlineSearchTimer !== null) window.clearTimeout(onlineSearchTimer);
+});
 
 watch(sessionEpoch, (epoch) => {
   if (epoch > 0) void kickIndexSync(epoch);
@@ -112,23 +129,33 @@ const localRef = ref<InstanceType<typeof LocalBrowser> | null>(null);
 const modRoot = ref<string | null | undefined>(undefined);
 const localSearch = ref("");
 const localSortModel = ref("name");
+const localOrder = ref<"DESC" | "ASC">("DESC");
 
 /** 本地排序项（i18n 文案） */
 const localSortOptions = computed(() => [
   { value: "name", label: t("toolbar.sortName") },
   { value: "updated", label: t("toolbar.sortUpdated") },
+  { value: "size", label: t("toolbar.sortFileSize") },
   { value: "download", label: t("toolbar.sortDownload") },
   { value: "priority", label: t("toolbar.sortPriority") },
   { value: "folder", label: t("toolbar.sortFolder") },
 ]);
+const localOrderLabels = computed(() => ({
+  desc: t("online.sortDesc"),
+  asc: t("online.sortAsc"),
+}));
 
 const onlineSortOptions = computed(() =>
-  SORT_OPTIONS.map((opt) => ({ value: opt.value, label: t(opt.labelKey) })),
+  visibleOnlineSortOptions.value.map((opt) => ({ value: opt.value, label: t(opt.labelKey) })),
 );
 const onlineOrderLabels = computed(() => ({
   desc: t("online.sortDesc"),
   asc: t("online.sortAsc"),
 }));
+
+watch(onlineSizeSortEnabled, () => {
+  onlineSort.value = normalizeOnlineSortForSetting(onlineSort.value);
+});
 
 // ---------------- 主题 ----------------
 type Theme = "dark" | "light";
@@ -399,7 +426,7 @@ onBeforeUnmount(() => {
 // ---------------- 顶栏「启动游戏」 ----------------
 const { launching: gameLaunching, launch: launchGameNow } = useGameLaunch({
   notify: showToast,
-  normalizeError: (e: unknown) => String(e),
+  normalizeError: normalizeBackendError,
   openGameRootSettings,
   texts: () => ({
     started: t("toolbar.launchGameStarted"),
@@ -426,10 +453,19 @@ function openGameRootSettings() {
   showSettings.value = true;
 }
 
+/**
+ * 设置 → 通用「更换根目录」：后端已经按新根目录重扫完，这里只把结果交给本地页接管。
+ * 旧实现把这个事件接到 openGameRootSettings（= 打开设置 + 闪烁游戏根目录），
+ * 而按钮本身就在设置页里，所以点下去毫无反应。
+ */
+function onModRootChanged(report: ScanReport): void {
+  localRef.value?.applyReport(report);
+}
+
 // ---------------- 作者主页 ----------------
 const AUTHOR_URL = "https://github.com/Einsteinband";
 async function openAuthorPage() {
-  try { await openExternalUrl(AUTHOR_URL); } catch (e) { showToast(String(e), "error"); }
+  try { await openExternalUrl(AUTHOR_URL); } catch (e) { showToast(normalizeBackendError(e), "error"); }
 }
 
 // ---------------- 版本更新说明（每版本只弹一次） ----------------
@@ -586,9 +622,16 @@ onBeforeUnmount(() => {
   <AppShell
     v-model:mode="mode"
     :author-url="AUTHOR_URL"
-    :local-count="localRef?.modsCount ?? 0"
+    :local-count="localRef?.sourceCounts?.local ?? 0"
+    :root-path="localRef?.reportRoot ?? ''"
+    :subscribed-count="localRef?.sourceCounts?.subscribed ?? 0"
+    :showing-count="localRef?.sortedCount ?? 0"
+    :total-count="localRef?.modsCount ?? 0"
+    :scanned-at="localRef?.lastScanText ?? ''"
+    :warning-count="localRef?.warnings?.length ?? 0"
     @open-author="openAuthorPage"
     @open-settings="showSettings = true"
+    @toggle-warnings="localRef?.toggleWarnings?.()"
   >
     <!-- 顶栏工具栏 -->
     <template #toolbar>
@@ -597,37 +640,54 @@ onBeforeUnmount(() => {
         v-if="mode === 'local'"
         v-model:search="localSearch"
         v-model:sort="localSortModel"
+        v-model:order="localOrder"
         v-model:view-mode="viewMode"
         :search-placeholder="localRef?.sortMode ? t('sort.searchDisabled') : t('search.placeholder')"
         :search-disabled="localRef?.sortMode ?? false"
         :sort-options="localSortOptions"
         :sort-disabled="localRef?.sortMode ?? false"
         :sort-title="localRef?.sortMode ? t('sort.sortDisabled') : t('toolbar.sortLabel')"
+        :order-labels="localSortModel === 'size' ? localOrderLabels : null"
+        :order-title="t('online.orderLabel')"
         :show-view-switch="false"
       >
         <template #extra>
           <button
             type="button"
-            class="icon-btn"
+            class="icon-btn refresh-btn"
             :disabled="(localRef?.loading ?? true) || !localRef?.hasReport"
-            :title="t('toolbar.rescanTitle')"
+            :title="t('toolbar.rescan')"
+            :aria-label="t('toolbar.rescan')"
             @click="localRef?.rescan()"
           >
-            <span class="glyph">🔄</span>
-            <span class="btn-text">{{ t("toolbar.rescan") }}</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 12a8 8 0 1 1-2.34-5.66"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+              <path
+                d="M20 3v4h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
           </button>
         </template>
       </ModToolbar>
 
-      <!-- 在线模式 -->
+      <!-- 在线模式：输入即防抖自动触发（无独立搜索按钮） -->
       <ModToolbar
         v-else
         v-model:search="onlineQueryDraft"
         v-model:sort="onlineSort"
         v-model:order="onlineOrder"
         v-model:view-mode="viewMode"
-        submit-mode
-        :submit-label="t('online.officialSearchGo')"
         :search-placeholder="t('online.officialSearchPlaceholder')"
         :search-title="t('online.officialSearchHint')"
         :clear-visible="Boolean(onlineQueryDraft || onlineQuery)"
@@ -636,13 +696,34 @@ onBeforeUnmount(() => {
         :order-labels="onlineOrderLabels"
         :order-title="t('online.orderLabel')"
         :show-view-switch="false"
-        @submit="submitOnlineSearch"
         @clear="resetOnlineSearch"
       >
         <template #extra>
-          <button type="button" class="icon-btn" :title="t('online.refreshTitle')" @click="onlineRef?.refresh()">
-            <span class="glyph">🔄</span>
-            <span class="btn-text">{{ t("online.refresh") }}</span>
+          <button
+            type="button"
+            class="icon-btn refresh-btn"
+            :disabled="Boolean(onlineRef?.loading)"
+            :title="t('online.refreshTitle')"
+            :aria-label="t('online.refresh')"
+            @click="onlineRef?.refresh()"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 12a8 8 0 1 1-2.34-5.66"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+              <path
+                d="M20 3v4h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
           </button>
         </template>
       </ModToolbar>
@@ -654,37 +735,13 @@ onBeforeUnmount(() => {
           class="launch-game-btn"
           :disabled="gameLaunching"
           :title="t('toolbar.launchGameTitle')"
+          :aria-label="gameLaunching ? t('toolbar.launchGameBusy') : t('toolbar.launchGame')"
           @click="launchGameNow"
         >
           <span class="glyph">🎮</span>
           <span class="btn-text">{{ gameLaunching ? t("toolbar.launchGameBusy") : t("toolbar.launchGame") }}</span>
         </button>
         <ViewSwitch v-model:view-mode="viewMode" />
-      </div>
-    </template>
-
-    <!-- 信息栏（rootbar）：数据从 LocalBrowser expose 获取 -->
-    <template #info>
-      <div v-if="mode === 'local'" class="rootbar">
-        <span>{{ t("rootbar.root") }}</span>
-        <span class="path" :title="localRef?.reportRoot ?? ''">{{ localRef?.reportRoot ?? t("rootbar.notSet") }}</span>
-        <span class="sep">|</span>
-        <span class="pill">{{ t("rootbar.local", { n: localRef?.sourceCounts?.local ?? 0 }) }}</span>
-        <span class="pill">{{ t("rootbar.subscribed", { n: localRef?.sourceCounts?.subscribed ?? 0 }) }}</span>
-        <span class="pill">
-          {{ t("rootbar.showing", { shown: localRef?.sortedCount ?? 0, total: localRef?.modsCount ?? 0 }) }}
-        </span>
-        <span class="sep">|</span>
-        <span>{{ t("rootbar.scannedAt", { time: localRef?.lastScanText ?? "" }) }}</span>
-        <span class="spacer"></span>
-        <button
-          v-if="(localRef?.warnings?.length ?? 0) > 0"
-          type="button"
-          class="warn-pill"
-          @click="localRef?.toggleWarnings?.()"
-        >
-          ⚠ {{ t("rootbar.warnings", { n: localRef?.warnings?.length ?? 0 }) }}
-        </button>
       </div>
     </template>
 
@@ -695,6 +752,7 @@ onBeforeUnmount(() => {
         ref="localRef"
         v-model:search="localSearch"
         v-model:sort-model="localSortModel"
+        v-model:order-model="localOrder"
         :mod-root="modRoot"
         :view-mode="viewMode"
         :card-size="cardSize"
@@ -737,7 +795,7 @@ onBeforeUnmount(() => {
         :initial-tab="settingsInitialTab"
         :focus-game-root="settingsFocusGameRoot"
         @close="closeSettings"
-        @change-root="openGameRootSettings"
+        @root-changed="onModRootChanged"
       />
 
       <!-- 版本更新说明 -->
@@ -784,6 +842,13 @@ onBeforeUnmount(() => {
   gap: 5px;
   height: 30px;
   padding: 0 12px;
+  /* 操作按钮不可被 flex 压缩：内在宽度由内容决定，图标 / 文字切换只由 TopBar 布局阶段负责 */
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  width: auto;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
   font-family: inherit;
   font-size: calc(11.5px * var(--global-scale));
@@ -808,5 +873,29 @@ onBeforeUnmount(() => {
 .topbar-actions .launch-game-btn .glyph {
   font-size: calc(12.5px * var(--global-scale));
   line-height: 1;
+}
+
+/* 顶栏刷新 / 本地重扫：纯图标，跟随当前主题强调色，不使用固定蓝色。 */
+.refresh-btn {
+  width: 36px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+  color: var(--accent-text);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: var(--bg-panel-deep);
+}
+.refresh-btn:hover:not(:disabled) {
+  color: var(--accent-bright);
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
+.refresh-btn:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+.refresh-btn svg {
+  width: 18px;
+  height: 18px;
 }
 </style>

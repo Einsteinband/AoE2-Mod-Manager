@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { detectRootCandidates, pickFolder, setModRoot } from "../api";
-import { translateBackendMessage } from "../format";
+import { normalizeError, translateBackendMessage } from "../format";
 import type { RootCandidate, ScanReport } from "../types";
 
 const emit = defineEmits<{
@@ -25,16 +25,6 @@ const best = computed(() => candidates.value.filter((c) => c.hasLocal && c.hasSu
 function sourceLabel(code: string): string {
   const key = `wizard.source.${code}`;
   return te(key) ? t(key) : code;
-}
-
-function normalizeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return t("labels.unknown");
-  }
 }
 
 async function detect() {
@@ -128,8 +118,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
               <div class="wizard-path" :title="candidate.path">{{ candidate.path }}</div>
               <div class="wizard-meta">
                 <span class="badge">{{ sourceLabel(candidate.source) }}</span>
-                <span class="chip" :class="{ on: candidate.hasLocal }">local</span>
-                <span class="chip" :class="{ on: candidate.hasSubscribed }">subscribed</span>
+                <span class="chip" :class="{ on: candidate.hasLocal }">{{ t("wizard.chipLocal") }}</span>
+                <span class="chip" :class="{ on: candidate.hasSubscribed }">{{ t("wizard.chipSubscribed") }}</span>
                 <span v-if="candidate.looksLikeGame" class="badge ghost">{{ t("wizard.badgeGame") }}</span>
               </div>
             </div>

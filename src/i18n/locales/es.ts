@@ -23,7 +23,7 @@ export default {
     nameShort2: "AoE II · Administrador",
     mediumName: "AoE II · Mods",
     shortName: "AoE II",
-    taglinePrefix: "v0.5.1 · por ",
+    taglinePrefix: "v0.5.2 · por ",
     author: "Einsteinband",
     authorTitle: "Abrir el perfil de GitHub del autor en el navegador",
     windowTitle: "AoE2 Mod Manager",
@@ -58,6 +58,11 @@ export default {
       "Si se activa, aparece un buscador totalmente local sobre la cuadrícula de mods de la página Online. Busca en los mods ya guardados e indexados por título o autor en chino, sin ninguna petición de red.",
     localSearchOn: "Activado",
     localSearchOff: "Desactivado",
+    onlineSizeSort: "Activar ordenación por tamaño de archivo de mods online",
+    onlineSizeSortNote:
+      "Solo usa tamaños en caché; los que falten no se solicitan al sitio ni al detalle, y la ordenación se aplica solo a los resultados cargados.",
+    onlineSizeSortOn: "Activado",
+    onlineSizeSortOff: "Desactivado",
     translateTarget: "Idioma de destino",
     translateTargetNote: "🌐 Traducir a {lang}",
     translateFollowUi: "Seguir el idioma de la interfaz ({lang})",
@@ -226,6 +231,7 @@ export default {
     sortDownload: "Orden de descarga",
     sortPriority: "Prioridad de carga",
     sortFolder: "Nombre de carpeta",
+    sortFileSize: "Tamaño de archivo",
     rescan: "Volver a escanear",
     changeRoot: "Cambiar carpeta raíz",
     presets: "Administrador de presets",
@@ -236,6 +242,7 @@ export default {
     viewToList: "Cambiar a vista de lista",
     viewToGrid: "Cambiar a vista de cuadrícula",
     cardSize: "Tamaño de tarjeta: {n}px",
+    more: "Más acciones",
     launchGame: "Iniciar el juego",
     launchGameTitle: "Inicia AoE2: DE mediante Steam (steam://rungameid/813780) para que funcionen las opciones de lanzamiento, el tiempo jugado y los logros. Si la carpeta del juego no está configurada, te llevará a Ajustes",
     launchGameBusy: "Iniciando…",
@@ -436,11 +443,15 @@ export default {
     statusUnknown: "Desconocido",
     sourceTool: "Instalado por esta aplicación",
     sourceOfficial: "Suscripción oficial",
-    sourceUnknown: "Local desconocido",
+    sourceImported: "Importado externamente",
+    sourceUnknown: "Importado externamente",
     sourceToolHint: "Tiene un registro de instalación de esta aplicación (o está en local/ con ID de Workshop)",
     sourceOfficialHint:
       "Sin registro de esta aplicación; está en subscribed/ con ID de Workshop: lo descargó el servicio oficial",
-    sourceUnknownHint: "Sin registro de esta aplicación y sin ID de Workshop: probablemente añadido a mano",
+    sourceImportedHint:
+      "Instalado desde un ZIP con la función de importación de esta aplicación; no se descargó por suscripción oficial",
+    sourceUnknownHint:
+      "Sin registro de instalación de esta aplicación y sin ID de Workshop: una carpeta colocada a mano en la carpeta local",
   },
   card: {
     noCover: "Sin portada",
@@ -482,11 +493,12 @@ export default {
     title: "Detalles del mod",
     coverMissing: "Sin portada",
     coverMissingDetail: "Esta carpeta de mod no tiene thumbnail.jpg",
-    refreshCover: "Recargar portada",
-    refreshCoverHint: "Pulsa para volver a obtener la portada si no carga",
+    refreshCover: "Obtener portada de nuevo",
+    refreshCoverHint: "Vuelve a obtener la portada desde los detalles oficiales si no carga",
     coverFetching: "Obteniendo portada…",
     coverDownloading: "Descargando portada…",
-    coverReloading: "Recargando portada…",
+    coverReloading: "Obteniendo portada…",
+    coverNoOfficialId: "No se puede determinar el origen oficial de este mod; no se usó coincidencia por título.",
     coverUpdated: "Portada actualizada",
     coverFetchFailed: "No se pudo obtener la portada, reinténtelo",
     coverDownloadFailed: "Descarga de portada fallida, reinténtelo",
@@ -617,6 +629,10 @@ export default {
     use: "Usar esta carpeta",
     validating: "Comprobando…",
     badgeGame: "Carpeta de instalación del juego",
+    /* Estos chips muestran los nombres de subcarpeta en disco, así que no se traducen; están
+       en el archivo de idioma solo para no dejar texto incrustado en la plantilla. */
+    chipLocal: "local",
+    chipSubscribed: "subscribed",
     none:
       "No se detectó ninguna carpeta del juego. Elígela manualmente: la que contiene local y subscribed, o la que tiene AoE2DE_s.exe.",
     browse: "Elegir carpeta…",
@@ -748,9 +764,6 @@ export default {
     recheck: "Volver a comprobar la sesión",
     clearCache: "Cerrar sesión / limpiar caché",
     clearing: "Limpiando…",
-    logoutCleared:
-      "Sesión cerrada: se limpiaron tanto las cookies de AoE como la carpeta de datos de WebView2 ({path})",
-    logoutClearedNoPath: "Sesión cerrada: se limpiaron tanto las cookies de AoE como la carpeta de datos de WebView2",
     logoutFailed:
       "No se pudo cerrar la sesión: algunos archivos están en uso. Reinicia la aplicación y vuelve a intentarlo",
     network: "Red",
@@ -771,6 +784,7 @@ export default {
     sortDesc: "Descendente",
     sortAsc: "Ascendente",
     orderLabel: "Orden",
+    orderToggleTitle: "Actual: {current}; clic para cambiar a {next}",
     refreshTitle: "Actualizar: vuelve a comprobar la sesión y recarga la primera página",
     refresh: "Actualizar",
     loading: "Cargando…",
@@ -786,6 +800,7 @@ export default {
       "La navegación y las descargas usan api.ageofempires.com, que requiere iniciar sesión. Las credenciales se escriben solo en la página oficial: esta aplicación nunca las pide ni las ve.",
     waitingLogin: "Esperando el inicio de sesión…",
     openLogin: "Abrir ventana de inicio de sesión",
+    loginWindowTitle: "Iniciar sesión en Age of Empires",
     cancel: "Cancelar",
     probing: "Diagnosticando…",
     probe: "Diagnosticar: crear ventana de sesión oculta",
@@ -936,6 +951,7 @@ export default {
     sortCreateDate: "Fecha de publicación",
     sortModName: "Nombre",
     sortCreatorName: "Autor",
+    sortFileSize: "Tamaño de archivo",
     cardUpdate: "Actualizar",
     cardSubscribed: "Suscrito",
     cardInstalled: "Instalado",
@@ -1093,6 +1109,7 @@ export default {
     rootNote: "Al cambiar la raíz se vuelve a escanear automáticamente y se guarda en settings.json.",
     changeRoot: "Cambiar carpeta raíz",
     rootEmpty: "Aún no hay carpeta raíz definida",
+    rootSaved: "Raíz de mods guardada: la lista se volvió a escanear",
     rootPath:
       "La raíz de escaneo de mods se gestiona ahora con «Cambiar carpeta raíz» en la pestaña General.",
   },
@@ -1101,8 +1118,41 @@ export default {
      pattern: respaldo por palabras clave para las cadenas chinas que Rust aún devuelve
               (solo se usa con la interfaz en otro idioma).
      code: textos del protocolo `aoe2mm:err:<code>:<json>`; las claves replican la ruta del código Rust. */
+  /* Nombres trilingües de las categorías de mods. La identidad de una categoría es
+     siempre el id oficial o el nombre original (la capa de datos nunca se traduce);
+     esta sección solo aporta el texto mostrado. */
+  tagNames: {
+    artificialIntelligence: "Inteligencia artificial",
+    campaign: "Campaña",
+    dataMod: "Mod de datos",
+    graphics: "Gráficos",
+    movie: "Película",
+    music: "Música",
+    randomMaps: "Mapas aleatorios",
+    scenarios: "Escenarios",
+    sounds: "Efectos de sonido",
+    speech: "Voz",
+    taunt: "Provocaciones",
+    terrain: "Terreno",
+    menuBackground: "Fondo de menú",
+    userInterface: "Interfaz de usuario",
+    text: "Texto",
+    other: "Otro",
+    returnOfRome: "El regreso de Roma",
+    audio: "Audio",
+    textures: "Texturas",
+    materials: "Materiales",
+    maps: "Mapas",
+    data: "Datos",
+    dataOther: "Datos / Otros",
+    historyEntries: "Entradas de historia",
+    localization: "Localización",
+    dataTables: "Tablas de datos",
+  },
   backendErrors: {
     protocolUnknown: "Error de backend no reconocido ({code}). Informa de este código.",
+    /* Separador cuando Rust une varias cadenas de error con un punto y coma de ancho completo */
+    segmentSeparator: "; ",
     pattern: {
       pathNotExist: "La ruta no existe: {detail}",
       notFolder: "No es una carpeta: {detail}",
@@ -1132,9 +1182,13 @@ export default {
       presetDataModNote: "; el juego solo puede cargar un mod de datos a la vez, {n} omitidos ({list})",
     },
     /* Entradas de ejemplo (solo se usan cuando Rust migre al protocolo de códigos):
-       Rust devuelve aoe2mm:err:install.extractFailed:{"modId":45427}
-       → backendErrors.code.install.extractFailed con {modId} rellenado desde el JSON */
+       Rust devuelve aoe2mm:err:install.targetExistsForeign:{"path":"…"}
+       → backendErrors.code.install.targetExistsForeign con {path} rellenado desde el JSON */
     code: {
+      /* Centinela de reserva del frontend (no es un código emitido por Rust) */
+      common: {
+        unknownError: "Se ha producido un error desconocido. Inténtalo de nuevo.",
+      },
       api: {
         resourceInvalid: "URL de recurso no válida: {error}",
         resourceNotHttps: "La URL del recurso no es HTTPS; rechazada.",
@@ -1155,7 +1209,13 @@ export default {
       },
       cover: {
         cacheInvalid: "La caché de la portada está dañada y no hay una URL descargable.",
+        missingModId: "Este mod no tiene un ID oficial de Mod fiable.",
+        busy: "La portada ya se está obteniendo; espere a que termine la tarea actual.",
+        detailFailed: "No se pudieron obtener los detalles oficiales del mod: {message}",
+        noDetailThumbnail: "Los detalles oficiales no contienen una URL de portada válida.",
         network: "Error al descargar la portada: {error}",
+        imageDownloadFailed: "Error al descargar la imagen de portada: {message}",
+        imageInvalid: "El contenido descargado no es una imagen válida; se conservó la portada anterior.",
         syncFailed: "No se pudo sincronizar la portada con la carpeta del mod: {error}",
       },
       metadata: {
@@ -1164,7 +1224,6 @@ export default {
         writeFailed: "No se pudo escribir el archivo de metadatos {path}: {error}",
       },
       net: {
-        timeout: "La petición de red agotó el tiempo de espera.",
         configInvalid: "Configuración de red no válida: {error}",
         proxyEmpty: "La dirección del proxy no puede estar vacía.",
         proxySocksUnsupported: "No se admiten proxies SOCKS. Introduce un proxy HTTP, p. ej. http://127.0.0.1:7897.",
@@ -1235,6 +1294,7 @@ export default {
         sameAsCurrent: "El directorio de destino ya es el directorio de datos actual; no es necesario migrar.",
         nestedWithCurrent: "El directorio de destino no puede ser hijo ni padre del directorio de datos actual.",
         targetHasExisting: "El directorio de destino ya contiene una entrada llamada {name}. Elige una carpeta vacía, o renámbrala/elimínala primero.",
+        migrateThreadFailed: "Error en la tarea de migración: {error}",
       },
       scan: {
         cannotReadFolder: "No se puede leer esta carpeta de mods (¿problema de permisos?): {path}",
@@ -1295,9 +1355,9 @@ export default {
       },
       game: {
         steamLaunchFailed: "No se pudo iniciar el juego a través de Steam: {error} (asegúrate de que Steam esté instalado y hayas iniciado sesión).",
+        launchFailed: "No se pudo iniciar el juego: {error}",
       },
       install: {
-        extractFailed: "No se pudo extraer el archivo comprimido (mod {modId}).",
         zipNulByte: "La entrada del archivo contiene un byte NUL; rechazada.",
         zipAbsolute: "La entrada del archivo es una ruta absoluta; rechazada: {name}",
         zipDriveLetter: "La entrada del archivo contiene una letra de unidad; rechazada: {name}",
@@ -1323,7 +1383,10 @@ export default {
         resourcesCreateFailed: "No se pudo crear el directorio resources ({path}): {error}",
         infoJsonSerializeFailed: "Error al serializar info.json: {error}",
         infoJsonWriteFailed: "Error al escribir info.json: {error}",
+        statusRetryNote: "{note} (revertido tras fallar la primera escritura: {error}; {rollback})",
+        statusWriteFailed: "Los archivos están en su sitio ({path}), pero falló la escritura de mod-status.json: {error}; el reintento tras revertir también falló: {retryError}; {rollback}",
         thumbnailEmpty: "La miniatura está vacía.",
+        thumbnailInvalid: "El contenido descargado no es una imagen válida; se conservó la portada anterior.",
         thumbnailWriteFailed: "Error al escribir la miniatura: {error}",
         badModId: "WorkshopID no válido; desinstalación rechazada.",
         noLocalDir: "No existe un directorio local para este mod (ninguna carpeta que empiece por “{prefix}” en subscribed / local).",
@@ -1361,6 +1424,10 @@ export default {
         notUnderLocal: "El directorio de destino no está bajo local; movimiento rechazado: {path}",
         backupAlreadyExists: "El directorio de copia de seguridad ya existe; abortado: {path}",
         localBackupFailed: "No se pudo hacer copia de seguridad de la carpeta local existente ({path}): {error}",
+        localBackupNote: "La carpeta local existente se guardó como {path} (no se ha borrado)",
+        localizeFailed: "Instalado en subscribed, pero no se pudo mover a local: {error}",
+        extractedSummary: "Se extrajeron {files} archivos ({bytes} bytes de datos descomprimidos)",
+        localizedNote: "Movido a local/{folder} y activado (se quitó el prefijo de ID, WorkshopID=0). La suscripción no cambia: mientras sigas suscrito, el juego volverá a descargar una copia en subscribed al reiniciarse; cancela la suscripción en la web o en el juego",
         revertFailed: "La reversión falló: {from} → {to}: {error}",
         revertRestoreFailed: "No se pudo restaurar el directorio de la versión antigua en {path}: {error}",
         recordAdded: "Se creó un registro local y se activó.",
@@ -1421,7 +1488,6 @@ export default {
         configDirNotFound: "No se pudo localizar el directorio de configuración de la app: {error}",
         createDirFailed: "No se pudo crear el directorio de configuración {path}: {error}",
         serializeFailed: "No se pudieron serializar los ajustes: {error}",
-        writeFailed: "No se pudo escribir el archivo de ajustes {path}: {error}",
         writeTmpFailed: "No se pudo escribir el archivo temporal de ajustes: {error}",
         syncTmpFailed: "No se pudo vaciar el archivo temporal de ajustes al disco: {error}",
         renameFailed: "No se pudo reemplazar el archivo de ajustes ({path}): {error}",
@@ -1429,6 +1495,7 @@ export default {
         gameRootNotAbsolute: "Elige una ruta completa de la raíz del juego (p. ej. D:\\SteamLibrary\\steamapps\\common\\AoE2DE): {path}",
         gameRootNotDir: "Raíz del juego inválida: la ruta no existe ({path}).",
         gameRootNoExe: "Raíz del juego inválida: no se encontró AoE2DE_s.exe en la carpeta ({path}).",
+        gameRootSaveFailed: "No se pudo guardar la carpeta del juego: {error}",
       },
       userData: {
         createDirFailed: "No se pudo crear el directorio de configuración {path}: {error}",
@@ -1514,6 +1581,15 @@ export default {
         batchCheckFailed: "Falló la tarea de comprobación por lotes: {error}",
         taskRequestFailed: "Falló la solicitud de tarea: {error}",
         taskQueryFailed: "Falló la consulta de tarea: {error}",
+        updateThreadFailed: "Error en el hilo de comprobación de actualizaciones: {error}",
+        releaseThreadFailed: "Error en el hilo del historial de versiones: {error}",
+        scanThreadFailed: "Falló la tarea de escaneo: {error}",
+        presetThreadFailed: "Falló la tarea de restauración del preset: {error}",
+        openDataDirFailed: "No se pudo abrir la carpeta de datos: {error}",
+        logsDirLocateFailed: "No se pudo localizar la carpeta de registros: {error}",
+        logsDirCreateFailed: "No se pudo crear la carpeta de registros {path}: {error}",
+        logsDirOpenFailed: "No se pudo abrir la carpeta de registros: {error}",
+        diagnosticsReadFailed: "No se pudo leer la información de diagnóstico: {error}",
       },
       session: {
         storageWebview: "Cookies de sesión de WebView2 (directorio de datos persistido)",
@@ -1527,6 +1603,25 @@ export default {
         getCookiesFailed: "Error al leer las cookies ({url}): {error}",
         getCookiesCallFailed: "Error al llamar a GetCookies ({url}): {error}",
         autoReloginIncomplete: "El inicio de sesión automático no se completó; inicia sesión manualmente en ajustes.",
+        cookieReadFailed: "No se pudieron leer las cookies de sesión: {error}",
+        threadFailed: "Error en el hilo de comprobación de sesión: {error}",
+        dataDirLocateFailed: "No se pudo localizar el directorio de datos de la app: {error}",
+        dataDirCreateFailed: "No se pudo crear el directorio de datos de WebView2 {path}: {error}",
+        loginUrlInvalid: "URL de inicio de sesión no válida: {error}",
+        loginWindowFailed: "No se pudo crear la ventana de inicio de sesión: {error}",
+        loginWindowShowFailed: "No se pudo mostrar la ventana de inicio de sesión: {error}",
+        cacheClearFailed: "No se pudo borrar la caché de sesión cifrada: {error}",
+        reloadBlockFailed: "No se pudo bloquear la recarga de la ventana de cuenta: {error}",
+        blankUrlInvalid: "No se pudo analizar about:blank: {error}",
+        windowDestroyFailed: "No se pudo destruir la ventana de cuenta: {error}",
+        cookiesClearFailed: "No se pudo acceder a WebView2; no se borraron las cookies de AoE: {error}",
+        logoutFailed: "Error al cerrar sesión: los archivos están en uso. Reinicia la app y vuelve a limpiar ({detail})",
+        logoutDone: "Sesión cerrada: se borraron las cookies de AoE y el directorio de datos de WebView2 ({path})",
+        probeOk: "Ventana oculta creada: label={label} url={url} — {count} cookies de ageofempires",
+        cookieClearTimeout: "Se agotó el tiempo al limpiar las cookies de AoE ({replies}/{total} dominios respondieron, {deleted} eliminadas)",
+        cookieClearFailed: "No se pudieron limpiar las cookies de AoE: {error} ({deleted} eliminadas)",
+        cookieCountFailed: "No se pudo leer la longitud de la lista de cookies: {error}",
+        reloginNavigateFailed: "No se pudo navegar en el reinicio de sesión automático: {error}",
       },
       uninstall: {
         recordRemoved: "Se eliminó el registro de mod-status.json.",

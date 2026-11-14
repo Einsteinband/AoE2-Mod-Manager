@@ -344,6 +344,21 @@ html[data-theme="light"] {
   }
 }
 
+/* 顶栏进入 ViewSwitch 图标阶段后，列表 / 详情两侧固定栏同步回到既有最小宽度；
+   不新增窗口断点，阶段 class 由 TopBar 统一评估并传播到 AppShell。 */
+.app-layout.is-view-icon,
+.app-layout.is-compact {
+  --layout-sidebar-width: var(--layout-sidebar-min-width, 150px);
+  --layout-detail-width: var(--layout-detail-min-width, 260px);
+  --layout-content-min-width: 260px;
+  --layout-page-pad-x: 12px;
+}
+
+/* 最终紧凑阶段再释放卡片行间距与列表内边距；网格 / 列表都继续保持原有结构。 */
+.app-layout.is-compact {
+  --layout-content-min-width: 240px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -499,7 +514,7 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   flex: 1 1 220px;
-  min-width: 150px;
+  min-width: 96px;
 }
 .search-box input {
   width: 100%;
@@ -553,14 +568,6 @@ summary:focus-visible {
 /* ---------- 公共工具栏（ModToolbar：本地 / 在线共用同一套骨架） ----------
    .mod-toolbar  = 搜索框 + 工具按钮组，两种模式占据顶栏同一列、同一宽度权重；
    窗口变窄时内部整体换行（搜索框仍优先占满一行），按钮永不被顶出窗口。 */
-.mod-toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px 12px;
-  flex: 1 1 420px;
-  min-width: 0;
-}
 
 /* v1.1：本地搜索框（在线页列表上方，与顶栏官方搜索互不干扰） */
 .local-search {
@@ -655,74 +662,13 @@ summary:focus-visible {
   font-size: calc(10.5px * var(--global-scale));
 }
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: 100%;
-}
-
-/* 顶栏按钮统一压缩一档：字号/内边距变小、不换行、允许收缩，避免右侧被顶出窗口 */
-.toolbar > * {
-  flex: 0 1 auto;
-  min-width: 0;
-}
+/* 工具栏控件基础内边距与字号；容器 flex、gap、最小宽与不可收缩约束由 ModToolbar scoped 规则负责。 */
 .toolbar button,
 .toolbar select {
   padding: 6px 9px;
   font-size: calc(11.5px * var(--global-scale));
   line-height: 1.45;
   white-space: nowrap;
-}
-.toolbar select {
-  max-width: 132px;
-  text-overflow: ellipsis;
-}
-/* 排序模式按钮：图标 + 极窄内边距，占位最小 */
-.toolbar button.sort-toggle {
-  padding: 6px 8px;
-  letter-spacing: 0;
-}
-/* v1.6：视图切换按钮（☰ / ▦）+ 卡片大小滑块；滑块只在网格模式下渲染 */
-.toolbar button.view-toggle {
-  padding: 6px 8px;
-  font-size: calc(13px * var(--global-scale));
-  line-height: 1.2;
-  color: var(--parch-dim);
-}
-.toolbar button.view-toggle.is-list {
-  border-color: var(--gold-dim);
-  color: var(--gold-text);
-}
-.toolbar input.card-size {
-  -webkit-appearance: none;
-  appearance: none;
-  flex: 0 1 96px;
-  width: 96px;
-  min-width: 64px;
-  height: 4px;
-  margin: 0 2px;
-  border: none;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--gold-dim), var(--gold));
-  cursor: pointer;
-}
-.toolbar input.card-size::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 1px solid var(--gold-bright);
-  background: var(--bg-hover);
-  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.7);
-}
-.toolbar input.card-size::-webkit-slider-thumb:hover {
-  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.95);
 }
 
 /* 顶栏：flex + wrap，窗口变窄时工具栏整体换行，绝不把按钮顶出窗口 */
@@ -779,10 +725,49 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 品牌名四级响应式：默认显示完整名称 */
+/* 品牌名默认显示完整名称；短名 / 徽章阶段由 TopBar 几何状态类切换，不使用窗口断点。 */
 .brand h1 .name-2,
 .brand h1 .name-3,
 .brand h1 .name-4 {
+  display: none;
+}
+.brand.is-brand-short {
+  gap: 6px;
+}
+.brand.is-brand-short .crest {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  font-size: calc(15px * var(--global-scale, 1));
+}
+.brand.is-brand-short h1 {
+  font-size: calc(14px * var(--global-scale, 1));
+}
+.brand.is-brand-short .tagline {
+  display: none;
+}
+.brand.is-brand-short .name-full {
+  display: none;
+}
+.brand.is-brand-short .name-2 {
+  display: inline;
+}
+.brand.is-brand-badge {
+  min-width: 36px;
+}
+.brand.is-brand-badge .crest {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  font-size: calc(13px * var(--global-scale, 1));
+}
+.brand.is-brand-badge .tagline {
+  display: none;
+}
+.brand.is-brand-badge .name-full,
+.brand.is-brand-badge .name-2,
+.brand.is-brand-badge .name-3,
+.brand.is-brand-badge .name-4 {
   display: none;
 }
 .brand .tagline {
@@ -822,7 +807,10 @@ summary:focus-visible {
   font-size: calc(12.5px * var(--global-scale, 1));
   letter-spacing: calc(1px * var(--ui-tracking, 1px));
   color: var(--muted);
+  flex: 0 0 auto;
+  flex-shrink: 0;
   white-space: nowrap;
+  overflow: visible;
   cursor: pointer;
 }
 .mode-tabs button.active {
@@ -848,7 +836,14 @@ summary:focus-visible {
   background: var(--bg-panel-deep);
   color: var(--muted);
   font-size: calc(12px * var(--global-scale, 1));
+  /* 核心操作按钮不可被 flex 压缩：内在宽度由内容决定，不换行、不截断；
+     图标化只能由 TopBar 明确的布局阶段切换 */
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  min-width: 36px;
   white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
   cursor: pointer;
 }
 .icon-btn:hover:not(:disabled) {
@@ -876,6 +871,52 @@ summary:focus-visible {
 }
 .topbar-actions > * {
   flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* 容器宽度感知阶段由 TopBar 实测空间判定；Launch 先图标化，ViewSwitch 后图标化，
+   最终紧凑态再收窄 Refresh / Rescan 与下拉；宽屏按相反顺序还原。 */
+.topbar.is-compact {
+  gap: 6px 8px;
+  padding: 5px 10px;
+}
+/* Launch 先于视图切换进入图标态；后续阶段保持该状态。 */
+.topbar.is-launch-icon .launch-game-btn .btn-text,
+.topbar.is-view-icon .launch-game-btn .btn-text,
+.topbar.is-compact .launch-game-btn .btn-text {
+  display: none;
+}
+.topbar.is-launch-icon .launch-game-btn,
+.topbar.is-view-icon .launch-game-btn,
+.topbar.is-compact .launch-game-btn {
+  padding: 0 8px;
+  width: 36px;
+  justify-content: center;
+}
+/* ViewSwitch 在 Launch 之后图标化；最终紧凑态保留该状态。 */
+.topbar.is-view-icon .view-switch .view-text,
+.topbar.is-compact .view-switch .view-text {
+  display: none;
+}
+.topbar.is-view-icon .view-switch .view-btn,
+.topbar.is-compact .view-switch .view-btn {
+  padding: 0 8px;
+}
+.topbar.is-compact .mod-toolbar .toolbar .btn-text {
+  display: none;
+}
+.topbar.is-compact .mod-toolbar .toolbar .icon-btn {
+  width: 36px;
+  padding: 0 8px;
+  justify-content: center;
+}
+.topbar.is-compact .mod-toolbar .toolbar select {
+  min-width: 64px;
+  max-width: 96px;
+  padding: 5px 6px;
 }
 
 /* 设置入口：齿轮按钮，永远钉在顶栏最右侧 */
@@ -951,109 +992,8 @@ summary:focus-visible {
 }
 
 /* ---------- 顶部工具栏响应式布局 ---------- */
-/* 第二级（< 1200px）：隐藏版本/作者，品牌名缩短为 AoE II · Mod Manager */
-@media (max-width: 1200px) {
-  .brand .tagline {
-    display: none;
-  }
-  .brand h1 {
-    font-size: calc(14px * var(--global-scale, 1));
-  }
-  .brand h1 .name-full {
-    display: none;
-  }
-  .brand h1 .name-2 {
-    display: inline;
-  }
-}
-
-/* 第三级（< 1050px）：品牌名 AoE II · MM，重扫/启动游戏图标化 */
-@media (max-width: 1050px) {
-  .topbar {
-    gap: 6px 8px;
-    padding: 5px 10px;
-  }
-  .brand {
-    gap: 6px;
-  }
-  .brand .crest {
-    width: 30px;
-    height: 30px;
-    flex: 0 0 30px;
-    font-size: calc(15px * var(--global-scale, 1));
-  }
-  .brand h1 .name-2 {
-    display: none;
-  }
-  .brand h1 .name-3 {
-    display: inline;
-  }
-  .mode-tabs button {
-    padding: 0 10px;
-    font-size: calc(12px * var(--global-scale, 1));
-  }
-  /* 图标按钮：只显示图标 */
-  .icon-btn .btn-text {
-    display: none;
-  }
-  .icon-btn {
-    padding: 0;
-    width: 36px;
-    justify-content: center;
-  }
-  /* 启动游戏按钮：只显示图标 */
-  .launch-game-btn .btn-text {
-    display: none;
-  }
-  .launch-game-btn {
-    padding: 0 8px;
-    width: 36px;
-    justify-content: center;
-  }
-}
-
-/* 第四级（< 920px）：品牌名 AoE II，ViewSwitch 图标化，本地/在线简短文字 */
-@media (max-width: 920px) {
-  .topbar {
-    gap: 4px 6px;
-    padding: 4px 8px;
-  }
-  .brand .crest {
-    width: 26px;
-    height: 26px;
-    flex: 0 0 26px;
-    font-size: calc(13px * var(--global-scale, 1));
-  }
-  .brand h1 .name-3 {
-    display: none;
-  }
-  .brand h1 .name-4 {
-    display: inline;
-  }
-  .mode-tabs {
-    gap: 2px;
-    padding: 2px;
-  }
-  .mode-tabs button {
-    padding: 0 8px;
-    font-size: calc(11.5px * var(--global-scale, 1));
-  }
-  /* 本地/在线：切换为简短文字 */
-  .mode-tabs .nav-full {
-    display: none;
-  }
-  .mode-tabs .nav-short {
-    display: inline;
-  }
-  /* ViewSwitch 图标化：隐藏文字 */
-  .view-switch .view-text {
-    display: none;
-  }
-  .view-switch .view-btn {
-    width: 28px;
-    padding: 0;
-  }
-}
+/* 品牌短名 / 徽章阶段由 TopBar 实测几何状态类驱动；右侧图标化由 .is-compact 驱动。
+   这里不再保留按窗口宽度切换品牌或模式标签文字的媒体查询。 */
 
 .warn-panel {
   margin: 10px var(--layout-page-pad-x, 18px) 0;
@@ -1363,6 +1303,21 @@ summary:focus-visible {
   margin-top: 0;
 }
 
+/* 最终紧凑阶段同步收紧卡片网格与列表行内边距；不改变卡片结构和业务状态。 */
+.app-layout.is-compact .card-grid {
+  gap: 8px;
+}
+.app-layout.is-compact .card-grid.list-mode {
+  gap: 6px;
+}
+.app-layout.is-compact .card-grid.list-mode .card-body {
+  gap: 8px;
+  padding: 0 8px;
+}
+.app-layout.is-compact .card-grid.list-mode .card-body .card-meta .author {
+  max-width: 120px;
+}
+
 .card-thumb {
   position: relative;
   aspect-ratio: 16 / 9;
@@ -1642,33 +1597,39 @@ html[data-installed-card-stripes="off"] .card-body.is-installed::after {
   right: 8px;
   bottom: 8px;
   z-index: 2;
-  width: 32px;
+  width: 36px;
   height: 32px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 3px;
   background: var(--bg-panel-deep);
-  color: var(--parch);
-  font-size: 15px;
+  color: var(--accent-text);
   line-height: 1;
   cursor: pointer;
-  opacity: 0.92;
 }
 
-.cover-reload-btn:hover,
+.cover-reload-btn:hover:not(:disabled),
 .cover-reload-btn:focus-visible {
+  color: var(--accent-bright);
   border-color: var(--accent);
-  opacity: 1;
+  background: var(--bg-panel);
 }
 
 .cover-reload-btn:disabled {
-  cursor: not-allowed;
   opacity: 0.55;
+  cursor: progress;
 }
 
-.cover-reload-btn .is-spinning {
-  display: inline-block;
+.cover-reload-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.cover-reload-btn svg.is-spinning {
   animation: cover-reload-spin 0.9s linear infinite;
 }
 
@@ -2207,8 +2168,10 @@ button.danger {
   color: var(--info-text);
   background: rgba(var(--info-rgb), 0.1);
 }
-/* 无法确定：中性灰 */
-.badge.source-unknown {
+/* 外部导入（ZIP 导入安装 / 手动放进 local 的文件夹）：中性灰，
+   两种外部来源同一档观感，与「本工具安装」「官方订阅」明确区分 */
+.badge.source-unknown,
+.badge.source-imported {
   border-color: var(--line);
   color: var(--muted);
   background: rgba(var(--sheen-rgb), 0.03);
@@ -3148,44 +3111,9 @@ button.primary.queued {
    响应式自适应：窄屏下自动收缩 + 文字变图标
    ============================================================ */
 
-/* 窗口 < 1100px：右侧操作按钮文字隐藏，仅保留图标 */
-@media (max-width: 1100px) {
-  /* Launch game 按钮：隐藏文字，只留 🎮 图标 */
-  .launch-game-btn {
-    padding: 6px 8px;
-  }
-  .launch-game-btn .glyph {
-    margin-right: 0;
-  }
-  .launch-game-btn > *:not(.glyph) {
-    display: none;
-  }
-
-  /* ViewSwitch（Grid/List）：缩小 padding，文字字号缩小 */
-  .view-switch .view-btn {
-    padding: 4px 8px;
-    font-size: calc(11px * var(--global-scale));
-  }
-
-  /* 品牌区：隐藏 tagline 副标题，只留主标题 */
-  .brand p {
-    display: none;
-  }
-}
-
-/* 窗口 < 800px：超窄屏，进一步收缩 */
+/* 窗口 < 800px：批量操作按钮组允许换行。
+   搜索框最小宽度与操作按钮宽度统一由基础规则 / TopBar 空间状态决定，不再在此分档。 */
 @media (max-width: 800px) {
-  /* 模式切换按钮缩小 */
-  .mode-tabs button {
-    padding: 4px 8px;
-    font-size: calc(11px * var(--global-scale));
-  }
-
-  /* 搜索框缩小最小宽度 */
-  .search-box {
-    min-width: 100px;
-  }
-
   /* 批量操作按钮组允许换行 */
   .content-head .batch-actions {
     flex-wrap: wrap;
@@ -3193,55 +3121,10 @@ button.primary.queued {
   }
 }
 
-/* 所有自适应变化加平滑过渡 */
-.topbar,
-.brand,
-.mod-toolbar,
-.topbar-actions,
-.batch-actions {
-  transition: gap 0.2s ease, padding 0.2s ease, font-size 0.2s ease;
-}
+/* 布局容器不做尺寸过渡：gap / padding / font-size 一旦参与动画，等级切换期间容器尺寸会连续变化，
+   持续触发 ResizeObserver 回调并放大临界抖动。颜色 / 背景 / 边框 / 阴影过渡由 button、input、select
+   的全局规则各自保留，不在容器上叠加尺寸动画。 */
 
-/* ========== 响应式：窄屏折叠 ========== */
-
-/* 窗口 < 1100px：模式按钮缩短，副标题隐藏 */
-@media (max-width: 1100px) {
-  .brand p {
-    display: none;
-  }
-  .mode-tabs button {
-    padding: 5px 8px;
-    font-size: 10px;
-  }
-}
-
-/* 窗口 < 900px：Launch game 文字隐藏，只留手柄图标 */
-@media (max-width: 900px) {
-  /* 启动游戏按钮：文字隐藏，只留 🎮 图标 */
-  .topbar-actions .launch-game-btn {
-    padding: 0 10px;
-    font-size: 0;
-  }
-  .topbar-actions .launch-game-btn .glyph {
-    font-size: 16px;
-  }
-}
-
-/* 窗口 < 750px：刷新按钮文字隐藏，只留图标 */
-@media (max-width: 750px) {
-  /* Rescan 按钮：文字隐藏，只留图标 */
-  .rescan-btn {
-    padding: 4px 6px;
-    font-size: 0;
-    min-width: 28px;
-  }
-  .rescan-btn .glyph {
-    font-size: 14px;
-  }
-
-  /* 视图切换按钮：文字变单字，缩小 padding */
-  .topbar-actions .view-switch .view-btn {
-    padding: 6px 6px;
-    font-size: 10px;
-  }
-}
+/* 原 < 900px 启动游戏 font-size:0、< 750px 视图切换缩窄、.rescan-btn 死规则、
+   重复的 < 1100px 模式按钮压缩规则均已移除：
+   按钮 / 视图切换的图标化与宽度统一由 TopBar 的 .is-compact 空间状态驱动。 */

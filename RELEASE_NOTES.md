@@ -1,3 +1,19 @@
+# v0.5.2
+
+## v0.5.2 - What's New
+
+- **🌍Languages:** Added German (Deutsch) and Russian (Русский) — the UI now ships in five languages.
+- **📏Online Size Sorting:** Online mods can be sorted by file size. Sizes come from cached mod info, so a mod shows no size until its info has been cached. The feature is off by default — enable it in *Settings → General*.
+- **🎨Interface:** Detail-panel layout, settings interactions and status-bar colors polished; the load priority is shown in the mod detail again.
+
+## v0.5.2 - 更新内容
+
+- **🌍多语言：** 新增德语（Deutsch）与俄语（Русский），界面共支持五种语言。
+- **📏在线按大小排序：** 在线模组可按文件大小排序。体积取自已缓存的模组信息，未缓存的模组在该信息缓存前没有体积、暂不参与排序。功能默认关闭，需在「设置 → 通用」中手动开启。
+- **🎨界面优化：** 优化详情面板布局、设置页交互与状态栏配色，模组详情恢复显示「加载优先级」。
+
+---
+
 # v0.5.1
 
 ## v0.5.1 - What's New

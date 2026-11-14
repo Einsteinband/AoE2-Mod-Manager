@@ -579,9 +579,29 @@ export function openExternalUrl(url: string): Promise<string> {
   return invoke<string>("open_external", { url });
 }
 
+/** 本地封面独立恢复结果：Rust 确认文件已写入当前 Mod 文件夹后才返回路径 */
+export interface LocalCoverRefreshOutcome {
+  status: "refreshed";
+  bytes: number;
+  installPath: string | null;
+  sourceUrl: string | null;
+}
+
 /** 在资源管理器中定位模组文件夹（Rust 侧 explorer.exe /select，无需额外插件） */
 export function revealModFolder(path: string): Promise<void> {
   return invoke<void>("reveal_mod_folder", { path });
+}
+
+/**
+ * 本地详情页重新获取封面：官方 Detail → 图片下载 → 校验 → 写入当前 Mod 文件夹。
+ * 不经过应用图片缓存，也不要求先打开在线页面。
+ */
+export function refreshLocalCover(
+  modId: number,
+  kind: string,
+  folderName: string,
+): Promise<LocalCoverRefreshOutcome> {
+  return invoke<LocalCoverRefreshOutcome>("local_cover_refresh", { modId, kind, folderName });
 }
 
 /**

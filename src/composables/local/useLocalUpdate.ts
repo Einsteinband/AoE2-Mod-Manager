@@ -16,6 +16,7 @@ import {
   downloadTasks,
 } from "../../online/downloadQueue";
 import { markUpdated } from "../../modUpdates";
+import { translateBackendMessage } from "../../format";
 import { sessionPhase } from "../../sessionState";
 import type { ModEntry } from "../../types";
 
@@ -151,7 +152,7 @@ export function useLocalUpdate(deps: {
       await openExternalUrl(url);
       updateNotice.value = null;
     } catch (e) {
-      deps.showToast(deps.normalizeError(e), "error");
+      deps.showToast(translateBackendMessage(deps.normalizeError(e)), "error");
     }
   }
 

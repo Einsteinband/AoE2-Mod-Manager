@@ -135,6 +135,8 @@ function makeLocalMod(overrides: Partial<ModEntry> = {}): ModEntry {
     issues: [],
     infoJsonPresent: true,
     isDataMod: false,
+    sizeBytes: null,
+    sizeComplete: false,
     ...overrides,
   };
 }

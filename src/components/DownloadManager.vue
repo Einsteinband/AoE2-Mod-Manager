@@ -150,7 +150,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
 <template>
   <!-- 常驻悬浮按钮：无任务时也显示（灰色小图标），有任务时显示进度 / 排队角标 -->
   <div class="dlmgr">
-    <div v-if="managerOpen" class="dlmgr-panel" role="dialog" aria-label="downloads">
+    <div v-if="managerOpen" class="dlmgr-panel" role="dialog" :aria-label="t('downloader.title')">
       <header class="dlmgr-head">
         <h4>{{ t("downloader.title") }}</h4>
         <span class="dlmgr-sub">{{ t("downloader.footer", { total: tasks.length, active: summary.active }) }}</span>

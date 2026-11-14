@@ -56,6 +56,8 @@ import { buildOnlineMenuItems } from "../composables/online/useOnlineModMenu";
 import { useOnlineSession } from "../composables/online/useOnlineSession";
 import { useIndexSync } from "../composables/online/useIndexSync";
 import { useLocalSearch } from "../composables/online/useLocalSearch";
+import { ONLINE_SIZE_SORT, sortOnlineModsBySize } from "../composables/online/sortOnlineMods";
+import { hydrateOnlineModSizes } from "../composables/online/onlineSizeSortSetting";
 import { getSettings, openExternalUrl, revealModFolder } from "../api";
 
 /**
@@ -566,9 +568,14 @@ const phase = sessionPhase;
  * 本地搜索态 → 本地索引结果；收藏 → 按 modId 过滤已加载条目（绝不重新请求）；否则官方列表。
  * 单一出口：模板里所有「有没有内容」的判断都读它，避免两套搜索互相串台。
  */
-const visibleItems = computed<OnlineMod[]>(() =>
-  localMode.value ? localItems.value : list.visibleOfficialItems.value,
-);
+const visibleItems = computed<OnlineMod[]>(() => {
+  const base = localMode.value ? localItems.value : list.visibleOfficialItems.value;
+  if (sort.value !== ONLINE_SIZE_SORT) return base;
+  const sizedBase = localMode.value
+    ? base
+    : hydrateOnlineModSizes(base, list.cachedSizeByModId.value).items;
+  return sortOnlineModsBySize(sizedBase, order.value);
+});
 
 const heading = computed(() => {
   if (localMode.value) return t("online.localSearchHeading", { q: localTerm.value });
@@ -682,7 +689,7 @@ async function manualRefresh(): Promise<void> {
   // 用户点了刷新：明确意图，走手工通道（仍受单飞 + 2s 闸门保护）
   await reload(true);
 }
-defineExpose({ refresh: manualRefresh });
+defineExpose({ refresh: manualRefresh, loading });
 
 // ---------------- 滚动：无限加载 + KeepAlive 位置还原 ----------------
 

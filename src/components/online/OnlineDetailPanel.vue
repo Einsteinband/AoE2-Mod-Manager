@@ -117,8 +117,9 @@ const coverStatusText = computed(() => {
 });
 
 function onThumbLoad(): void {
+  // 成功只落在封面区域内部（封面正常显示 + done 阶段），不再弹左下角成功 Toast；
+  // 失败仍由 showCoverToast 给出明确提示。
   coverStage.value = "done";
-  showCoverToast(t("detail.coverUpdated"));
 }
 
 function onThumbError(): void {
@@ -240,7 +241,27 @@ watch(
           :title="t('detail.refreshCoverHint')"
           @click="reloadThumb"
         >
-          <span :class="{ 'is-spinning': thumbReloading }" aria-hidden="true">🔄</span>
+          <svg
+            :class="{ 'is-spinning': thumbReloading }"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path
+              d="M20 12a8 8 0 1 1-2.34-5.66"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+            <path
+              d="M20 3v4h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
         </button>
       </div>
       <p v-if="coverStatusText" class="cover-status">{{ coverStatusText }}</p>

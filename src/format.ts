@@ -96,6 +96,17 @@ const BACKEND_CODE_PREFIX = "aoe2mm:err:";
  */
 const BACKEND_CODE_RE = /^aoe2mm:err:([A-Za-z0-9_.-]+)(?::([\s\S]*))?$/;
 
+/**
+ * 多段协议串的分隔点。
+ *
+ * Rust 侧确实存在「把多条用户可见错误串拼成一句」的写法（install 的 info.json/缩略图备注、
+ * 卸载的备份备注等），拼接符是全角分号。整串不再是单条 `aoe2mm:err:<code>:<json>`，
+ * 若只按单条正则解析，会整体匹配失败、把协议串原样甩给用户，各段参数也一起丢掉。
+ * 这里只把「全角分号 + 紧接着又是协议前缀」当成段边界，普通中文分号不受影响，
+ * 路径里即便出现分号也不会被误切。
+ */
+const PROTOCOL_SEGMENT_SPLIT = /；(?=aoe2mm:err:)/;
+
 interface BackendCodeEnvelope {
   code: string;
   params: Record<string, unknown>;
@@ -176,20 +187,63 @@ function localizePresetNote(text: string): string {
   return lookupMessage(key, { n: m[1], list: m[2] }) ?? text;
 }
 
+/**
+ * 把整串当作**一条**信封解析（要求 JSON 段完整合法）。
+ *
+ * 为什么需要它：复合错误会把**参数内部**用「；」拼起来的一串协议码塞进 `{detail}` /
+ * `{rollback}`（如 `session.logoutFailed{detail}`、`install.statusRetryNote{rollback}`）。
+ * 若一上来就按 `；(?=aoe2mm:err:)` 拆段，会从 JSON 字符串中间切开，两段 JSON 全部损坏，
+ * 参数集体丢失（退化成「文案：」）。所以先整串解析：成功 = 单条信封（里面的「；」是参数内容）；
+ * 失败才说明确实是多段拼接。
+ */
+function parseWholeEnvelope(raw: string): BackendCodeEnvelope | null {
+  if (!raw.startsWith(BACKEND_CODE_PREFIX)) return null;
+  const match = BACKEND_CODE_RE.exec(raw);
+  if (!match) return null;
+  const payload = match[2]?.trim();
+  if (!payload) return { code: match[1], params: {} };
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { code: match[1], params: parsed as Record<string, unknown> };
+    }
+  } catch {
+    // 不是单条信封：交给多段拆分 / 损坏 JSON 的兜底路径
+  }
+  return null;
+}
+
+/** 信封 → 当前语言文案（参数里的嵌套协议码先递归翻译）。 */
+function renderEnvelope(envelope: BackendCodeEnvelope, raw: string): string {
+  const localizedParams = localizeNestedParams(envelope.params);
+  const translated = lookupMessage(`backendErrors.code.${envelope.code}`, localizedParams);
+  if (translated) return translated;
+  // 语言包还没有这个 code 的文案：给出可读提示并保留 code，方便用户反馈定位
+  trackerWarn(`code "${envelope.code}" missing in locale "${i18n.global.locale.value}"`, raw);
+  return translate("backendErrors.protocolUnknown", { code: envelope.code });
+}
+
 export function translateBackendMessage(message: string | null | undefined): string {
   const raw = (message ?? "").toString();
   if (!raw.trim()) return raw;
 
-  // ① 错误码协议：与界面语言无关，任何语言下都查「当前语言包」的 backendErrors.code
-  const envelope = parseBackendCode(raw);
-  if (envelope) {
-    const localizedParams = localizeNestedParams(envelope.params);
-    const translated = lookupMessage(`backendErrors.code.${envelope.code}`, localizedParams);
-    if (translated) return translated;
-    // 语言包还没有这个 code 的文案：给出可读提示并保留 code，方便用户反馈定位
-    trackerWarn(`code "${envelope.code}" missing in locale "${i18n.global.locale.value}"`, raw);
-    return translate("backendErrors.protocolUnknown", { code: envelope.code });
+  // ① 先整串解析：能解析成合法信封就按单条处理（参数内部的「；」不拆）
+  const whole = parseWholeEnvelope(raw);
+  if (whole) return renderEnvelope(whole, raw);
+
+  // ①a 多段协议串：拆开后逐段递归（separator 跟随语言包）
+  const segments = raw.split(PROTOCOL_SEGMENT_SPLIT);
+  if (segments.length > 1) {
+    const separator = translate("backendErrors.segmentSeparator");
+    const joint = separator === "backendErrors.segmentSeparator" ? "；" : separator;
+    return segments
+      .map((segment) => translateBackendMessage(segment))
+      .join(joint);
   }
+
+  // ①b 单条协议（含 JSON 损坏的情况：仍按 code 出文案，只是占位符为空）
+  const envelope = parseBackendCode(raw);
+  if (envelope) return renderEnvelope(envelope, raw);
 
   // ② 中文界面：后端本来就是中文，原样返回（信息最全，也不做有损替换）
   if (i18n.global.locale.value === "zh") return raw;
@@ -291,6 +345,10 @@ export function statusLabel(enabled: boolean | null): string {
 export function sourceLabel(source: ModSource | undefined): string {
   if (source === "tool") return translate("labels.sourceTool");
   if (source === "official") return translate("labels.sourceOfficial");
+  // imported（本工具 ZIP 导入）与 unknown（手动放进 local 的文件夹）都属于外部导入，
+  // 徽章文案相同，差异只在悬停解释里说清楚；此前 imported 落到 unknown 分支，
+  // 于是「有导入记录」的模组被当成「无记录」展示。
+  if (source === "imported") return translate("labels.sourceImported");
   return translate("labels.sourceUnknown");
 }
 
@@ -298,6 +356,7 @@ export function sourceLabel(source: ModSource | undefined): string {
 export function sourceHint(source: ModSource | undefined): string {
   if (source === "tool") return translate("labels.sourceToolHint");
   if (source === "official") return translate("labels.sourceOfficialHint");
+  if (source === "imported") return translate("labels.sourceImportedHint");
   return translate("labels.sourceUnknownHint");
 }
 
@@ -315,5 +374,5 @@ export function initials(name: string): string {
 export function normalizeError(e: unknown): string {
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
-  try { return JSON.stringify(e); } catch { return "aoe2mm:err:labels.unknown"; }
+  try { return JSON.stringify(e); } catch { return "aoe2mm:err:common.unknownError"; }
 }

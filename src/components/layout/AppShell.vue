@@ -22,23 +22,11 @@ withDefaults(
   defineProps<{
     /** 作者主页地址（只用于 <a> 的 href，真正打开由父组件交给系统浏览器） */
     authorUrl?: string;
-    /** 底部状态栏展示的本地模组数 */
-    localCount?: number;
-    /** 根目录路径（长路径截断） */
-    rootPath?: string;
-    subscribedCount?: number;
-    showingCount?: number;
-    totalCount?: number;
-    scannedAt?: string;
+    /** 本地扫描警告数量（>0 时底栏出现「⚠ 警告」入口） */
     warningCount?: number;
   }>(),
   {
     authorUrl: "https://github.com/Einsteinband",
-    localCount: 0,
-    subscribedCount: 0,
-    showingCount: 0,
-    totalCount: 0,
-    scannedAt: "",
     warningCount: 0,
   },
 );
@@ -78,14 +66,8 @@ const emit = defineEmits<{
       <slot />
     </main>
 
-    <!-- ④ 底部状态栏：账号灯 / 动态提示 / 代理与本地统计，始终显示 -->
+    <!-- ④ 底部状态栏：账号灯 / 动态提示 / 索引状态 / 代理胶囊，始终显示 -->
     <StatusBar
-      :local-count="localCount"
-      :root-path="rootPath"
-      :subscribed-count="subscribedCount"
-      :showing-count="showingCount"
-      :total-count="totalCount"
-      :scanned-at="scannedAt"
       :warning-count="warningCount"
       :mode="mode"
       @toggle-warnings="emit('toggle-warnings')"

@@ -13,8 +13,7 @@ import OnlineDetailPanel from "./online/OnlineDetailPanel.vue";
 import { onIndexProgress } from "../online/service";
 import { openModWebpage } from "../online/service";
 import { activeTaskOfMod, enqueueDownload, onTaskSettled, type DownloadTask } from "../online/downloadQueue";
-import { fetchImages, onImagesReady, onImagesFailed, syncCoverToInstall, type FailedImage } from "../online/images";
-import {
+import { fetchImages, onImagesReady, onImagesFailed, syncCoverToInstall, assetUrl, type FailedImage } from "../online/images";import {
   canTranslateText,
   currentTargetLanguageName,
   ensureTranslation,
@@ -31,6 +30,7 @@ import { tagLabel, type OnlineMod } from "../online/types";
 import type { InstalledIndexEntry } from "../types";
 import { messageOf } from "../online/errors";
 import { plainText } from "../composables/online/useOnlineDetail";
+import { readDetailCache, usableDetailCache } from "../online/cache";
 import { normalizeBackendError } from "../format";
 import {
   ensureSession,
@@ -52,13 +52,14 @@ import { PAGE_SIZE, useOnlineList } from "../composables/online/useOnlineList";
 import { useOnlineDetail } from "../composables/online/useOnlineDetail";
 import { useOnlineFavorite } from "../composables/online/useOnlineFavorite";
 import { useOnlineInstall } from "../composables/online/useOnlineInstall";
-import { buildOnlineMenuItems } from "../composables/online/useOnlineModMenu";
+import { buildOnlineMenuItems, resolveMenuDescription } from "../composables/online/useOnlineModMenu";
 import { useOnlineSession } from "../composables/online/useOnlineSession";
 import { useIndexSync } from "../composables/online/useIndexSync";
 import { useLocalSearch } from "../composables/online/useLocalSearch";
 import { ONLINE_SIZE_SORT, sortOnlineModsBySize } from "../composables/online/sortOnlineMods";
 import { hydrateOnlineModSizes } from "../composables/online/onlineSizeSortSetting";
-import { getSettings, openExternalUrl, revealModFolder } from "../api";
+import { getSettings, openExternalUrl, refreshLocalCover, revealModFolder } from "../api";
+import { buildCoverPlan, localCoverPaths } from "../online/modSource";
 
 /**
  * 在线页入口：只做**组件协调 + 状态连接 + 生命周期**。
@@ -112,6 +113,8 @@ const list = useOnlineList({
   onNetworkInterrupted: () => showToast(t("online.networkInterrupted"), "error"),
   // 本地搜索与官方列表互斥：切官方分类 / 来源 / 收藏时清空本地搜索框
   clearLocalSearch: () => localSearch.clearLocalSearch(),
+  // 收藏聚合视图来源判定：磁盘上有没有这个模组的安装目录（不看当前页面模式）
+  hasLocalCopy: (modId: number) => !!installed.localIndex.value[modId],
 });
 
 const detail = useOnlineDetail({ selection, showToast });
@@ -188,6 +191,8 @@ const {
   descText,
   canTranslate,
   waitingDetail,
+  /** 详情面板已加载的描述（右键菜单复用它，避免两处判断不一致） */
+  descriptionText: selectedDetailText,
   selectedTranslated,
   showingOriginalText,
   translateBusy,
@@ -259,7 +264,10 @@ const revealingId = ref<number | null>(null);
 const webOpeningId = ref<number | null>(null);
 
 function onCardContextMenu(mod: OnlineMod, event: MouseEvent | KeyboardEvent): void {
+  clearMenuCachedDetail();
   cardMenu.openAt(event, mod);
+  // 详情缓存里有这个模组的描述 → 补进菜单可用性判断（异步，回来后菜单会自己刷新）
+  void primeMenuDetailDescription(mod);
 }
 
 /** 从列表原始字段提取描述（与详情面板同一组键），无可用描述时返回空串 */
@@ -267,6 +275,43 @@ function modDescriptionText(mod: OnlineMod): string {
   const raw = mod.raw ?? {};
   const value = raw.description ?? raw.modDescription;
   return typeof value === "string" ? plainText(value) : "";
+}
+
+/**
+ * 右键菜单专属的「详情缓存描述」：按 modId 校验，打开菜单时异步补一次。
+ * 只读本地详情缓存（`online_cache_detail`），不发网络请求、不触发翻译。
+ */
+const menuCachedDetail = ref<{ modId: number; text: string } | null>(null);
+
+function clearMenuCachedDetail(): void {
+  menuCachedDetail.value = null;
+}
+
+async function primeMenuDetailDescription(mod: OnlineMod): Promise<void> {
+  const id = mod.modId;
+  if (id <= 0) return;
+  try {
+    const hit = await readDetailCache(id);
+    // 菜单可能已经关掉 / 换成别的模组：只接受仍然指向同一个 modId 的结果
+    if (cardMenu.target.value?.modId !== id) return;
+    if (!usableDetailCache(hit)) return;
+    const raw = hit.value.description ?? hit.value.modDescription;
+    if (typeof raw !== "string") return;
+    menuCachedDetail.value = { modId: id, text: plainText(raw) };
+  } catch {
+    /* 缓存读不到不影响菜单：仍会退回到列表描述 / 详情面板描述 */
+  }
+}
+
+/** 右键点击这个模组时，翻译到底能不能用（与详情面板同一判据、同一份文本来源） */
+function menuDescriptionText(mod: OnlineMod): string {
+  return resolveMenuDescription({
+    targetId: mod.modId,
+    listText: modDescriptionText(mod),
+    cached: menuCachedDetail.value,
+    selectedId: selection.selectedId.value,
+    selectedText: selectedDetailText.value ?? null,
+  });
 }
 
 function translationErrorMessage(error: unknown): string {
@@ -306,7 +351,7 @@ const onlineMenuItems = computed<ContextMenuItem[]>(() => {
   const showing = id > 0 && isShowingOriginal(id);
   const translating = id > 0 && isTranslating(id);
   const translatingQueued = id > 0 && isQueued(id);
-  const canText = id > 0 && canTranslateText(modDescriptionText(mod));
+  const canText = id > 0 && canTranslateText(menuDescriptionText(mod));
 
   return buildOnlineMenuItems(
     id,
@@ -404,7 +449,7 @@ async function onMenuSelect(itemId: string): Promise<void> {
         return;
       }
       if (isTranslating(id) || isQueued(id)) return;
-      const desc = modDescriptionText(mod);
+      const desc = menuDescriptionText(mod);
       if (!canTranslateText(desc)) {
         showToast(t("translate.notReady"), "error");
         return;
@@ -529,14 +574,10 @@ async function openAccountCenter(): Promise<void> {
 const {
   indexStatus,
   indexSyncBusy,
-  indexPauseBusy,
   indexReady,
-  indexPhaseKind,
   indexBuilding,
-  indexStatusText,
   refreshIndexStatus,
   triggerIndexSync,
-  toggleIndexPause,
   applyProgress,
   resetSyncGuard,
   stopIndexPoll,
@@ -601,8 +642,57 @@ const translateNote = computed(() => (waitingDetail.value && !selectedTranslated
   ? t("translate.waitingContent")
   : null));
 
-/** 详情面板：封面 */
-const selectedThumb = computed(() => thumbs.thumbOf(selected.value));
+/** 详情面板：封面（按来源分流后的首候选：本地来源只给本机文件） */
+const selectedThumb = computed(() => thumbFor(selected.value));
+
+const selectedCoverMode = computed<"online" | "local">(() => {
+  const mod = selected.value;
+  if (!mod) return "online";
+  return mod.origin === "local" && installedEntryOf(mod.modId) ? "local" : "online";
+});
+
+/**
+ * 封面来源分流（收藏视图里本地副本与在线条目并存，必须逐项按来源决定）：
+ * - `origin === "local"`：候选只有「应用图片缓存 → 模组目录里的封面文件」，永不回落官网 URL；
+ * - 其余（在线）：沿用原逻辑「应用图片缓存 → 官网缩略图」。
+ * 模组根目录在挂载时读一次设置，读不到就退化为「缓存 → 官网」（不猜路径）。
+ */
+const modRoot = ref("");
+
+async function ensureModRoot(): Promise<void> {
+  if (modRoot.value) return;
+  try {
+    const settings = await getSettings();
+    modRoot.value = (settings.modRoot ?? "").trim();
+  } catch {
+    modRoot.value = "";
+  }
+}
+
+function coverPlanOf(mod: OnlineMod | null) {
+  if (!mod) return { urls: [] as string[], allowRemote: false };
+  const entry = installed.localIndex.value[mod.modId] ?? null;
+  // 只有「收藏标记为本地来源」且安装目录仍在时才按本地分流；
+  // 普通搜索列表（未标记）与刚卸载后的条目继续沿用在线封面，避免扩大影响面。
+  const useLocal = mod.origin === "local" && !!entry;
+  return buildCoverPlan({
+    origin: useLocal ? "local" : "online",
+    localPaths: useLocal && entry ? localCoverPaths(modRoot.value, entry.kind, entry.folderName) : [],
+    cachedUrl: thumbs.localThumbs[mod.modId] ?? null,
+    remoteUrl: mod.thumbnail,
+    toAssetUrl: assetUrl,
+  });
+}
+
+/** 卡片 / 详情首候选 */
+function thumbFor(mod: OnlineMod | null): string | null {
+  return coverPlanOf(mod).urls[0] ?? null;
+}
+
+/** 卡片候选列表（本地来源不含官网 URL，失败只落到占位） */
+function candidatesFor(mod: OnlineMod): string[] {
+  return coverPlanOf(mod).urls;
+}
 
 /** 当前手动「重新加载封面」的 Mod（用于把后台下载失败回执对应到本次重试） */
 const retryCoverModId = ref<number | null>(null);
@@ -615,6 +705,18 @@ const retryCoverModId = ref<number | null>(null);
 function refreshSelectedCover(): void {
   const mod = selected.value;
   if (!mod) return;
+  const entry = installedEntryOf(mod.modId);
+  // 本地来源（收藏里标记过的本机副本）：只走本地封面恢复（写回模组目录），绝不排队官网缩略图下载
+  if (entry && mod.origin === "local") {
+    void refreshLocalCover(mod.modId, entry.kind, entry.folderName)
+      .then((outcome) => {
+        const path = outcome.installPath ?? null;
+        if (path) thumbs.localThumbs[mod.modId] = assetUrl(path);
+        showToast(t("detail.coverUpdated"), "ok");
+      })
+      .catch((e) => showToast(`${t("detail.coverFetchFailed")}: ${normalizeBackendError(e)}`, "error"));
+    return;
+  }
   retryCoverModId.value = mod.modId;
   delete thumbs.localThumbs[mod.modId];
   if (mod.thumbnail) {
@@ -628,7 +730,6 @@ function refreshSelectedCover(): void {
     retryCoverModId.value = null;
   }
   // 已安装到本地的模组：把有效封面同步到模组目录 thumbnail.jpg（缓存复用复制 / 缺失下载写两处）
-  const entry = installedEntryOf(mod.modId);
   if (entry) {
     void syncCoverToInstall(mod.modId, entry.kind, entry.folderName, mod.thumbnail)
       .then((outcome) =>
@@ -875,6 +976,7 @@ async function boot(): Promise<void> {
 
 onMounted(() => {
   void installed.refreshLocalIndex();
+  void ensureModRoot();
   void boot();
 });
 
@@ -974,75 +1076,8 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- v1.2：索引进度指示（Rust 事件推送，实时刷新；不靠轮询）
-           搜索框关掉但索引仍在跑时也保留这行，让用户能看到进度。
-           v1.6：设置里关掉「本地索引」后整行不再渲染（连同「前往设置」按钮），
-           用户已经主动关闭，不该再被一行 ⚪ 提示反复提醒。 -->
-      <div
-        v-if="
-          indexStatus?.indexingEnabled !== false &&
-          (localSearchEnabled || (indexStatus?.indexingEnabled ?? false))
-        "
-        class="index-status"
-        :class="indexPhaseKind"
-      >
-        <span class="text">{{ indexStatusText }}</span>
-        <button
-          v-if="indexPhaseKind === 'failed' && indexStatus?.phase === 'needLogin'"
-          type="button"
-          class="mini"
-          @click="startLogin()"
-        >
-          {{ t("online.openLogin") }}
-        </button>
-        <button
-          v-else-if="indexPhaseKind === 'syncing'"
-          type="button"
-          class="mini"
-          :disabled="indexPauseBusy"
-          @click="toggleIndexPause"
-        >
-          {{ t("online.indexPause") }}
-        </button>
-        <!-- ⏸ 暂停中 / 中断过：从断点接着爬（不受 24h 新鲜度闸门约束） -->
-        <button
-          v-else-if="indexPhaseKind === 'paused'"
-          type="button"
-          class="mini"
-          :disabled="indexPauseBusy"
-          @click="toggleIndexPause"
-        >
-          {{ indexPauseBusy ? t("online.indexContinueBusy") : t("online.indexContinue") }}
-        </button>
-        <!-- 🟢 已就绪：还能继续把剩余窗口爬完 -->
-        <button
-          v-else-if="indexPhaseKind === 'ready'"
-          type="button"
-          class="mini"
-          :disabled="indexPauseBusy"
-          @click="toggleIndexPause"
-        >
-          {{ indexPauseBusy ? t("online.indexContinueBusy") : t("online.indexContinue") }}
-        </button>
-        <!-- 开关关闭：指示灯变 ⚪，直接给一个跳设置页的入口 -->
-        <button
-          v-else-if="indexPhaseKind === 'disabled'"
-          type="button"
-          class="mini"
-          @click="requestOpenSettings()"
-        >
-          {{ t("online.indexStatusGoSettings") }}
-        </button>
-        <button
-          v-else-if="indexPhaseKind === 'idle'"
-          type="button"
-          class="mini"
-          :disabled="indexSyncBusy"
-          @click="triggerIndexSync(true)"
-        >
-          {{ indexSyncBusy ? t("online.localSearchBuildingShort") : t("online.localSearchBuildNow") }}
-        </button>
-      </div>
+      <!-- v2.0：索引进度 / 失败重试已统一收进底部状态栏（StatusBar.vue）。
+           在线页不再保留常驻的手动更新按钮，避免与底栏形成两个任务入口。 -->
 
       <!-- 搜索 / 排序 / 刷新已统一到 App.vue 的顶栏，这里只保留标题条与列表 -->
       <!-- 列表：与本地页共用 ModGrid（滚动容器 + 网格骨架 + 视图模式 + 卡片大小）
@@ -1107,6 +1142,7 @@ onUnmounted(() => {
             <p v-else-if="indexBuilding" class="note">
               {{ t("online.localSearchBuilding", { n: indexStatus?.indexed ?? 0, total: indexStatus?.totalCount ?? 0 }) }}
             </p>
+            <!-- v2.0：正常状态不再提供「立即建立索引」——自动任务与失败重试统一在底部状态栏 -->
             <div class="login-actions">
               <button v-if="!session?.loggedIn" type="button" @click="startLogin()">
                 {{ t("online.openLogin") }}
@@ -1117,14 +1153,6 @@ onUnmounted(() => {
                 @click="requestOpenSettings()"
               >
                 {{ t("online.indexStatusGoSettings") }}
-              </button>
-              <button
-                v-else-if="!indexReady || indexBuilding"
-                type="button"
-                :disabled="indexSyncBusy"
-                @click="triggerIndexSync(true)"
-              >
-                {{ indexSyncBusy ? t("online.localSearchBuildingShort") : t("online.localSearchBuildNow") }}
               </button>
               <button v-else type="button" @click="runLocalSearch(localTerm)">
                 {{ t("online.reload") }}
@@ -1174,7 +1202,8 @@ onUnmounted(() => {
             v-for="mod in visibleItems"
             :key="mod.modId"
             :mod="mod"
-            :thumb="thumbs.thumbOf(mod)"
+            :thumb="thumbFor(mod)"
+            :candidates="candidatesFor(mod)"
             :active="selected?.modId === mod.modId"
             :installed="installedEntryOf(mod.modId) !== null"
             @select="selectMod"
@@ -1215,6 +1244,7 @@ onUnmounted(() => {
       <OnlineDetailPanel
         :mod="selected"
         :thumb="selectedThumb"
+        :cover-mode="selectedCoverMode"
         :title="headerTitle"
         :subtitle="titleSub"
         :tags="detailTags"

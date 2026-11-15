@@ -78,7 +78,8 @@ function placeholderFavorite(modId: number): OnlineMod {
 function patchIfChanged(current: OnlineMod, fresh: OnlineMod): void {
   let changed = false;
   for (const key of Object.keys(fresh) as (keyof OnlineMod)[]) {
-    if (key === "raw") continue;
+    // raw 是原始负载不参与比较；origin 是本地计算出来的来源标记，不能被重载覆盖
+    if (key === "raw" || key === "origin") continue;
     const a = current[key];
     const b = fresh[key];
     if (Array.isArray(a) && Array.isArray(b)) {
@@ -117,6 +118,11 @@ export function useOnlineList(deps: {
   onNetworkInterrupted?: () => void;
   /** 退出本地搜索态（返回调用前是否处于本地搜索视图）—— 与官方列表互斥 */
   clearLocalSearch: () => boolean;
+  /**
+   * 「我的收藏」是聚合视图：同一个 ID 可能是本机已安装副本。
+   * 页面层用本机安装索引回答这个问题，收藏项据此记下来源（`origin`）。
+   */
+  hasLocalCopy?: (modId: number) => boolean;
 }) {
   const { selection, scrollEl } = deps;
 
@@ -362,15 +368,25 @@ export function useOnlineList(deps: {
       matched.push(placeholderFavorite(id));
     }
 
-    totalCount.value = matched.length;
+    /**
+     * 来源标记：收藏是聚合视图，必须把「本机有安装副本」这件事随条目一起带下去，
+     * 否则合并 / 筛选 / 排序 / 打开详情之后就被当成纯在线模组（封面会去请求服务器）。
+     * 用浅拷贝而不是原地改：pool 里的对象还会被搜索列表复用，不能污染。
+     */
+    const withOrigin: OnlineMod[] = matched.map((mod) => ({
+      ...mod,
+      origin: deps.hasLocalCopy?.(mod.modId) ? "local" : "online",
+    }));
+
+    totalCount.value = withOrigin.length;
     hasMore.value = false;
     cursor.value = 1;
     error.value = null;
     loading.value = false;
     loadingMore.value = false;
-    applyList(matched, mode);
-    setStatusMessageKey("favorites.localHint", { n: matched.length });
-    deps.syncImages(matched);
+    applyList(withOrigin, mode);
+    setStatusMessageKey("favorites.localHint", { n: withOrigin.length });
+    deps.syncImages(withOrigin);
   }
 
   /**

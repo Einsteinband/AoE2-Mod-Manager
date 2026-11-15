@@ -317,8 +317,11 @@ const { t } = useI18n();
   margin-left: 6px;
   opacity: 0.7;
   transition: transform 0.15s ease;
+  /* 三角图形本身朝右：展开时顺时针转 90° → 箭头向下 */
+  transform: rotate(90deg);
 }
 .side-title.collapsed .side-caret {
-  transform: rotate(-90deg);
+  /* 收起时不旋转 → 箭头向右 */
+  transform: rotate(0deg);
 }
 </style>

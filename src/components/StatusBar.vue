@@ -28,21 +28,16 @@ import {
   setStatusMessageKey,
   statusMessage,
 } from "../sessionState";
+import { deriveIndexBar, indexBar, retryIndexSync } from "../online/indexStatusStore";
 
 /**
- * 右侧统计组（原顶部 rootbar 五项，2026-11-13 迁移到底栏右侧）：
- * 根目录 / 本地数 / 已订阅数 / 显示数·总数 / 上次扫描时间；仅本地模式显示。
+ * 右侧状态区（原顶部 rootbar，2026-11-13 迁移到底栏，2026-11-15 收缩）：
+ * 本地模式下只保留「扫描警告」按钮；根目录 / 已订阅 / 扫描时间 / 本地数 / 显示数
+ * 已按用户要求全部撤出底栏，右侧空间留给索引状态与代理胶囊。
  * 数据全部由 App.vue 从 LocalBrowser expose 透传，这里不重复建统计状态。
  */
 defineProps<{
-  localCount: number;
   mode: "local" | "online";
-  /** 游戏根目录路径（长路径截断，悬停看全量） */
-  rootPath?: string;
-  subscribedCount?: number;
-  showingCount?: number;
-  totalCount?: number;
-  scannedAt?: string;
   warningCount?: number;
 }>();
 const emit = defineEmits<{
@@ -160,6 +155,61 @@ function clock(ms: number): string {
   const date = new Date(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// ---------------- 官方 Mod 本地索引（底栏唯一状态出口） ----------------
+
+/**
+ * 索引进度不再常驻在线页，而是统一在这里展示：
+ * - 自动更新关闭 → 整块隐藏（不显示任何索引字样，也不显示手动入口）；
+ * - 同步中 → 真实已处理条数 / 可靠总量（拿不到总量时不带百分比）；
+ * - 成功 → 短提示 + 新增条数，随后回到常态；
+ * - 失败 → 失败原因 + 唯一「手动重试」按钮（复用同一个同步核心）。
+ */
+const indexView = computed(() => deriveIndexBar(indexBar));
+
+const indexReason = computed(() =>
+  indexView.value.kind === "failed" ? translateBackendMessage(indexBar.failure) : "",
+);
+
+const indexText = computed(() => {
+  const st = indexBar.status;
+  switch (indexView.value.kind) {
+    case "hidden":
+      return "";
+    case "syncing": {
+      const n = st?.indexed ?? 0;
+      // 总量拿不到 / 比已处理还小（官方接口总量会波动）→ 只说进度，不给比例
+      const total = st?.totalCount ?? 0;
+      return total > n
+        ? t("statusbar.indexProgress", { n, total })
+        : t("statusbar.indexProgressBare", { n });
+    }
+    case "success":
+      return indexView.value.added > 0
+        ? t("statusbar.indexUpdated", { n: indexView.value.added })
+        : t("statusbar.indexLatest");
+    case "ready":
+      return t("statusbar.indexReady", { n: st?.indexed ?? 0 });
+    case "failed":
+      return t("statusbar.indexFailed", { reason: indexReason.value });
+    case "needLogin":
+      return t("statusbar.indexNeedLogin");
+    default:
+      return t("statusbar.indexIdle");
+  }
+});
+
+const indexTitle = computed(() => {
+  const st = indexBar.status;
+  if (!st) return t("statusbar.indexTitle");
+  if (indexView.value.kind === "failed") return `${indexReason.value} · ${t("statusbar.indexTitle")}`;
+  return `${t("statusbar.indexTitle")}${st.path ? ` · ${st.path}` : ""}`;
+});
+
+async function retryIndex(): Promise<void> {
+  if (indexBar.retrying) return;
+  await retryIndexSync();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -409,25 +459,31 @@ onBeforeUnmount(() => {
     <span class="sb-mid" :title="middleText">{{ middleText }}</span>
 
     <span class="sb-right">
-      <!-- 本地页统计组：原顶部 rootbar 五项迁移至此；在线模式不显示 -->
-      <span v-if="mode === 'local'" class="sb-stats">
-        <span class="sb-stat sb-root" :title="rootPath || t('rootbar.notSet')">
-          <span class="sb-stat-label">{{ t("rootbar.root") }}</span>
-          <span class="sb-stat-value">{{ rootPath || t("rootbar.notSet") }}</span>
-        </span>
-        <span class="sb-stat">{{ t("rootbar.local", { n: localCount }) }}</span>
-        <span class="sb-stat" data-collapsible>{{ t("rootbar.subscribed", { n: subscribedCount ?? 0 }) }}</span>
-        <span class="sb-stat">
-          {{ t("rootbar.showing", { shown: showingCount ?? 0, total: totalCount ?? 0 }) }}
-        </span>
-        <span class="sb-stat" data-collapsible>{{ t("rootbar.scannedAt", { time: scannedAt ?? "" }) }}</span>
-        <button
-          v-if="(warningCount ?? 0) > 0"
-          type="button"
-          class="sb-stat sb-warn"
-          @click="emit('toggle-warnings')"
-        >
+      <!-- 本地页统计组：2026-11-15 按用户要求把根目录 / 已订阅 / 扫描时间 / 本地数 / 显示数
+           全部撤出底栏（右侧留给索引状态与代理胶囊），只保留「扫描警告」这类可操作项 -->
+      <span v-if="mode === 'local' && (warningCount ?? 0) > 0" class="sb-stats">
+        <button type="button" class="sb-stat sb-warn" @click="emit('toggle-warnings')">
           ⚠ {{ t("rootbar.warnings", { n: warningCount ?? 0 }) }}
+        </button>
+      </span>
+      <!-- 官方 Mod 本地索引（右侧状态区）：自动更新关闭时整块不渲染；失败时这里是唯一「手动重试」入口。
+           放在代理胶囊之前：代理链路始终占据最右侧 -->
+      <span
+        v-if="indexView.kind !== 'hidden'"
+        class="sb-index"
+        :class="indexView.kind"
+        :title="indexTitle"
+      >
+        <span v-if="indexView.kind === 'syncing'" class="spinner sb-index-spin"></span>
+        <span class="sb-index-text">{{ indexText }}</span>
+        <button
+          v-if="indexView.showRetry"
+          type="button"
+          class="sb-index-retry"
+          :disabled="indexBar.retrying"
+          @click="retryIndex"
+        >
+          {{ indexBar.retrying ? t("statusbar.indexRetrying") : t("statusbar.indexRetry") }}
         </button>
       </span>
       <!-- 代理链路 -->
@@ -536,6 +592,69 @@ onBeforeUnmount(() => {
   letter-spacing: calc(0.2px * var(--ui-tracking));
 }
 
+/* 索引状态块（右侧状态区）：中性信息区，放在代理胶囊之后；
+   窄窗口只省略文字，重试按钮始终可见 */
+.sb-index {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--parch-dim);
+  font-size: calc(10.5px * var(--global-scale));
+}
+.sb-index.syncing {
+  color: var(--gold-dim);
+}
+.sb-index.success,
+.sb-index.ready {
+  color: var(--ok-text);
+}
+.sb-index.failed {
+  color: var(--danger-text);
+}
+.sb-index.needLogin {
+  color: var(--danger-text);
+}
+.sb-index-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sb-index-spin {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-width: 1.5px;
+}
+.sb-index-retry {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border: 1px solid rgba(var(--danger-rgb), 0.55);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--danger-text);
+  font-size: calc(10px * var(--global-scale));
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sb-index-retry:hover {
+  background: rgba(var(--danger-rgb), 0.12);
+}
+.sb-index-retry:focus-visible {
+  outline-color: var(--text-soft);
+}
+/* 窄窗口：右侧索引文字让位（右侧还有统计组与代理胶囊），只保留「手动重试」这种可操作项 */
+@media (max-width: 1200px) {
+  .sb-index-text {
+    display: none;
+  }
+}
+
 .sb-right {
   flex: 0 0 auto;
   display: inline-flex;
@@ -563,7 +682,7 @@ onBeforeUnmount(() => {
   color: var(--gold-dim);
 }
 
-/* 右侧统计组（原顶部 rootbar 五项）：紧凑横排，长路径截断 + 悬停全量 */
+/* 右侧统计组（原顶部 rootbar）：紧凑横排，只留本地数与显示数 */
 .sb-stats {
   display: inline-flex;
   align-items: center;
@@ -579,18 +698,6 @@ onBeforeUnmount(() => {
   font-size: calc(10.5px * var(--global-scale));
   white-space: nowrap;
 }
-.sb-root {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.sb-root .sb-stat-label {
-  color: var(--muted);
-}
-.sb-root .sb-stat-value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 .sb-warn {
   padding: 1px 8px;
   border: 1px solid rgba(var(--danger-rgb), 0.55);
@@ -599,12 +706,6 @@ onBeforeUnmount(() => {
   color: var(--danger-text);
   font-size: calc(10px * var(--global-scale));
   cursor: pointer;
-}
-/* 窄窗口：隐藏订阅数与扫描时间等次要文字，根目录与本地/显示计数保留，避免与左侧状态重叠 */
-@media (max-width: 920px) {
-  .sb-stats .sb-stat[data-collapsible] {
-    display: none;
-  }
 }
 
 /* 登录弹层：向上弹出，不挤压布局 */

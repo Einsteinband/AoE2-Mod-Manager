@@ -613,54 +613,8 @@ summary:focus-visible {
   background: transparent;
 }
 
-/* v1.2：索引进度指示灯（🟡/🟢/🔴） */
-.index-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px var(--layout-page-pad-x, 18px) 0;
-  padding: 4px 8px;
-  border-radius: 3px;
-  font-size: calc(11px * var(--global-scale));
-  letter-spacing: calc(0.3px * var(--ui-tracking));
-  color: var(--muted);
-}
-.index-status.syncing {
-  color: var(--gold);
-  background: rgba(var(--accent-rgb), 0.06);
-  border: 1px solid rgba(var(--accent-rgb), 0.18);
-}
-.index-status.ready {
-  color: var(--ok);
-  background: rgba(var(--ok-rgb), 0.07);
-  border: 1px solid rgba(var(--ok-rgb), 0.22);
-}
-/* ⏸ 已暂停 / 有断点：金色暗描边，区别于🟢就绪与🔴失败 */
-.index-status.paused {
-  color: var(--muted);
-  background: rgba(var(--accent-rgb), 0.04);
-  border: 1px solid rgba(var(--accent-rgb), 0.16);
-}
-.index-status.failed {
-  color: var(--danger);
-  background: rgba(var(--danger-rgb), 0.08);
-  border: 1px solid rgba(var(--danger-rgb), 0.25);
-}
-.index-status.idle {
-  border: 1px solid var(--line);
-}
-.index-status .text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.index-status .mini {
-  flex: 0 0 auto;
-  padding: 2px 8px;
-  font-size: calc(10.5px * var(--global-scale));
-}
+/* v2.0：在线页的索引进度行已整体迁到底部状态栏（StatusBar.vue），
+   这里只保留本地搜索框，原先的 .index-status 样式已随节点一起移除。 */
 
 /* 工具栏控件基础内边距与字号；容器 flex、gap、最小宽与不可收缩约束由 ModToolbar scoped 规则负责。 */
 .toolbar button,

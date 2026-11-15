@@ -55,6 +55,12 @@ export interface ModEntry {
    */
   uninstalled?: boolean;
   /**
+   * 前端计算出的真实来源（Rust 不返回该字段）：
+   * `online` = 收藏里的已卸载 / 未安装在线条目；`local` = 磁盘上扫描到的条目。
+   * 与 `src/online/modSource.ts` 的 `modEntryOrigin()` 同一口径，禁止另建判断体系。
+   */
+  origin?: "local" | "online";
+  /**
    * v0.6：已经转换好的封面 URL（占位条目走图片缓存 asset URL）。
    * 有值时优先于 thumbnail（thumbnail 是磁盘绝对路径，卸载后失效）。
    */

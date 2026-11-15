@@ -17,8 +17,24 @@ import type { IndexSyncReport } from "./types";
 
 /** 已经消费掉的 epoch（同一次登录只触发一次） */
 let consumedEpoch = -1;
-/** 在途请求：两处调用方共享 */
-let inFlight: Promise<IndexSyncReport | null> | null = null;
+/** 全局单飞：自动补建 / 底部状态栏「手动重试」/ 在线页补建共享同一个 Promise */
+let inFlight: Promise<IndexSyncReport> | null = null;
+
+/**
+ * 触发一次索引同步（**唯一同步核心**）。
+ *
+ * 自动补建、底栏手动重试都必须走这里：前端单飞 + Rust 侧 `begin_run` 的 busy 闸门
+ * 两道保险，任何时刻最多只有一轮同步在飞，不会出现两个任务各爬一遍。
+ * 与 `kickIndexSync` 的区别：这里不吞错误，调用方需要知道成功 / 失败。
+ */
+export function runIndexSync(): Promise<IndexSyncReport> {
+  if (inFlight) return inFlight;
+  const run = indexSync().finally(() => {
+    if (inFlight === run) inFlight = null;
+  });
+  inFlight = run;
+  return run;
+}
 
 /**
  * 按登录事件（`sessionEpoch`）触发一次索引补建。
@@ -26,18 +42,13 @@ let inFlight: Promise<IndexSyncReport | null> | null = null;
  */
 export function kickIndexSync(epoch: number): Promise<IndexSyncReport | null> {
   if (epoch <= 0) return Promise.resolve(null);
-  if (inFlight) return inFlight;
+  if (inFlight) return inFlight.catch(() => null).then((report) => report ?? null);
   if (epoch <= consumedEpoch) return Promise.resolve(null);
   consumedEpoch = epoch;
-  inFlight = indexSync()
-    .catch((error) => {
-      console.info("[index] background index build skipped (expected: not signed in / already syncing / rate-limit cooldown)", error);
-      return null;
-    })
-    .finally(() => {
-      inFlight = null;
-    });
-  return inFlight;
+  return runIndexSync().catch((error) => {
+    console.info("[index] background index build skipped (expected: not signed in / already syncing / rate-limit cooldown)", error);
+    return null;
+  });
 }
 
 /** 仅用于诊断：当前是否已有索引补建在飞 */

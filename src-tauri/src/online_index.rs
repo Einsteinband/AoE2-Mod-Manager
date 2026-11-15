@@ -27,6 +27,14 @@
 //! - `cursor` 是页码，`total` 是条数；到达 `ceil(total/PAGE_SIZE)` 或空页就 `exhausted`；
 //! - 已 `exhausted` 的窗口重启后**一个请求都不发**，直接跳过；
 //! - 中断 / 暂停一律 `done = false`，游标每 5 页落一次盘，下次从那一页接着爬。
+//!
+//! ## 增量同步的判定（v1.6，修复「只探 1 页就报最新」）
+//! 完整扫过一轮之后，每轮只做「探测 + 按需补差」：
+//! 1. 探主窗口第 1 页 —— 既刷新最新模组的字段，也拿 API 报的**全局总量**；
+//! 2. 用**本地索引条数**和 API 总量比较（`total_count` ≠ `items.len()`，两者绝不混用）；
+//! 3. 本地已追平（达到 `API 总量 - 已验证不可入库差值`）→ 立即结束，只花 1 个请求；
+//! 4. 没追平 → 从第 2 页继续翻主窗口，直到追平 / 翻到末页 / 页数预算用尽；
+//!    不归零游标、不重爬 q 前缀与分类窗口，因此仍然保持增量的性能优势。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -230,6 +238,11 @@ pub struct Store {
     /// 上一次完整扫描完成的时间（>7 天触发全量重扫）
     #[serde(default)]
     pub full_synced_at_ms: u64,
+    /// 已验证的「不可入库差值」：API 报的总量比实际能入库的条目多这么多
+    /// （服务端返回了 modId 非法 / 标题为空的条目）。补差分页翻到末页仍差这么多时记录，
+    /// 下一轮用它当容差，避免每次启动都为同一批不可索引条目重爬整个窗口。
+    #[serde(default)]
+    pub unindexable_gap: i64,
     /// 遍历计划版本（< PLAN_VERSION 时只重建窗口列表，条目全部保留）
     #[serde(default)]
     pub plan_version: u32,
@@ -255,6 +268,7 @@ impl Default for Store {
             last_error_at_ms: 0,
             paused: false,
             full_synced_at_ms: 0,
+            unindexable_gap: 0,
             plan_version: 0,
             items: BTreeMap::new(),
         }
@@ -746,6 +760,7 @@ struct Snapshot {
     paused: bool,
     last_error: String,
     plan_version: u32,
+    unindexable_gap: i64,
 }
 
 fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, ApiFailure> {
@@ -764,6 +779,7 @@ fn snapshot(app: &tauri::AppHandle) -> Result<Snapshot, ApiFailure> {
         paused: mem.store.paused,
         last_error: mem.store.last_error.clone(),
         plan_version: mem.store.plan_version,
+        unindexable_gap: mem.store.unindexable_gap,
     })
 }
 
@@ -783,9 +799,23 @@ fn index_item_from(summary: &OnlineModSummary) -> IndexItem {
     }
 }
 
+/// 一页数据写入后的统计。`written` = 写入 / 更新的条目数（upsert 幂等，重复页不会重复插入），
+/// `added` = 其中**本地原本没有**的条目数（v1.6 起用它区分「新增」与「更新」，也是补差是否见效的依据）
+#[derive(Default, Clone, Copy, Debug)]
+struct UpsertCount {
+    written: usize,
+    added: usize,
+}
+
+impl UpsertCount {
+    fn updated(&self) -> usize {
+        self.written.saturating_sub(self.added)
+    }
+}
+
 /// upsert 一页数据（只动 items，不动进度）
-fn upsert_items(store: &mut Store, items: &[OnlineModSummary]) -> usize {
-    let mut written = 0usize;
+fn upsert_items(store: &mut Store, items: &[OnlineModSummary]) -> UpsertCount {
+    let mut count = UpsertCount::default();
     for summary in items {
         if summary.mod_id <= 0 || summary.title.trim().is_empty() {
             continue;
@@ -793,13 +823,14 @@ fn upsert_items(store: &mut Store, items: &[OnlineModSummary]) -> usize {
         let key = summary.mod_id.to_string();
         let mut next = index_item_from(summary);
         // 首次出现时间保持不变（用于观察老模组是否被服务端下线）
-        if let Some(previous) = store.items.get(&key) {
-            next.first_seen_ms = previous.first_seen_ms;
+        match store.items.get(&key) {
+            Some(previous) => next.first_seen_ms = previous.first_seen_ms,
+            None => count.added += 1,
         }
         store.items.insert(key, next);
-        written += 1;
+        count.written += 1;
     }
-    written
+    count
 }
 
 /// 把一页写进内存索引，并把**当前分区**的游标往前推
@@ -809,12 +840,12 @@ fn apply_partition_page(
     cursor_after: i64,
     part_total: i64,
     global_total: i64,
-) -> Result<usize, ApiFailure> {
+) -> Result<UpsertCount, ApiFailure> {
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
         .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
-    let written = upsert_items(&mut mem.store, items);
+    let count = upsert_items(&mut mem.store, items);
     if let Some(part) = mem.store.partitions.get_mut(mem.store.active) {
         part.cursor = cursor_after;
         if part_total > 0 {
@@ -826,7 +857,7 @@ fn apply_partition_page(
     }
     mem.store.updated_at_ms = now_ms();
     mem.dirty = true;
-    Ok(written)
+    Ok(count)
 }
 
 /// 刷新用：只 upsert 一个窗口的第 1 页（不推进分区游标）
@@ -834,18 +865,187 @@ fn apply_global_page(
     app: &tauri::AppHandle,
     items: &[OnlineModSummary],
     global_total: i64,
-) -> Result<usize, ApiFailure> {
+) -> Result<UpsertCount, ApiFailure> {
     let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
     let mem = guard
         .as_mut()
         .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
-    let written = upsert_items(&mut mem.store, items);
+    let count = upsert_items(&mut mem.store, items);
     if global_total > 0 {
         mem.store.total_count = global_total;
     }
     mem.store.updated_at_ms = now_ms();
     mem.dirty = true;
-    Ok(written)
+    Ok(count)
+}
+
+// ---------------- 增量补差（v1.6） ----------------
+//
+// 旧实现（v1.4 / v1.5）在「索引已完整扫过一轮」时只探主窗口第 1 页，然后**无条件**
+// `done = true` + 「索引已是最新（N 条）」返回。API 全局总量从 41306 涨到 41323、
+// 本地只有 41243 时，这一探只写 50 条、差值几十条永远补不上，每轮都误报「最新」。
+// 现在把两件事分开：**探测**（拿 API 总量 + 刷新最新字段）与**是否已追平**（拿本地条数比目标）。
+// 没追平就从第 2 页继续翻主窗口，追平即停 —— 不归零游标、不重爬整份计划。
+
+/// 补差分页的目标条数：API 总量扣掉「已验证不可入库」的差值
+fn catch_up_target(api_total: i64, unindexable_gap: i64) -> i64 {
+    if api_total <= 0 {
+        return 0;
+    }
+    let gap = unindexable_gap.clamp(0, api_total);
+    api_total - gap
+}
+
+/// 补差分页的一步判定
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpStep {
+    /// 还没追平：继续请求 `next_page`
+    Continue,
+    /// 本地条数已达目标（追平）
+    CaughtUp,
+    /// 已翻到 API 总量对应的最后一页，仍然差一点：剩下的是服务端有、但无法入库的条目
+    LastPage,
+    /// 本轮页数预算用尽（断点已落盘，下一轮接着补）
+    Budget,
+    /// 连续空页：服务端不再返回该页码的数据，避免异常响应把循环拖死
+    Empty,
+}
+
+/// 补差分页的纯状态（不碰网络、不碰磁盘）：所有终止条件都在 [`CatchUpStep`] 里显式表达，
+/// 便于单测覆盖「不追平不许停」这条规则。
+struct CatchUpWindow {
+    /// 追平目标（条数）
+    target: i64,
+    /// API 报的全局总量（中途可能涨，用最新值覆盖）
+    api_total: i64,
+    /// 本地索引当前条数（每写一页刷新一次）
+    indexed: usize,
+    /// 下一个要请求的页码（1 基）
+    next_page: i64,
+    /// 本轮已发出的补差请求数
+    pages: u32,
+    /// 本轮剩余页数预算
+    budget: u32,
+    /// 连续空页次数
+    empty_streak: u32,
+}
+
+impl CatchUpWindow {
+    fn new(
+        api_total: i64,
+        unindexable_gap: i64,
+        indexed: usize,
+        start_page: i64,
+        budget: u32,
+    ) -> Self {
+        Self {
+            target: catch_up_target(api_total, unindexable_gap),
+            api_total,
+            indexed,
+            next_page: start_page.max(1),
+            pages: 0,
+            budget,
+            empty_streak: 0,
+        }
+    }
+
+    fn step(&self) -> CatchUpStep {
+        // 总量未知：没有可验证的目标，只能按「翻到末页」收场，绝不谎报追平
+        if self.target <= 0 {
+            return CatchUpStep::LastPage;
+        }
+        if self.indexed as i64 >= self.target {
+            return CatchUpStep::CaughtUp;
+        }
+        if self.api_total > 0 && self.next_page > last_page(self.api_total) {
+            return CatchUpStep::LastPage;
+        }
+        if self.empty_streak >= 2 {
+            return CatchUpStep::Empty;
+        }
+        if self.pages >= self.budget {
+            return CatchUpStep::Budget;
+        }
+        CatchUpStep::Continue
+    }
+
+    /// 记一页结果：`page_items` = 本页返回条数（0 = 空页，用于空页兜底）
+    fn record_page(&mut self, page_items: usize, indexed: usize, api_total: Option<i64>) {
+        self.next_page = self.next_page.saturating_add(1);
+        self.pages = self.pages.saturating_add(1);
+        self.indexed = indexed;
+        if page_items == 0 {
+            self.empty_streak = self.empty_streak.saturating_add(1);
+        } else {
+            self.empty_streak = 0;
+        }
+        if let Some(total) = api_total.filter(|t| *t > 0) {
+            // API 总量中途上涨：目标同步抬高，不能拿着旧目标提前收官
+            if total > self.api_total {
+                let raise = total - self.api_total;
+                self.target = self.target.saturating_add(raise);
+                self.api_total = total;
+            }
+        }
+    }
+}
+
+/// 补差开始前把游标交回主窗口：中途被掐断时，下一轮直接从这一页续爬，不会重爬前面的页
+fn prepare_catch_up(app: &tauri::AppHandle, start_page: i64) -> Result<(), ApiFailure> {
+    let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
+    let mem = guard
+        .as_mut()
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
+    let Some(index) = mem
+        .store
+        .partitions
+        .iter()
+        .position(|p| p.q.is_empty() && p.tags.is_empty() && p.sort == SORTS[0])
+    else {
+        return Ok(());
+    };
+    if let Some(part) = mem.store.partitions.get_mut(index) {
+        part.cursor = start_page.max(1);
+        part.exhausted = false;
+    }
+    mem.store.active = index;
+    mem.store.done = false;
+    mem.dirty = true;
+    Ok(())
+}
+
+/// 记录「已验证不可入库」的差值：翻到末页仍差这么多，就不是漏爬，而是服务端有、本地无法入库的条目
+fn record_unindexable_gap(app: &tauri::AppHandle, gap: i64) -> Result<(), ApiFailure> {
+    let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
+    let mem = guard
+        .as_mut()
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
+    let gap = gap.max(0);
+    if mem.store.unindexable_gap != gap {
+        mem.store.unindexable_gap = gap;
+        mem.dirty = true;
+    }
+    Ok(())
+}
+
+/// 补差收尾：主窗口标记扫完，`done` 落 true。
+/// `refresh_full` = 真的翻到了末页（等价于一次完整扫描），否则不动 `full_synced_at_ms`
+fn finalize_catch_up(app: &tauri::AppHandle, refresh_full: bool) -> Result<(), ApiFailure> {
+    mark_partition_exhausted(app, 0)?;
+    advance_partition(app)?;
+    let mut guard = ensure_loaded(app).map_err(|e| ApiFailure::new("internal", e, None))?;
+    let mem = guard
+        .as_mut()
+        .ok_or_else(|| ApiFailure::new("internal", user_err("index.storeNotReady", json!({})), None))?;
+    let now = now_ms();
+    mem.store.done = true;
+    mem.store.updated_at_ms = now;
+    if refresh_full {
+        mem.store.full_synced_at_ms = now;
+    }
+    mem.dirty = true;
+    prune(&mut mem.store);
+    Ok(())
 }
 
 /// 窗口唯一键：`sort|tags|q`。重建计划时用它把旧窗口的断点（cursor / exhausted）
@@ -1319,27 +1519,212 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
         build_plan(app, &mut fetcher)?;
         report.pages += 1; // /Tags 也算一次请求
     } else if snap.done {
+        // v1.6 修复（本段的旧逻辑就是 bug 现场）：以前探一页 → 写一页 → **无条件**
+        // `done = true` + 「索引已是最新（N 条）」返回，于是 API 总量涨了、本地没追平也照报「最新」，
+        // 每轮只拉 50 条，差值几十条永远补不上。现在探测与「是否追平」分开判断。
         sleep_gap();
         let probe = fetcher.find(1, SORTS[0], &[], "")?;
         report.pages += 1;
-        if let Some(total) = probe.total_count {
+        if let Some(total) = probe.total_count.filter(|t| *t > 0) {
             global_total = total;
         }
-        report.fetched += apply_global_page(app, &probe.items, global_total)?;
+        let probe_count = apply_global_page(app, &probe.items, global_total)?;
+        report.fetched += probe_count.written;
+        let indexed_now = snapshot(app).map(|s| s.items).unwrap_or(snap.items);
+        let target = catch_up_target(global_total, snap.unindexable_gap);
+        let gap = (global_total - indexed_now as i64).max(0);
+        let needs_catch_up = target > 0 && (indexed_now as i64) < target;
         let stale_full = now_ms().saturating_sub(snap.full_synced_at_ms) >= FULL_SYNC_INTERVAL_MS;
         let grown = global_total != snap.total;
         log::info!(
             target: "index",
-            "索引已完成过一轮（距离上次完整扫描过久={stale_full}，全局总量变化={grown}：{} → {}）：只做增量探测，不重爬已有窗口，盯目标总数",
-            snap.total,
-            global_total
+            "增量探测：API 总量 {} 条，本地索引 {} 条，差值 {} 条（已确认不可入库 {} 条，追平目标 {} 条）；第 1 页 {} 条（新增 {} / 更新 {}）；总量变化={}，距上次完整扫描过久={} → {}",
+            global_total,
+            indexed_now,
+            gap,
+            snap.unindexable_gap,
+            target,
+            probe.items.len(),
+            probe_count.added,
+            probe_count.updated(),
+            grown,
+            stale_full,
+            if needs_catch_up { "继续分页补差" } else { "已追平，快速结束" }
         );
-        // v1.4：**绝不再因为「总量变化 / 满 7 天 / 点继续」把游标归零**。
-        // 完成后只做一件有价值的事：把主窗口第 1 页 upsert 一次（上面已做），不重爬。
-        report.indexed = snapshot(app).map(|s| s.items).unwrap_or(report.indexed);
+        report.indexed = indexed_now;
         report.total_count = global_total;
-        report.done = true;
-        report.message = format!("索引已是最新（{} 条）", report.indexed);
+        if global_total <= 0 {
+            // API 没报总量：既无法证明追平，也不该凭空补差，只报告事实
+            report.done = true;
+            report.message = format!("索引已是最新（{} 条，API 未返回总量）", indexed_now);
+            return Ok(report);
+        }
+        if !needs_catch_up {
+            report.done = true;
+            report.message = format!("索引已是最新（{} / {} 条）", indexed_now, global_total);
+            return Ok(report);
+        }
+
+        // 补差分页：从第 2 页起接着翻主窗口（lastUpdate、无 q、无 tags），
+        // 只翻「还没追平」的这部分，绝不把游标归零重爬整份计划。
+        let start_page = 2;
+        prepare_catch_up(app, start_page)?;
+        let mut window = CatchUpWindow::new(
+            global_total,
+            snap.unindexable_gap,
+            indexed_now,
+            start_page,
+            MAX_PAGES_PER_RUN.saturating_sub(report.pages),
+        );
+        let mut added_total = probe_count.added;
+        let mut stop_step = CatchUpStep::Continue;
+        loop {
+            // 与主循环同一套收手条件：退出登录 / 暂停 / 开关关闭
+            if crate::online::session::is_sync_cancelled() {
+                mark_interrupted(app, CANCEL_MESSAGE);
+                set_phase("needLogin", CANCEL_MESSAGE);
+                emit_progress(app);
+                return Err(ApiFailure::new("cancelled", CANCEL_MESSAGE.to_string(), None));
+            }
+            if is_pause_requested() {
+                mark_paused(app, true);
+                stop_step = CatchUpStep::Budget;
+                break;
+            }
+            if !is_enabled(app) {
+                stop_step = CatchUpStep::Budget;
+                break;
+            }
+            let step = window.step();
+            if step != CatchUpStep::Continue {
+                stop_step = step;
+                break;
+            }
+            let page = window.next_page;
+            sleep_gap();
+            let result = fetcher.find(page, SORTS[0], &[], "")?;
+            report.pages += 1;
+            let page_total = result.total_count.filter(|t| *t > 0);
+            if let Some(total) = page_total {
+                global_total = total;
+            }
+            if result.items.is_empty() {
+                // 空页只可能是「页码越界 / 服务端异常」：记一次，靠 `empty_streak` 与末页上限收场
+                log::warn!(
+                    target: "index",
+                    "增量补差：第 {} 页返回空页（API 总量 {}，本地 {}），停止补差",
+                    page,
+                    global_total,
+                    window.indexed
+                );
+                let _ = apply_partition_page(app, &result.items, page + 1, 0, global_total)?;
+                window.record_page(0, window.indexed, page_total);
+                continue;
+            }
+            let count = apply_partition_page(
+                app,
+                &result.items,
+                page + 1,
+                page_total.unwrap_or(0),
+                global_total,
+            )?;
+            report.fetched += count.written;
+            added_total += count.added;
+            let indexed_now = snapshot(app).map(|s| s.items).unwrap_or(window.indexed);
+            window.record_page(result.items.len(), indexed_now, page_total);
+            set_phase(
+                "syncing",
+                &format!(
+                    "正在补差索引 {} / {} 条（第 {} 页）",
+                    indexed_now, global_total, page
+                ),
+            );
+            emit_progress(app);
+            log::info!(
+                target: "index",
+                "增量补差：第 {} 页 {} 条（新增 {} / 更新 {}），本地 {} / API {} 条；{}",
+                page,
+                result.items.len(),
+                count.added,
+                count.updated(),
+                indexed_now,
+                global_total,
+                if window.indexed as i64 >= window.target {
+                    "已追平，停止分页"
+                } else {
+                    "继续分页"
+                }
+            );
+            std::thread::sleep(Duration::from_millis(PAGE_REST_MS));
+            if report.pages % FLUSH_EVERY_PAGES == 0 {
+                flush(app);
+            }
+        }
+
+        let final_indexed = snapshot(app).map(|s| s.items).unwrap_or(indexed_now);
+        report.indexed = final_indexed;
+        report.total_count = global_total;
+        match stop_step {
+            CatchUpStep::CaughtUp => {
+                // 本地已达目标：主窗口收尾，done = true（这次没翻到底，所以不刷新 full_synced_at）
+                record_unindexable_gap(app, (global_total - final_indexed as i64).max(0))?;
+                finalize_catch_up(app, false)?;
+                report.done = true;
+                report.message = format!(
+                    "索引已追平（本地 {} / API {} 条，本轮新增 {} 条）",
+                    final_indexed, global_total, added_total
+                );
+                log::info!(
+                    target: "index",
+                    "增量补差完成：本地 {} 条，API 总量 {} 条，本轮新增 {} 条，共 {} 页",
+                    final_indexed, global_total, added_total, window.pages
+                );
+            }
+            CatchUpStep::LastPage => {
+                // 真翻到了末页：剩下的是服务端有、但本地无法入库的条目，记成容差，下一轮不再为它重爬
+                let leftover = (global_total - final_indexed as i64).max(0);
+                record_unindexable_gap(app, leftover)?;
+                finalize_catch_up(app, true)?;
+                report.done = true;
+                report.message = format!(
+                    "索引已翻到末页：本地 {} / API {} 条（{} 条为服务端返回但无法入库，已记为容差）",
+                    final_indexed, global_total, leftover
+                );
+                log::info!(
+                    target: "index",
+                    "增量补差翻到末页：本地 {} 条，API 总量 {} 条，不可入库 {} 条；本轮新增 {} 条，共 {} 页",
+                    final_indexed, global_total, leftover, added_total, window.pages
+                );
+            }
+            CatchUpStep::Empty => {
+                let leftover = (global_total - final_indexed as i64).max(0);
+                report.done = false;
+                report.message = format!(
+                    "已收录 {} / {} 条，服务端连续返回空页，本轮补差中止",
+                    final_indexed, global_total
+                );
+                log::warn!(
+                    target: "index",
+                    "增量补差被空页中止：本地 {} 条，API 总量 {} 条，剩余 {} 条",
+                    final_indexed, global_total, leftover
+                );
+            }
+            CatchUpStep::Budget | CatchUpStep::Continue => {
+                report.done = false;
+                report.message = if is_pause_requested() {
+                    user_err("index.paused", json!({}))
+                } else if !is_enabled(app) {
+                    user_err("index.disabled", json!({}))
+                } else {
+                    user_err("index.reachedLimit", json!({}))
+                };
+                log::info!(
+                    target: "index",
+                    "增量补差暂停：本地 {} / API {} 条，等下一轮从断点继续（本轮 {} 页 / 新增 {} 条）",
+                    final_indexed, global_total, window.pages, added_total
+                );
+            }
+        }
         return Ok(report);
     }
 
@@ -1522,7 +1907,8 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
             next_page,
             part_total,
             global_total,
-        )?;
+        )?
+        .written;
         let current = snapshot(app)?;
         report.indexed = current.items;
         report.total_count = global_total;
@@ -1631,6 +2017,7 @@ pub fn status_for_app(app: &tauri::AppHandle) -> IndexStatus {
         paused: false,
         last_error: String::new(),
         plan_version: 0,
+        unindexable_gap: 0,
     });
     let indexed = snap.items;
     let total = snap.total;
@@ -2031,5 +2418,230 @@ mod tests {
     fn term_normalization_folds_space_and_case() {
         assert_eq!(normalize_term("  Vehicle   Pack "), "vehicle pack");
         assert_eq!(normalize_term("车"), "车");
+    }
+
+    // ---------------- 增量补差回归（v1.6） ----------------
+    //
+    // 故障现场：API 全局总量 41306 → 41323，本地索引 41243。
+    // 旧实现探第 1 页（50 条）后无条件 done=true + 「索引已是最新（41243 条）」，
+    // 差值 80 条每轮都补不上。下面这些用例锁死「没追平不许停」。
+
+    fn summary(id: i64, title: &str) -> OnlineModSummary {
+        OnlineModSummary {
+            mod_id: id,
+            title: title.to_string(),
+            creator: Some("tester".to_string()),
+            thumbnail: None,
+            installs: Some(1),
+            installs_truncated: false,
+            rating: None,
+            mod_status: None,
+            user_installed: false,
+            user_downloaded: false,
+            update_available: false,
+            game_title_id: Some(GAME_AOE2DE),
+            tag_ids: Vec::new(),
+            tag_names: Vec::new(),
+            file_size: None,
+            raw: Value::Null,
+        }
+    }
+
+    fn page(start_id: i64, count: i64) -> Vec<OnlineModSummary> {
+        (0..count)
+            .map(|i| summary(start_id + i, &format!("Mod {}", start_id + i)))
+            .collect()
+    }
+
+    #[test]
+    fn last_page_math_matches_api_total() {
+        assert_eq!(last_page(41323), 827);
+        assert_eq!(last_page(50), 1);
+        assert_eq!(last_page(0), i64::MAX);
+    }
+
+    #[test]
+    fn catch_up_starts_from_second_page_when_api_total_grew() {
+        // 第 1 页探测完：本地仍 41243，API 41323 → 必须继续，从第 2 页开始
+        let window = CatchUpWindow::new(41323, 0, 41243, 2, MAX_PAGES_PER_RUN);
+        assert_eq!(window.step(), CatchUpStep::Continue);
+        assert_eq!(window.next_page, 2);
+        assert_eq!(window.target, 41323);
+    }
+
+    #[test]
+    fn probe_page_with_no_new_items_must_not_finish() {
+        // 这条就是原 bug：探一页、一条没新增 → 旧代码报「已是最新」
+        let mut window = CatchUpWindow::new(41323, 0, 41243, 2, MAX_PAGES_PER_RUN);
+        window.record_page(50, 41243, Some(41323)); // 50 条全是本地已有的
+        assert_eq!(window.step(), CatchUpStep::Continue);
+        assert_ne!(window.step(), CatchUpStep::CaughtUp);
+    }
+
+    #[test]
+    fn catch_up_chases_new_items_across_pages_until_total() {
+        // 41323 / 41243：新增项不只在第 1 页 —— 第 2 页补 50，第 3 页再补 30 才追平
+        let mut window = CatchUpWindow::new(41323, 0, 41243, 2, MAX_PAGES_PER_RUN);
+        let mut indexed = 41243usize;
+        let mut pages = 0;
+        let mut saw_caught_up = false;
+        while !saw_caught_up {
+            match window.step() {
+                CatchUpStep::Continue => {}
+                CatchUpStep::CaughtUp => {
+                    saw_caught_up = true;
+                    break;
+                }
+                other => panic!("不应提前结束：{other:?}"),
+            }
+            pages += 1;
+            let added = match pages {
+                1 => 50usize,
+                2 => 30,
+                _ => 0,
+            };
+            indexed += added;
+            window.record_page(50, indexed, Some(41323));
+        }
+        assert_eq!(indexed, 41323);
+        assert_eq!(pages, 2, "应在第 3 页（共两页补差）追平");
+        assert_eq!(window.indexed, 41323);
+    }
+
+    #[test]
+    fn caught_up_total_finishes_fast_without_extra_pages() {
+        // 已追平：探测完就该结束，不能再去翻页
+        let window = CatchUpWindow::new(41323, 0, 41323, 2, MAX_PAGES_PER_RUN);
+        assert_eq!(window.step(), CatchUpStep::CaughtUp);
+    }
+
+    #[test]
+    fn verified_unindexable_gap_allows_fast_finish() {
+        // 上一轮已翻到末页并确认有 80 条无法入库：本地 41243 就是「已追平」
+        let window = CatchUpWindow::new(41323, 80, 41243, 2, MAX_PAGES_PER_RUN);
+        assert_eq!(window.target, 41243);
+        assert_eq!(window.step(), CatchUpStep::CaughtUp);
+        // 但 API 又涨了 100 条 → 目标随之抬高，必须继续
+        let grown = CatchUpWindow::new(41423, 80, 41243, 2, MAX_PAGES_PER_RUN);
+        assert_eq!(grown.step(), CatchUpStep::Continue);
+    }
+
+    #[test]
+    fn last_page_terminates_instead_of_looping_forever() {
+        let window = CatchUpWindow::new(41323, 0, 41243, last_page(41323) + 1, MAX_PAGES_PER_RUN);
+        assert_eq!(window.step(), CatchUpStep::LastPage);
+    }
+
+    #[test]
+    fn budget_stops_and_keeps_resume_position() {
+        let mut window = CatchUpWindow::new(41323, 0, 41243, 2, 3);
+        for _ in 0..3 {
+            assert_eq!(window.step(), CatchUpStep::Continue);
+            window.record_page(50, window.indexed, Some(41323));
+        }
+        assert_eq!(window.step(), CatchUpStep::Budget);
+        assert_eq!(window.next_page, 5, "断点必须停在下一页，续爬不重头");
+    }
+
+    #[test]
+    fn consecutive_empty_pages_stop_the_loop() {
+        let mut window = CatchUpWindow::new(41323, 0, 41243, 2, MAX_PAGES_PER_RUN);
+        window.record_page(0, 41243, Some(41323));
+        assert_eq!(window.step(), CatchUpStep::Continue, "偶尔一页空白先容忍");
+        window.record_page(0, 41243, Some(41323));
+        assert_eq!(window.step(), CatchUpStep::Empty);
+    }
+
+    #[test]
+    fn api_total_growth_midway_raises_target() {
+        let mut window = CatchUpWindow::new(41323, 0, 41243, 2, MAX_PAGES_PER_RUN);
+        window.record_page(50, 41250, Some(41340)); // 翻页途中 API 又涨了 17 条
+        assert_eq!(window.api_total, 41340);
+        assert_eq!(window.target, 41340);
+        assert_eq!(window.step(), CatchUpStep::Continue);
+    }
+
+    #[test]
+    fn unknown_api_total_never_claims_caught_up() {
+        // 总量拿不到（0）：不许谎报追平，只能按「翻到末页」结束
+        let window = CatchUpWindow::new(0, 0, 41243, 2, MAX_PAGES_PER_RUN);
+        assert_eq!(window.step(), CatchUpStep::LastPage);
+    }
+
+    #[test]
+    fn upsert_is_idempotent_and_separates_new_from_updated() {
+        let mut store = Store::default();
+        let first = upsert_items(&mut store, &page(1000, 50));
+        assert_eq!(first.written, 50);
+        assert_eq!(first.added, 50);
+        assert_eq!(store.items.len(), 50);
+        // 同一页再写一次：不重复插入，全部算「更新」
+        let again = upsert_items(&mut store, &page(1000, 50));
+        assert_eq!(again.written, 50);
+        assert_eq!(again.added, 0);
+        assert_eq!(store.items.len(), 50);
+        // 半重叠页：只把新 id 计为新增
+        let overlap = upsert_items(&mut store, &page(1040, 20));
+        assert_eq!(overlap.added, 10);
+        assert_eq!(store.items.len(), 60);
+    }
+
+    #[test]
+    fn first_full_index_still_crawls_main_window_to_end() {
+        // 全量首次索引不能被「补差」逻辑影响：只有主窗口允许翻到底
+        let main = Partition {
+            sort: SORTS[0].to_string(),
+            tags: Vec::new(),
+            q: String::new(),
+            label: "lastUpdate".to_string(),
+            cursor: 1,
+            total: 0,
+            exhausted: false,
+        };
+        assert_eq!(page_limit(&main), i64::MAX);
+        let derived = Partition { sort: "popular".to_string(), ..main.clone() };
+        assert_eq!(page_limit(&derived), 1);
+        let prefixed = Partition { q: "a".to_string(), ..main.clone() };
+        assert_eq!(page_limit(&prefixed), 1);
+        let tagged = Partition { tags: vec![1], sort: TAG_SORT.to_string(), ..main.clone() };
+        assert_eq!(page_limit(&tagged), 1);
+    }
+
+    #[test]
+    fn resumed_plan_keeps_cursor_and_exhausted_state() {
+        // resume 模式：重建计划必须继承断点，绝不能把游标归零
+        let mut old = Partition {
+            sort: SORTS[0].to_string(),
+            tags: Vec::new(),
+            q: String::new(),
+            label: "lastUpdate".to_string(),
+            cursor: 412,
+            total: 20600,
+            exhausted: false,
+        };
+        let mut previous = std::collections::HashMap::new();
+        previous.insert(partition_key(&old.sort, &old.tags, &old.q), old.clone());
+        let next = Partition { cursor: 1, total: 0, ..old.clone() };
+        let (merged, hit) = inherit_partition(&previous, next);
+        assert!(hit);
+        assert_eq!(merged.cursor, 412);
+        assert_eq!(merged.total, 20600);
+        old.exhausted = true;
+        previous.insert(partition_key(&old.sort, &old.tags, &old.q), old);
+        let next = Partition { cursor: 1, total: 0, exhausted: false, ..main_like() };
+        let (merged, _) = inherit_partition(&previous, next);
+        assert!(merged.exhausted, "已完成的窗口重启后必须直接跳过");
+    }
+
+    fn main_like() -> Partition {
+        Partition {
+            sort: SORTS[0].to_string(),
+            tags: Vec::new(),
+            q: String::new(),
+            label: "lastUpdate".to_string(),
+            cursor: 1,
+            total: 0,
+            exhausted: false,
+        }
     }
 }

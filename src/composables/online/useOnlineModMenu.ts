@@ -9,8 +9,37 @@
  */
 import type { InstalledIndexEntry } from "../../types";
 import type { ContextMenuItem } from "../../components/common/contextMenuTypes";
+import { canTranslateText } from "../../online/translation";
 
 export type OnlineTaskStatus = "installing" | "downloading" | "queued" | null;
+
+/**
+ * 右键菜单可用的描述文本（与详情面板共用同一份判断）。
+ *
+ * 根因背景：列表接口给的 `raw.description` 经常是空的（官方详情只在 `mod_detail` 里），
+ * 而详情面板读的是详情接口 / 详情缓存，于是同一个模组会出现「详情能翻译、右键菜单不能」。
+ * 这里按优先级挑一份能翻译的描述：
+ * 1. 列表项自带的描述（能翻就用它，行为与原来一致）；
+ * 2. **只属于当前右键这个 modId** 的详情缓存文本（`cached.modId === targetId` 才采信，
+ *    绝不串用其它模组的状态）；
+ * 3. 详情面板当前选中的正是这个模组时，面板已拿到的描述文本。
+ * 三者都不可用时返回列表原文（通常是空串），由调用方继续置灰 + 显示等待提示。
+ */
+export interface MenuDescriptionSources {
+  targetId: number;
+  listText: string;
+  cached: { modId: number; text: string } | null;
+  selectedId: number | null;
+  selectedText: string | null;
+}
+
+export function resolveMenuDescription(sources: MenuDescriptionSources): string {
+  const { targetId, listText, cached, selectedId, selectedText } = sources;
+  if (canTranslateText(listText)) return listText;
+  if (cached && cached.modId === targetId && canTranslateText(cached.text)) return cached.text;
+  if (selectedId === targetId && canTranslateText(selectedText)) return selectedText ?? "";
+  return listText;
+}
 
 export interface OnlineMenuState {
   entry: InstalledIndexEntry | null;

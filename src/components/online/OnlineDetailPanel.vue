@@ -18,6 +18,12 @@ import { sourceLabel } from "../../format";
 const props = defineProps<{
   mod: OnlineMod | null;
   thumb: string | null;
+  /**
+   * 封面来源（收藏是聚合视图，同一面板要同时服务两种来源）：
+   * `local` = 本机已安装副本，封面只能来自本机文件，重试只走本地封面恢复；
+   * `online` = 纯在线条目，沿用官网缩略图链路。默认 online 保持既有调用方行为。
+   */
+  coverMode?: "online" | "local";
   title: string;
   subtitle: string | null;
   tags: string[];
@@ -132,6 +138,11 @@ function onThumbError(): void {
 function reloadThumb(): void {
   if (thumbReloading.value) return;
   thumbFailed.value = false;
+  // 本地来源：父组件走本地封面恢复（写回模组目录），这里不判官网 URL、也不显示「服务端未提供」
+  if (props.coverMode === "local") {
+    emit("refresh-cover");
+    return;
+  }
   // 服务端未提供缩略图 URL：无链路可重试，给出获取失败提示，按钮保持可点
   if (!props.mod?.thumbnail) {
     coverStage.value = "failed";
@@ -231,7 +242,9 @@ watch(
           @load="onThumbLoad"
           @error="onThumbError"
         />
-        <div v-else class="no-cover-box">{{ t("online.noThumbnail") }}</div>
+        <div v-else class="no-cover-box">
+          {{ coverMode === "local" ? t("detail.coverMissing") : t("online.noThumbnail") }}
+        </div>
         <button
           v-if="!thumb || thumbFailed"
           type="button"

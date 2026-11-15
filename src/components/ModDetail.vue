@@ -3,6 +3,9 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, refreshLocalCover, revealModFolder, toggleModEnabled } from "../api";
+import { fetchImages } from "../online/images";
+import { isRemoteThumbnail, modEntryOrigin } from "../online/modSource";
+import { favoriteMetaOf } from "../favoriteMeta";
 import { activeTaskOfMod, latestTaskOfMod } from "../online/downloadQueue";
 import {
   formatBytes,
@@ -92,6 +95,20 @@ const canFavorite = computed(() => (props.mod.workshopId ?? 0) > 0);
  * 只在操作区保留一个「下载安装」按钮（收藏、备注名、官网跳转照常可用）。
  */
 const uninstalled = computed(() => props.mod.uninstalled === true);
+/**
+ * 真实来源（复用 `modSource.modEntryOrigin`，与在线页收藏同一口径）：
+ * 在线来源 = 收藏聚合里的未安装 / 已卸载条目，只能用官方数据与在线封面缓存。
+ */
+const onlineFavorite = computed(() => modEntryOrigin(props.mod) === "online");
+/** 在线收藏项是否有可用的官方缩略图地址（没有就不给「重新获取封面」按钮） */
+const officialThumbUrl = computed(() => {
+  const modId = props.mod.workshopId ?? 0;
+  if (modId <= 0) return "";
+  const url = (favoriteMetaOf(modId)?.thumbnailUrl ?? "").trim();
+  return isRemoteThumbnail(url) ? url : "";
+});
+/** 是否显示封面刷新按钮：本地来源恒可（走本地恢复），在线来源只在有官方 URL 时可重取 */
+const canRefreshCover = computed(() => (onlineFavorite.value ? !!officialThumbUrl.value : true));
 /** 正在下载 / 已在下载队列（同名模组不重复入队） */
 const activeDownloadTask = computed(() => {
   const id = props.mod.workshopId ?? 0;
@@ -479,6 +496,27 @@ function onCoverError(): void {
 /** 本地详情：按官方 Mod ID 请求 Detail、下载有效图片并写入当前 Mod 文件夹 */
 async function refreshCover(): Promise<void> {
   if (coverReloading.value) return;
+  // 在线来源（收藏里的未安装条目）：没有本地目录，只能重取官方封面到应用图片缓存
+  if (onlineFavorite.value) {
+    const modId = props.mod.workshopId ?? 0;
+    const url = officialThumbUrl.value;
+    if (modId <= 0 || !url) {
+      coverStage.value = "failed";
+      showToast(t("online.noThumbnail"), "error");
+      return;
+    }
+    coverStage.value = "reloading";
+    try {
+      await fetchImages([{ modId, url, force: true }]);
+      // 下载完成后由全局 images-ready 监听回填封面；这里先复位阶段，避免长时间停在「正在重新获取」
+      imgFailed.value = false;
+      coverStage.value = "idle";
+    } catch (e) {
+      coverStage.value = "failed";
+      showToast(translateBackendMessage(errorText(e, "cover.downloadFailed")), "error");
+    }
+    return;
+  }
   if (uninstalled.value) {
     coverStage.value = "failed";
     showToast(t("detail.coverNoOfficialId"), "error");
@@ -550,11 +588,11 @@ watch(
           @error="onCoverError"
         />
         <div v-else class="no-cover-box">
-          {{ t("detail.coverMissing") }}<br />
-          {{ t("detail.coverMissingDetail") }}
+          {{ t("detail.coverMissing") }}
+          <template v-if="!onlineFavorite"><br />{{ t("detail.coverMissingDetail") }}</template>
         </div>
         <button
-          v-if="!uninstalled && (!coverUrl || imgFailed)"
+          v-if="(!coverUrl || imgFailed) && canRefreshCover"
           type="button"
           class="cover-reload-btn"
           :disabled="coverReloading"
@@ -592,8 +630,11 @@ watch(
       <div v-if="titleSub" class="detail-title-orig">{{ titleSub }}</div>
 
       <div class="detail-badges">
-        <span class="badge" :class="'source-' + mod.source">{{ sourceLabel(mod.source) }}</span>
-        <span class="badge" :class="mod.kind === 'local' ? 'local' : 'sub'">{{ kindLabel(mod.kind) }}</span>
+        <!-- 来源 / 类型是本地磁盘条目的词汇：在线收藏项没有本地目录，不显示（避免来源混淆） -->
+        <template v-if="!onlineFavorite">
+          <span class="badge" :class="'source-' + mod.source">{{ sourceLabel(mod.source) }}</span>
+          <span class="badge" :class="mod.kind === 'local' ? 'local' : 'sub'">{{ kindLabel(mod.kind) }}</span>
+        </template>
         <span v-if="conflictHint" class="conflict-badge">{{ conflictHint }}</span>
         <span v-for="tag in mod.contentTags" :key="tag" class="badge">{{ localizedTagName(tag) }}</span>
       </div>

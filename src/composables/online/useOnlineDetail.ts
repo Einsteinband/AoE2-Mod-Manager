@@ -395,6 +395,8 @@ export function useOnlineDetail(deps: {
     descText,
     canTranslate,
     waitingDetail,
+    /** 详情面板已拿到的纯文本描述（右键菜单复用同一份，避免两处口径不一致） */
+    descriptionText,
     selectedTranslated,
     showingOriginalText,
     translateBusy,

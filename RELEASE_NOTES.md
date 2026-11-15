@@ -1,3 +1,19 @@
+# v0.5.4 — 2026-11-15
+
+## v0.5.4 - What's New
+
+- **⚡Caching & Indexing:** The official mod index status (automatic progress and failure retry) now lives in the bottom status bar, with a single manual retry entry and a single-flight sync so repeated triggers cannot overlap. Favorites whose mods are already installed on disk now read their cover from the local mod folder instead of asking the server, fixing the "no cover / no thumbnail provided by the server / failed to fetch cover" loop.
+- **🎨Lists & Interface:** The status bar keeps only the scan warning, with the index block pinned before the proxy pill so the right-hand group stays aligned at any width; local and online favorites now split cover, cover refresh and detail wording by each item's real source instead of the page it is shown on.
+- **🐞Context Menu:** Fixed the "Translate" item being greyed out in the card context menu while the detail panel could translate the same mod, and fixed items in the favorites view being treated as online mods (wrong cover source and wrong refresh path).
+
+## v0.5.4 - 更新内容
+
+- **⚡缓存与索引：** 官方模组索引状态（自动进度与失败重试）整合进底部状态栏，只保留一个手动重试入口，同步任务单飞避免重复触发互相干扰；收藏中已安装在磁盘上的模组改为读取本机模组文件夹的封面，不再向服务器请求，修复「无封面 / 服务端未提供缩略图 / 获取封面失败」的循环。
+- **🎨列表与界面：** 底栏只保留扫描警告，索引信息固定在代理胶囊之前，右侧分组在任意宽度下保持对齐；本地与在线两侧的收藏按每条项目的真实来源分流封面、封面刷新与详情文案，不再按当前所在页面判断来源。
+- **🐞右键菜单：** 修复卡片右键菜单里的「翻译」始终置灰、而详情面板同一模组可翻译的不一致，修复收藏视图中项目被当成在线模组处理（封面来源与刷新链路错误）。
+
+---
+
 # v0.5.3 — 2026-11-14
 
 ## v0.5.3 - What's New

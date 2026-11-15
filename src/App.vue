@@ -41,6 +41,7 @@ import {
 import { applyLocale, detectSystemLocale, normalizeLocale } from "./i18n";
 import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
+import { startIndexStatusWatch } from "./online/indexStatusStore";
 import { initDownloadQueue, onTaskSettled } from "./online/downloadQueue";
 import { hydrateFavoriteMeta } from "./favoriteMeta";
 import { normalizeBackendError } from "./format";
@@ -539,6 +540,8 @@ watch(locale, (next) => { syncUiLocale(String(next)); });
 onMounted(async () => {
   void ensureStartupSession();
   void initDownloadQueue();
+  // 底部状态栏的索引进度：全局观察器（自动任务由 Rust 启动，前端只负责订阅与展示）
+  void startIndexStatusWatch();
   void ensureUserData().then(() => hydrateFavoriteMeta()).catch(() => undefined);
 
   // 下载完成 → 通知 LocalBrowser 重扫
@@ -622,12 +625,6 @@ onBeforeUnmount(() => {
   <AppShell
     v-model:mode="mode"
     :author-url="AUTHOR_URL"
-    :local-count="localRef?.sourceCounts?.local ?? 0"
-    :root-path="localRef?.reportRoot ?? ''"
-    :subscribed-count="localRef?.sourceCounts?.subscribed ?? 0"
-    :showing-count="localRef?.sortedCount ?? 0"
-    :total-count="localRef?.modsCount ?? 0"
-    :scanned-at="localRef?.lastScanText ?? ''"
     :warning-count="localRef?.warnings?.length ?? 0"
     @open-author="openAuthorPage"
     @open-settings="showSettings = true"

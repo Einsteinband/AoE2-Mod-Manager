@@ -31,7 +31,9 @@ export function useOnlineThumbs() {
     } catch {
       /* 图片缓存不可用时退回官网 URL */
     }
+    // 本地来源（本机已安装副本）的封面只允许来自磁盘：缺图也不排队官网下载
     const missing = list
+      .filter((mod) => mod.origin !== "local")
       .filter((mod) => !!mod.thumbnail && !localThumbs[mod.modId] && !requested.has(mod.modId))
       .slice(0, IMAGE_BATCH)
       .map((mod) => ({ modId: mod.modId, url: mod.thumbnail as string }));

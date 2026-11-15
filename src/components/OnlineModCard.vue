@@ -11,6 +11,11 @@ const props = defineProps<{
   active: boolean;
   thumb?: string | null;
   /**
+   * 封面候选（按优先级）：由页面装配层按来源算好。
+   * 本地来源的候选里不会有官网 URL，因此“候选全部失败”只会显示占位，不会偷偷请求服务器。
+   */
+  candidates?: string[] | null;
+  /**
    * 本机磁盘事实：来自统一安装索引 installed.localIndex[modId]。
    * 与服务端订阅标记 userInstalled 区分；页面装配层负责取值，卡片不另建判断。
    */
@@ -24,29 +29,33 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-/** 图片失败阶段：0=还没试本地封面，1=本地坏了试网络，2=都坏了 */
-const triedLocal = ref(false);
+/** 封面候选游标：0=第一候选；候选全部失败才落到占位 */
+const triedIndex = ref(0);
 const failed = ref(false);
 
 watch(
-  () => [props.mod.modId, props.thumb] as const,
+  () => [props.mod.modId, props.thumb, props.candidates?.join("|") ?? ""] as const,
   () => {
-    triedLocal.value = false;
+    triedIndex.value = 0;
     failed.value = false;
   },
 );
 
-/** 本地封面（asset: 协议）优先，其次官网 CDN；两者都失败才显示占位字 */
+/** 候选顺序由页面层决定（缓存 → 本地文件 → 官网 URL，或本地来源只有前两者） */
+const coverCandidates = computed<string[]>(() => {
+  const list = (props.candidates ?? []).filter((url) => !!url);
+  if (list.length) return list;
+  return props.thumb ? [props.thumb] : [];
+});
+
 const src = computed<string | null>(() => {
   if (failed.value) return null;
-  const local = props.thumb ?? null;
-  if (local && !triedLocal.value) return local;
-  return props.mod.thumbnail ?? null;
+  return coverCandidates.value[triedIndex.value] ?? null;
 });
 
 function onImageError() {
-  if (props.thumb && !triedLocal.value) {
-    triedLocal.value = true;
+  if (triedIndex.value + 1 < coverCandidates.value.length) {
+    triedIndex.value += 1;
     return;
   }
   failed.value = true;

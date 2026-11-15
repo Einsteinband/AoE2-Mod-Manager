@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { InstalledIndexEntry, ModKind } from "../../types";
-import { buildOnlineMenuItems } from "../online/useOnlineModMenu";
+import { buildOnlineMenuItems, resolveMenuDescription } from "../online/useOnlineModMenu";
 
 const labels = {
   installLocal: "Download",
@@ -113,5 +113,88 @@ describe("buildOnlineMenuItems", () => {
     for (const id of ["favorite", "translate", "rename", "website"]) {
       expect(items.find((i) => i.id === id)!.disabled).toBe(true);
     }
+  });
+});
+
+describe("resolveMenuDescription（详情 / 右键菜单同一口径）", () => {
+  const DETAIL = "This mod replaces the vanilla tech tree panel with a readable layout.";
+
+  it("列表自带描述可用时优先用列表文本", () => {
+    expect(
+      resolveMenuDescription({
+        targetId: 7,
+        listText: "vanilla list description",
+        cached: { modId: 7, text: DETAIL },
+        selectedId: 7,
+        selectedText: DETAIL,
+      }),
+    ).toBe("vanilla list description");
+  });
+
+  it("列表描述为空、详情缓存属于同一个 modId → 用缓存描述（详情能翻，菜单也能翻）", () => {
+    expect(
+      resolveMenuDescription({
+        targetId: 7,
+        listText: "",
+        cached: { modId: 7, text: DETAIL },
+        selectedId: null,
+        selectedText: null,
+      }),
+    ).toBe(DETAIL);
+  });
+
+  it("详情缓存属于其它模组时不采信（不串用状态）", () => {
+    expect(
+      resolveMenuDescription({
+        targetId: 8,
+        listText: "",
+        cached: { modId: 7, text: DETAIL },
+        selectedId: null,
+        selectedText: null,
+      }),
+    ).toBe("");
+  });
+
+  it("详情面板选中的正是这个模组 → 复用面板已加载的描述", () => {
+    expect(
+      resolveMenuDescription({
+        targetId: 9,
+        listText: "",
+        cached: null,
+        selectedId: 9,
+        selectedText: DETAIL,
+      }),
+    ).toBe(DETAIL);
+  });
+
+  it("详情面板选中的是别的模组 → 不借用它的描述", () => {
+    expect(
+      resolveMenuDescription({
+        targetId: 9,
+        listText: "",
+        cached: null,
+        selectedId: 10,
+        selectedText: DETAIL,
+      }),
+    ).toBe("");
+  });
+
+  it("三处都没有可用描述 → 返回空串，菜单仍按「等待描述」置灰", () => {
+    const text = resolveMenuDescription({
+      targetId: 11,
+      listText: "  ",
+      cached: null,
+      selectedId: null,
+      selectedText: null,
+    });
+    expect(text).toBe("  ");
+    const items = buildOnlineMenuItems(
+      11,
+      { ...baseState, canText: text.trim().length >= 5 },
+      labels,
+    );
+    const translate = items.find((i) => i.id === "translate")!;
+    expect(translate.disabled).toBe(true);
+    expect(translate.hint).toBe("Waiting for the description…");
   });
 });

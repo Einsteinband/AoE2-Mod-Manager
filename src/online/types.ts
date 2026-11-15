@@ -25,6 +25,13 @@ export interface OnlineMod {
   /** 列表若带 modFileSize（字节）则透传，否则为 null，由详情/下载补全 */
   fileSize: number | null;
   raw: Record<string, unknown>;
+  /**
+   * 该项目在**磁盘上**的真实来源（仅前端标记，不来自接口）：
+   * `local` = 本机安装索引里有它，封面 / 封面恢复只允许走本地文件；
+   * `online` = 纯在线条目（含从未安装）。
+   * 收藏聚合视图必须带上它，否则本地副本会被当成在线模组处理。
+   */
+  origin?: "local" | "online";
 }
 
 /** `GET /api/v4/mods/Tags` 的单项（官方分类字典，已按 gameTitleId=2 过滤） */

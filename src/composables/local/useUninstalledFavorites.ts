@@ -15,6 +15,7 @@ import { computed, reactive, watch, type ComputedRef } from "vue";
 import { favoriteMetaOf, rememberInstalledMods } from "../../favoriteMeta";
 import { isNetworkError } from "../../online/networkError";
 import { assetUrl, fetchImages, localImages, onImagesReady } from "../../online/images";
+import { favoriteOrigin, isRemoteThumbnail } from "../../online/modSource";
 import { favoriteIdSet, userDataLoaded } from "../../userData";
 import type { ModEntry } from "../../types";
 
@@ -67,6 +68,8 @@ function buildGhost(modId: number, cover: string | null): ModEntry {
     sizeBytes: null,
     sizeComplete: false,
     uninstalled: true,
+    // 来源标记：占位条目来自在线收藏（本机没有安装目录），与在线页收藏同一口径
+    origin: favoriteOrigin(false),
   };
 }
 
@@ -141,8 +144,9 @@ export function useUninstalledFavorites(deps: { mods: ComputedRef<ModEntry[]> })
         .map((mod) => Number(mod.workshopId ?? 0))
         .filter((id) => id > 0 && !covers[id] && !requested.has(id))
         .map((id) => {
-          const meta = favoriteMetaOf(id);
-          return meta?.thumbnailUrl ? { modId: id, url: meta.thumbnailUrl } : null;
+          const url = (favoriteMetaOf(id)?.thumbnailUrl ?? "").trim();
+          // 只接受官方缩略图地址：在线收藏项的封面不允许来自本地目录
+          return isRemoteThumbnail(url) ? { modId: id, url } : null;
         })
         .filter((task): task is { modId: number; url: string } => !!task)
         .slice(0, IMAGE_BATCH);

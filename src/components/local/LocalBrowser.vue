@@ -86,6 +86,8 @@ const emit = defineEmits<{
   (e: "update:search", v: string): void;
   (e: "update:sortModel", v: string): void;
   (e: "update:orderModel", v: "DESC" | "ASC"): void;
+  /** 侧栏「我的收藏」= 进入独立的收藏工作区（收藏不再作为本地页的筛选视图） */
+  (e: "open-favorites"): void;
 }>();
 
 const { t, locale } = useI18n();
@@ -843,7 +845,7 @@ defineExpose({
         @pick-source="pickSource"
         @pick-status="pickStatus"
         @pick-tag="pickTag"
-        @toggle-favorites="toggleFavorites"
+        @open-favorites="emit('open-favorites')"
         @pick-updates-only="pickUpdatesOnly"
       />
     </template>

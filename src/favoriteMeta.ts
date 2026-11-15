@@ -31,6 +31,14 @@ export interface FavoriteMeta {
   /** 官网封面地址：本地图片缓存缺失时用它后台补图 */
   thumbnailUrl: string | null;
   savedAtMs: number;
+  /**
+   * 官方在线元数据（收藏页信息来源）：卸载 / 重装都不影响这些值。
+   * 老数据没有这些字段，读取时按 null 处理。
+   */
+  publishedMs?: number | null;
+  updatedMs?: number | null;
+  version?: string | null;
+  installs?: number | null;
 }
 
 /** 在线缓存 / 在线列表里能提供元数据的最小形状 */
@@ -42,6 +50,11 @@ export interface MetaSource {
   thumbnail?: string | null;
   tagIds?: number[];
   tagNames?: string[];
+  /** 官方在线元数据（可选：只有拿到过详情 / 列表的调用方才有） */
+  publishedMs?: number | null;
+  updatedMs?: number | null;
+  version?: string | null;
+  installs?: number | null;
 }
 
 function toStr(value: unknown): string {
@@ -72,6 +85,10 @@ function coerceEntry(raw: unknown): FavoriteMeta | null {
     tagNames: toStrList(item.tagNames),
     thumbnailUrl: toStr(item.thumbnailUrl) || null,
     savedAtMs: Number(item.savedAtMs) || 0,
+    publishedMs: Number(item.publishedMs) || null,
+    updatedMs: Number(item.updatedMs) || null,
+    version: toStr(item.version) || null,
+    installs: Number(item.installs) || null,
   };
 }
 
@@ -161,6 +178,22 @@ function mergeEntry(next: FavoriteMeta): boolean {
     merged.thumbnailUrl = next.thumbnailUrl;
     changed = true;
   }
+  if (merged.publishedMs == null && next.publishedMs != null) {
+    merged.publishedMs = next.publishedMs;
+    changed = true;
+  }
+  if (merged.updatedMs == null && next.updatedMs != null) {
+    merged.updatedMs = next.updatedMs;
+    changed = true;
+  }
+  if (!merged.version && next.version) {
+    merged.version = next.version;
+    changed = true;
+  }
+  if (merged.installs == null && next.installs != null) {
+    merged.installs = next.installs;
+    changed = true;
+  }
   if (changed) {
     merged.savedAtMs = Math.max(merged.savedAtMs, next.savedAtMs);
     store.value[key] = merged;
@@ -180,6 +213,10 @@ export function rememberOnlineMeta(source: MetaSource): void {
     tagIds: toNumList(source.tagIds),
     tagNames: toStrList(source.tagNames),
     thumbnailUrl: toStr(source.thumbnail) || null,
+    publishedMs: source.publishedMs ?? null,
+    updatedMs: source.updatedMs ?? null,
+    version: toStr(source.version) || null,
+    installs: source.installs ?? null,
     savedAtMs: Date.now(),
   });
   if (changed) persistSoon();

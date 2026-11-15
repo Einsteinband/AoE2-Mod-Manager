@@ -51,7 +51,7 @@ defineProps<{
 
 const emit = defineEmits<{
   (event: "pick-subscribed", value: boolean): void;
-  (event: "toggle-favorites"): void;
+  (event: "open-favorites"): void;
   (event: "pick-tag", value: number | null): void;
   (event: "refresh-session"): void;
   (event: "logout"): void;
@@ -106,8 +106,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: favoritesOnly }"
-        @click="emit('toggle-favorites')"
+        @click="emit('open-favorites')"
       >
         <span class="label">⭐ {{ t("favorites.label") }}</span>
         <span class="count">{{ favoriteCount }}</span>

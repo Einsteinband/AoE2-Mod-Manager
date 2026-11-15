@@ -23,7 +23,7 @@ export default {
     nameShort2: "AoE II · Administrador",
     mediumName: "AoE II · Mods",
     shortName: "AoE II",
-    taglinePrefix: "v0.5.4 · por ",
+    taglinePrefix: "v0.5.5 · por ",
     author: "Einsteinband",
     authorTitle: "Abrir el perfil de GitHub del autor en el navegador",
     windowTitle: "AoE2 Mod Manager",
@@ -215,8 +215,10 @@ export default {
   nav: {
     local: "Mods locales",
     online: "Mods online",
+    favorites: "Favoritos",
     localShort: "Local",
     onlineShort: "Online",
+    favoritesShort: "Favoritos",
   },
   search: {
     placeholder: "Buscar nombre / autor / ID de Workshop / carpeta",
@@ -389,6 +391,17 @@ export default {
     downloadQueued: "Añadido a la cola de descargas",
     downloadBusy: "Este mod ya está en la cola de descargas",
     downloadNoId: "Este favorito no tiene un ID válido y no se puede descargar",
+    filterAll: "Todos los favoritos",
+    filterInstalled: "Instalados",
+    filterUninstalled: "No instalados",
+    modelNote:
+      "Favoritos = información oficial en línea + estado de instalación local. Título / autor / fecha de publicación / versión / suscripciones siempre vienen de la fuente oficial; instalar y desinstalar solo cambia los botones de acción.",
+    workspaceHint: "{n} mods favoritos · la información viene de las entradas oficiales en línea",
+    sortInstalls: "Por suscripciones",
+    searchPlaceholder: "Buscar en favoritos (nombre / autor / Workshop ID)",
+    refresh: "Actualizar favoritos",
+    refreshTitle: "Volver a alinear la información oficial con el estado local",
+    goOnline: "Explorar mods en línea para añadir a favoritos",
   },
   content: {
     allMods: "Todos los mods",

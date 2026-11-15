@@ -37,7 +37,7 @@ import { deriveIndexBar, indexBar, retryIndexSync } from "../online/indexStatusS
  * 数据全部由 App.vue 从 LocalBrowser expose 透传，这里不重复建统计状态。
  */
 defineProps<{
-  mode: "local" | "online";
+  mode: "local" | "online" | "favorites";
   warningCount?: number;
 }>();
 const emit = defineEmits<{

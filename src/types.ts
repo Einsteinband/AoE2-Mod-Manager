@@ -65,6 +65,26 @@ export interface ModEntry {
    * 有值时优先于 thumbnail（thumbnail 是磁盘绝对路径，卸载后失效）。
    */
   coverUrl?: string | null;
+  /**
+   * 「收藏」工作区专用：官方在线元数据里本地条目没有的字段。
+   * 只有收藏页写入；本地页 / 在线页的条目保持 undefined。
+   * 它与本地安装状态正交：卸载 / 重装 / 启停都不会改动这里的值。
+   */
+  onlineInfo?: FavoriteOnlineInfo | null;
+}
+
+/** 官方在线元数据（收藏工作区的信息来源，不随本地安装状态变化） */
+export interface FavoriteOnlineInfo {
+  /** 首次发布时间（ms epoch；官方未提供时为 null） */
+  publishedMs: number | null;
+  /** 最后更新时间（ms epoch；官方未提供时为 null） */
+  updatedMs: number | null;
+  /** 官方版本号（原始字符串） */
+  version: string | null;
+  /** 订阅数（官方 installs 口径） */
+  installs: number | null;
+  /** 官方缩略图地址（缺图时据此补图） */
+  thumbnailUrl: string | null;
 }
 
 export interface ScanReport {

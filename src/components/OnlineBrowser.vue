@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+
+const emit = defineEmits<{
+  /** 侧栏「我的收藏」= 进入独立的收藏工作区（不再是本页的筛选态） */
+  (e: "open-favorites"): void;
+}>();
 import OnlineModCard from "./OnlineModCard.vue";
 import PageShell from "./layout/PageShell.vue";
 import ModGrid from "./common/ModGrid.vue";
@@ -168,7 +173,6 @@ const {
   loadMore,
   pickTag,
   pickSubscribed,
-  toggleFavorites,
   rememberScroll,
   restoreScrollTop,
 } = list;
@@ -1022,7 +1026,7 @@ onUnmounted(() => {
         :net-message="netMessage"
         :favorite-count="favoriteCount"
         @pick-subscribed="pickSubscribed"
-        @toggle-favorites="toggleFavorites"
+        @open-favorites="emit('open-favorites')"
         @pick-tag="pickTag"
         @refresh-session="refreshSession"
       />

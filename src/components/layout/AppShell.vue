@@ -31,7 +31,7 @@ withDefaults(
   },
 );
 
-const mode = defineModel<"local" | "online">("mode", { default: "local" });
+const mode = defineModel<"local" | "online" | "favorites">("mode", { default: "local" });
 const topbarStage = ref<TopbarLevel>("expanded");
 const layoutStageClass = computed(() => ({
   "is-view-icon": topbarStage.value === "view-icon",

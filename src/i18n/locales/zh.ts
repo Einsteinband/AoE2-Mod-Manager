@@ -9,7 +9,7 @@ export default {
     nameShort2: "帝国 II · 模组管理器",
     mediumName: "帝国 II · 模组",
     shortName: "帝国 II",
-    taglinePrefix: "v0.5.4 · by ",
+    taglinePrefix: "v0.5.5 · by ",
     author: "Einsteinband",
     authorTitle: "打开作者 GitHub 主页（系统浏览器）",
     windowTitle: "AoE2 Mod Manager",
@@ -201,8 +201,10 @@ export default {
   nav: {
     local: "本地模组",
     online: "在线模组",
+    favorites: "我的收藏",
     localShort: "本地",
     onlineShort: "在线",
+    favoritesShort: "收藏",
   },
   search: {
     placeholder: "搜索名称 / 作者 / Workshop ID / 文件夹名",
@@ -374,6 +376,17 @@ export default {
     downloadQueued: "已加入下载队列",
     downloadBusy: "该模组已在下载队列中",
     downloadNoId: "该收藏没有可用 ID，无法下载",
+    filterAll: "全部收藏",
+    filterInstalled: "已安装",
+    filterUninstalled: "未安装",
+    modelNote:
+      "收藏 = 官方在线信息 + 本机安装状态。标题 / 作者 / 发布时间 / 版本 / 订阅数始终来自官方，安装与卸载只切换操作按钮。",
+    workspaceHint: "收藏 {n} 个模组 · 信息来自官方在线条目",
+    sortInstalls: "按订阅数",
+    searchPlaceholder: "搜索收藏（名称 / 作者 / Workshop ID）",
+    refresh: "刷新收藏",
+    refreshTitle: "重新对齐官方信息与本机安装状态",
+    goOnline: "去在线页收藏模组",
   },
   content: {
     allMods: "全部模组",

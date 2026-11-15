@@ -5,6 +5,7 @@ import AppShell from "./components/layout/AppShell.vue";
 import ModToolbar from "./components/common/ModToolbar.vue";
 import ViewSwitch from "./components/common/ViewSwitch.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
+import FavoritesBrowser from "./components/favorites/FavoritesBrowser.vue";
 import SettingsModal from "./components/SettingsModal.vue";
 import DownloadManager from "./components/DownloadManager.vue";
 import LocalBrowser from "./components/local/LocalBrowser.vue";
@@ -80,7 +81,21 @@ import { useGameLaunch } from "./composables/useGameLaunch";
  */
 
 // ---------------- 页面模式 ----------------
-const mode = ref<"local" | "online">("local");
+// favorites = 第三个独立工作区（官方在线信息 + 本机安装状态），不是本地/在线页的筛选态
+const mode = ref<"local" | "online" | "favorites">("local");
+
+// ---------------- 收藏页搜索/排序（顶栏持有） ----------------
+const favoritesSearch = ref("");
+const favoritesSort = ref("updated");
+const favoritesOrder = ref<"DESC" | "ASC">("DESC");
+const favoritesRef = ref<InstanceType<typeof FavoritesBrowser> | null>(null);
+
+/** 收藏排序项：最后更新 / 名称 / 订阅数（全部基于官方在线信息） */
+const favoritesSortOptions = computed(() => [
+  { value: "updated", label: t("toolbar.sortUpdated") },
+  { value: "name", label: t("toolbar.sortName") },
+  { value: "installs", label: t("favorites.sortInstalls") },
+]);
 
 // ---------------- 在线页搜索/排序（顶栏持有） ----------------
 const onlineQuery = ref("");
@@ -531,6 +546,8 @@ watch(mode, (next) => {
     return;
   }
   localRef.value?.exitSortMode();
+  // 收藏页每次进入都重新对齐「在线信息 + 本地状态」
+  if (next === "favorites") void favoritesRef.value?.refresh();
 });
 
 // ---------------- 语言切换联动 ----------------
@@ -548,6 +565,8 @@ onMounted(async () => {
   offDownloadSettled = onTaskSettled((task) => {
     if (task.status !== "done") return;
     localRef.value?.refresh();
+    // 安装 / 卸载只改收藏页的本地状态，信息区保持官方来源
+    void favoritesRef.value?.refresh();
   });
 
   try {
@@ -680,7 +699,7 @@ onBeforeUnmount(() => {
 
       <!-- 在线模式：输入即防抖自动触发（无独立搜索按钮） -->
       <ModToolbar
-        v-else
+        v-else-if="mode === 'online'"
         v-model:search="onlineQueryDraft"
         v-model:sort="onlineSort"
         v-model:order="onlineOrder"
@@ -703,6 +722,50 @@ onBeforeUnmount(() => {
             :title="t('online.refreshTitle')"
             :aria-label="t('online.refresh')"
             @click="onlineRef?.refresh()"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M20 12a8 8 0 1 1-2.34-5.66"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+              <path
+                d="M20 3v4h-4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </template>
+      </ModToolbar>
+
+      <!-- 收藏模式：搜索 / 排序全部作用于官方在线信息，刷新重新拉齐本地状态 -->
+      <ModToolbar
+        v-else
+        v-model:search="favoritesSearch"
+        v-model:sort="favoritesSort"
+        v-model:order="favoritesOrder"
+        v-model:view-mode="viewMode"
+        :search-placeholder="t('favorites.searchPlaceholder')"
+        :sort-options="favoritesSortOptions"
+        :sort-title="t('toolbar.sortLabel')"
+        :order-labels="null"
+        :order-title="t('online.orderLabel')"
+        :show-view-switch="false"
+      >
+        <template #extra>
+          <button
+            type="button"
+            class="icon-btn refresh-btn"
+            :disabled="Boolean(favoritesRef?.loading)"
+            :title="t('favorites.refreshTitle')"
+            :aria-label="t('favorites.refresh')"
+            @click="favoritesRef?.refresh()"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -753,6 +816,7 @@ onBeforeUnmount(() => {
         :mod-root="modRoot"
         :view-mode="viewMode"
         :card-size="cardSize"
+        @open-favorites="mode = 'favorites'"
       />
     </KeepAlive>
 
@@ -765,6 +829,21 @@ onBeforeUnmount(() => {
         v-model:order="onlineOrder"
         :view-mode="viewMode"
         :card-size="cardSize"
+        @open-favorites="mode = 'favorites'"
+      />
+    </KeepAlive>
+
+    <!-- 收藏工作区（官方在线信息 + 本机安装状态） -->
+    <KeepAlive>
+      <FavoritesBrowser
+        v-if="mode === 'favorites'"
+        ref="favoritesRef"
+        :search="favoritesSearch"
+        :sort="favoritesSort"
+        :order="favoritesOrder"
+        :view-mode="viewMode"
+        :card-size="cardSize"
+        @open-online="mode = 'online'"
       />
     </KeepAlive>
 

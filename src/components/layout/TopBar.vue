@@ -22,7 +22,7 @@ const props = withDefaults(
   { authorUrl: "https://github.com/Einsteinband" },
 );
 
-const mode = defineModel<"local" | "online">("mode", { default: "local" });
+const mode = defineModel<"local" | "online" | "favorites">("mode", { default: "local" });
 
 const emit = defineEmits<{
   (event: "open-author"): void;
@@ -326,6 +326,11 @@ onBeforeUnmount(() => {
       <button type="button" :class="{ active: mode === 'online' }" @click="mode = 'online'">
         <span class="nav-full">{{ t("nav.online") }}</span>
         <span class="nav-short">{{ t("nav.onlineShort") }}</span>
+      </button>
+      <!-- 收藏 = 第三个独立工作区（在线信息 + 本地安装状态），不是任何页面的筛选态 -->
+      <button type="button" :class="{ active: mode === 'favorites' }" @click="mode = 'favorites'">
+        <span class="nav-full">{{ t("nav.favorites") }}</span>
+        <span class="nav-short">{{ t("nav.favoritesShort") }}</span>
       </button>
     </nav>
 

@@ -1,3 +1,21 @@
+# v0.5.5 — 2026-11-16
+
+## v0.5.5 - What's New
+
+- **⚡Caching & Indexing:** Favorites now build their own data source on top of the existing online list cache, official detail cache and offline metadata snapshot instead of patching two page-level filters. An installed favorite keeps reading the cached official entry, and the offline snapshot carries the official fields so a mod still shows the same info after a restart or without network.
+- **🎨Lists & Interface:** Favorites is now a standalone third workspace next to Local and Online. Its info area (title / author / description / published / last updated / version / subscriptions / official cover) always comes from the official online entry, while the local install state only decides the action area: `[Download & install]` when not installed, the local enable/disable and uninstall controls when installed. Installing or uninstalling never swaps the metadata for the local `info.json`.
+- **🐞Context Menu:** Fixed the "Translate" item being greyed out in the card context menu while the detail panel could translate the same mod, and fixed favorites items being handled as plain online mods (wrong cover source and wrong refresh path).
+- **⭐Favorites Navigation:** The 「My favorites」 entry in both sidebars now navigates to the Favorites workspace instead of toggling a filter inside the current page, so the page you happen to be on can no longer change how favorites are displayed.
+
+## v0.5.5 - 更新内容
+
+- **⚡缓存与索引：** 收藏改为在既有在线列表缓存、官方详情缓存与离线元数据快照之上建立自己的数据源，不再给两个页面级筛选互相打补丁。已安装的收藏仍读取缓存的官方条目；离线快照会带上官方字段，重启或断网后同一个模组仍显示同一份信息。
+- **🎨列表与界面：** 收藏升级为与「本地」「在线」并列的第三个独立工作区。信息区（标题 / 作者 / 描述 / 发布时间 / 最后更新 / 版本 / 订阅数 / 官方封面）始终来自官方在线条目，本机安装状态只决定操作区：未安装显示 `[下载安装]`，已安装显示本地启停与卸载等操作。安装或卸载都不会把元数据换成本地 `info.json` 的内容。
+- **🐞右键菜单：** 修复卡片右键菜单里的「翻译」始终置灰、而详情面板同一模组可翻译的不一致，修复收藏条目被当成普通在线模组处理（封面来源与刷新链路错误）。
+- **⭐收藏入口：** 两个侧栏的「我的收藏」改为跳转到收藏工作区，不再切换当前页面的筛选状态，当前停留在本地页还是在线页都不再影响收藏的展示逻辑。
+
+---
+
 # v0.5.4 — 2026-11-15
 
 ## v0.5.4 - What's New

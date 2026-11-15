@@ -10,7 +10,7 @@ export default {
     nameShort2: "AoE II · Mod Manager",
     mediumName: "AoE II · MM",
     shortName: "AoE II",
-    taglinePrefix: "v0.5.4 · by ",
+    taglinePrefix: "v0.5.5 · by ",
     author: "Einsteinband",
     authorTitle: "Open the author's GitHub profile in your browser",
     windowTitle: "AoE2 Mod Manager",
@@ -202,8 +202,10 @@ export default {
   nav: {
     local: "Local mods",
     online: "Online mods",
+    favorites: "Favorites",
     localShort: "Local",
     onlineShort: "Online",
+    favoritesShort: "Favs",
   },
   search: {
     placeholder: "Search name / author / Workshop ID / folder",
@@ -376,6 +378,17 @@ export default {
     downloadQueued: "Added to the download queue",
     downloadBusy: "This mod is already in the download queue",
     downloadNoId: "This favorite has no usable ID and cannot be downloaded",
+    filterAll: "All favorites",
+    filterInstalled: "Installed",
+    filterUninstalled: "Not installed",
+    modelNote:
+      "Favorites = official online info + local install state. Title / author / published / version / subscriptions always come from the official source; install and uninstall only switch the action buttons.",
+    workspaceHint: "{n} favorited mods · info comes from official online entries",
+    sortInstalls: "By subscriptions",
+    searchPlaceholder: "Search favorites (name / author / Workshop ID)",
+    refresh: "Refresh favorites",
+    refreshTitle: "Re-align official info with local install state",
+    goOnline: "Browse online mods to favorite",
   },
   content: {
     allMods: "All mods",

@@ -10,7 +10,7 @@ export default {
     nameShort2: "AoE II · Менеджер модов",
     mediumName: "AoE II · MM",
     shortName: "AoE II",
-    taglinePrefix: "v0.5.4 · от ",
+    taglinePrefix: "v0.5.5 · от ",
     author: "Einsteinband",
     authorTitle: "Открыть профиль автора на GitHub в браузере",
     windowTitle: "AoE2 Mod Manager",
@@ -202,8 +202,10 @@ export default {
   nav: {
     local: "Локальные моды",
     online: "Онлайн-моды",
+    favorites: "Избранное",
     localShort: "Локальные",
     onlineShort: "Онлайн",
+    favoritesShort: "Избранное",
   },
   search: {
     placeholder: "Поиск по названию / автору / Workshop ID / папке",
@@ -376,6 +378,17 @@ export default {
     downloadQueued: "Добавлено в очередь загрузок",
     downloadBusy: "Этот мод уже находится в очереди загрузок",
     downloadNoId: "У этого избранного нет пригодного ID, скачать его нельзя",
+    filterAll: "Все избранные",
+    filterInstalled: "Установленные",
+    filterUninstalled: "Не установленные",
+    modelNote:
+      "Избранное = официальная онлайн-информация + состояние локальной установки. Название / автор / дата публикации / версия / подписки всегда берутся из официального источника; установка и удаление меняют только кнопки действий.",
+    workspaceHint: "{n} модов в избранном · информация из официальных онлайн-записей",
+    sortInstalls: "По подпискам",
+    searchPlaceholder: "Поиск по избранному (название / автор / Workshop ID)",
+    refresh: "Обновить избранное",
+    refreshTitle: "Заново сопоставить официальную информацию и локальное состояние",
+    goOnline: "Открыть онлайн-моды, чтобы добавить в избранное",
   },
   content: {
     allMods: "Все моды",

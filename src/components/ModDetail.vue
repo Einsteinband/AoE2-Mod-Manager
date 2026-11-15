@@ -867,7 +867,25 @@ watch(
       </div>
       <div class="field">
         <span class="k">{{ t("detail.published") }}</span>
-        <span class="v missing">{{ t("labels.unknown") }}</span>
+        <span class="v" :class="{ missing: !mod.onlineInfo?.publishedMs }">
+          {{
+            mod.onlineInfo?.publishedMs
+              ? formatDateTime(mod.onlineInfo.publishedMs)
+              : t("labels.unknown")
+          }}
+        </span>
+      </div>
+      <div v-if="mod.onlineInfo" class="field">
+        <span class="k">{{ t("online.version") }}</span>
+        <span class="v" :class="{ missing: !mod.onlineInfo.version }">
+          {{ mod.onlineInfo.version ?? t("labels.notProvided") }}
+        </span>
+      </div>
+      <div v-if="mod.onlineInfo" class="field">
+        <span class="k">{{ t("online.installs") }}</span>
+        <span class="v" :class="{ missing: mod.onlineInfo.installs === null }">
+          {{ mod.onlineInfo.installs ?? t("labels.notProvided") }}
+        </span>
       </div>
       <div class="field">
         <span class="k">{{ t("detail.lastUpdate") }}</span>

@@ -64,7 +64,7 @@ const emit = defineEmits<{
   (event: "pick-source", value: SourceFilter): void;
   (event: "pick-status", value: StatusFilter): void;
   (event: "pick-tag", value: string | null): void;
-  (event: "toggle-favorites"): void;
+  (event: "open-favorites"): void;
   (event: "pick-updates-only"): void;
 }>();
 
@@ -160,9 +160,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: favoritesOnly }"
-        :disabled="sortMode"
-        @click="emit('toggle-favorites')"
+        @click="emit('open-favorites')"
       >
         <span class="label">⭐ {{ t("favorites.label") }}</span>
         <span class="count">{{ favoriteLocalCount }}</span>

@@ -17,8 +17,11 @@ import ModCard from "../ModCard.vue";
 import ModGrid from "../common/ModGrid.vue";
 import ModDetail from "../ModDetail.vue";
 import PageShell from "../layout/PageShell.vue";
-import { useFavorites, type FavoriteStatusFilter } from "../../favorites/useFavorites";
+import LocalSidebar from "../local/LocalSidebar.vue";
+import { useLocalNav, queueLocalNavIntent } from "../../composables/local/localNav";
+import { useFavorites } from "../../favorites/useFavorites";
 import { favoriteIsInstalled } from "../../favorites/model";
+import FavoritesNav from "./FavoritesNav.vue";
 import type { ModEntry } from "../../types";
 
 const props = withDefaults(
@@ -40,14 +43,41 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (event: "open-online"): void;
+  /** 空态「清除筛选」：搜索词归 App 持有，这里只上抛请求 */
+  (event: "reset-search"): void;
+  /** 侧栏普通分类点击 = 切到本地模组并套用同一个筛选 */
+  (event: "open-local"): void;
 }>();
 
 const { t } = useI18n();
 const { showToast } = useToast();
 const workspace = useFavorites();
-const { loading, error, entries, installedCount, uninstalledCount, refresh, install } = workspace;
+const { loading, error, entries, scope, refresh, install } = workspace;
 
-const filter = ref<FavoriteStatusFilter>("all");
+/** 左侧固定骨架里的普通分类：只镜像本地页快照，不在收藏页重算一套 */
+const localNav = useLocalNav();
+
+function goLocal(intent: Parameters<typeof queueLocalNavIntent>[0]): void {
+  queueLocalNavIntent(intent);
+  emit("open-local");
+}
+
+function pickLocalSource(value: Parameters<typeof queueLocalNavIntent>[0]["source"]): void {
+  if (value) goLocal({ source: value });
+}
+
+function pickLocalStatus(value: Parameters<typeof queueLocalNavIntent>[0]["status"]): void {
+  if (value) goLocal({ status: value });
+}
+
+function pickLocalTag(value: string | null): void {
+  goLocal({ tag: value });
+}
+
+function pickLocalUpdates(): void {
+  goLocal({ updatesOnly: true });
+}
+
 const selectedModId = ref<number | null>(null);
 
 const query = computed(() => String(props.search ?? "").trim().toLowerCase());
@@ -55,8 +85,8 @@ const query = computed(() => String(props.search ?? "").trim().toLowerCase());
 const filtered = computed<ModEntry[]>(() => {
   const q = query.value;
   return entries.value.filter((entry) => {
-    if (filter.value === "installed" && !favoriteIsInstalled(entry)) return false;
-    if (filter.value === "uninstalled" && favoriteIsInstalled(entry)) return false;
+    if (scope.value === "installed" && !favoriteIsInstalled(entry)) return false;
+    if (scope.value === "uninstalled" && favoriteIsInstalled(entry)) return false;
     if (!q) return true;
     const modId = entry.workshopId ?? 0;
     const haystack = [
@@ -93,11 +123,15 @@ const sorted = computed<ModEntry[]>(() => {
   return list;
 });
 
-/** 当前选中：按 WorkshopID 跟随，安装 / 卸载后 entryId 变化也不丢选中 */
+/** 当前选中：按 WorkshopID 跟随；选中项被内部分类 / 搜索过滤掉时落到当前可见列表首项 */
 const selected = computed<ModEntry | null>(() => {
+  const visible = sorted.value;
   const id = selectedModId.value;
-  if (!id) return entries.value[0] ?? null;
-  return entries.value.find((entry) => (entry.workshopId ?? 0) === id) ?? entries.value[0] ?? null;
+  if (id) {
+    const hit = visible.find((entry) => (entry.workshopId ?? 0) === id);
+    if (hit) return hit;
+  }
+  return visible[0] ?? null;
 });
 
 watch(
@@ -159,42 +193,32 @@ defineExpose({ refresh, loading });
 <template>
   <PageShell sidebar-class="fav-sidebar">
     <template #sidebar>
-      <div class="fav-filter-group">
-        <h3 class="fav-group-title">{{ t("favorites.groupTitle") }}</h3>
-        <button
-          type="button"
-          class="fav-filter"
-          :class="{ active: filter === 'all' }"
-          @click="filter = 'all'"
-        >
-          <span class="label">⭐ {{ t("favorites.filterAll") }}</span>
-          <span class="count">{{ entries.length }}</span>
-        </button>
-        <button
-          type="button"
-          class="fav-filter"
-          :class="{ active: filter === 'installed' }"
-          @click="filter = 'installed'"
-        >
-          <span class="label">{{ t("favorites.filterInstalled") }}</span>
-          <span class="count">{{ installedCount }}</span>
-        </button>
-        <button
-          type="button"
-          class="fav-filter"
-          :class="{ active: filter === 'uninstalled' }"
-          @click="filter = 'uninstalled'"
-        >
-          <span class="label">{{ t("favorites.filterUninstalled") }}</span>
-          <span class="count">{{ uninstalledCount }}</span>
-        </button>
-      </div>
-      <p class="fav-note">{{ t("favorites.modelNote") }}</p>
+      <!-- 侧栏是固定导航骨架，不是「收藏专用 Sidebar」：
+           收藏入口在最顶部（不再展开二级分类），下面继续保留本地页原本的分类 / 导航。 -->
+      <FavoritesNav :active="true" @open-favorites="scope = $event" />
+      <LocalSidebar
+        :show-favorites="false"
+        :sort-mode="false"
+        :source="localNav.source"
+        :status="localNav.status"
+        :updates-only="localNav.updatesOnly"
+        :updates-available-count="localNav.updatesAvailableCount"
+        :active-tag="localNav.activeTag"
+        :official-tag-list="localNav.officialTagList"
+        :inferred-tag-list="localNav.inferredTagList"
+        :source-counts="localNav.sourceCounts"
+        :status-counts="localNav.statusCounts"
+        @pick-source="pickLocalSource"
+        @pick-status="pickLocalStatus"
+        @pick-tag="pickLocalTag"
+        @pick-updates-only="pickLocalUpdates"
+        @open-favorites="scope = $event"
+      />
     </template>
 
     <template #content>
       <div class="fav-head">
-        <h2>⭐ {{ t("favorites.heading") }}</h2>
+        <h2>{{ t("favorites.heading") }}</h2>
         <p class="fav-sub">{{ t("favorites.workspaceHint", { n: entries.length }) }}</p>
       </div>
 
@@ -213,7 +237,7 @@ defineExpose({ refresh, loading });
         </div>
 
         <div v-else-if="!entries.length" class="state-panel">
-          <h2>⭐ {{ t("favorites.empty") }}</h2>
+          <h2>{{ t("favorites.empty") }}</h2>
           <p>{{ t("favorites.emptyNone") }}</p>
           <div class="actions">
             <button type="button" @click="emit('open-online')">{{ t("favorites.goOnline") }}</button>
@@ -224,7 +248,9 @@ defineExpose({ refresh, loading });
           <h2>{{ t("state.filteredTitle") }}</h2>
           <p>{{ t("state.filteredBody", { total: entries.length }) }}</p>
           <div class="actions">
-            <button type="button" @click="filter = 'all'">{{ t("state.clearFilters") }}</button>
+            <button type="button" @click="scope = 'all'; emit('reset-search')">
+              {{ t("state.clearFilters") }}
+            </button>
           </div>
         </div>
 
@@ -264,53 +290,6 @@ defineExpose({ refresh, loading });
 <style scoped>
 .fav-sidebar {
   padding: 10px 10px 18px;
-}
-.fav-filter-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 12px;
-}
-.fav-group-title {
-  margin: 0 0 4px;
-  font-size: calc(11px * var(--global-scale));
-  letter-spacing: calc(0.8px * var(--ui-tracking));
-  color: var(--text-dim);
-  text-transform: uppercase;
-}
-.fav-filter {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--parch);
-  font-family: inherit;
-  font-size: calc(12px * var(--global-scale));
-  text-align: left;
-  cursor: pointer;
-}
-.fav-filter:hover {
-  background: rgba(var(--accent-rgb), 0.08);
-}
-.fav-filter.active {
-  border-color: rgba(var(--accent-rgb), 0.5);
-  background: rgba(var(--accent-rgb), 0.14);
-  color: var(--accent-bright);
-}
-.fav-filter .count {
-  opacity: 0.75;
-}
-.fav-note {
-  margin: 0;
-  padding: 0 4px;
-  font-size: calc(11px * var(--global-scale));
-  line-height: 1.6;
-  color: var(--text-dim);
 }
 .fav-head {
   padding: 8px var(--layout-page-pad-x, 18px) 2px;

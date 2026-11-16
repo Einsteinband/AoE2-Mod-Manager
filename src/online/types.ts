@@ -499,6 +499,20 @@ export interface IndexStatus {
   lastError: string;
   /** 还有断点可继续（未完成 / 暂停中 / 中断过） */
   resumable: boolean;
+  /** 最近一轮同步真实新增条目数（0 = 无结果） */
+  lastSyncAdded: number;
+  /** 最近一轮同步真实更新条目数 */
+  lastSyncUpdated: number;
+  /** 最近一轮同步失败条目数（整轮失败记 1） */
+  lastSyncFailed: number;
+  /** 最近一轮同步结果时间（本地毫秒） */
+  lastSyncAtMs: number;
+  /** 最近一轮触发来源：startup / settings / resume / manual / login */
+  lastSyncReason: string;
+  /** 最近一轮是否真正完整结束（部分分页 / 暂停 / 中途失败都为 false） */
+  lastSyncComplete: boolean;
+  /** 最近一轮是否成功 */
+  lastSyncOk: boolean;
 }
 
 /** 本地索引搜索命中的一条：与 OnlineMod 同形，另带中文标题与命中字段 */
@@ -532,6 +546,12 @@ export interface IndexSearchResult {
 
 export interface IndexSyncReport {
   fetched: number;
+  /** 本轮 items.insert 真正新增的条目数 */
+  added: number;
+  /** 本轮更新的已有条目数 */
+  updated: number;
+  /** 本轮失败条目数（整轮失败记 1，成功为 0） */
+  failed: number;
   pages: number;
   scanned: number;
   totalCount: number;

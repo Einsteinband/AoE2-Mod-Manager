@@ -237,12 +237,6 @@ export function useOnlineDetail(deps: {
     () => formatBytes(pickDetailNumber(["modDiskSize"])) ?? t("labels.notProvided"),
   );
 
-  /** 文件数量：官方详情 schema 未保证该字段，候选键取不到时统一显示「未提供」，不伪造 */
-  const fileCountText = computed(() => {
-    const n = pickDetailNumber(["fileCount", "numFiles", "file_count", "modFileCount"]);
-    return n !== null ? String(n) : t("labels.notProvided");
-  });
-
   const ratingText = computed(() => {
     if (selected.value?.rating !== null && selected.value?.rating !== undefined) {
       return String(selected.value.rating);
@@ -386,7 +380,6 @@ export function useOnlineDetail(deps: {
     titleSub,
     sizeText,
     diskText,
-    fileCountText,
     ratingText,
     versionText,
     createdText,

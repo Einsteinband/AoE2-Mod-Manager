@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { reactive } from "vue";
 import { useI18n } from "vue-i18n";
+import FavoritesNav from "../favorites/FavoritesNav.vue";
 import { localizedTagName } from "../../online/types";
 import type { SourceFilter, StatusFilter } from "../../types";
 
@@ -44,27 +45,30 @@ interface TagOption {
   count: number;
 }
 
-defineProps<{
-  /** 排序模式：侧栏整体置灰锁定（条件不能与全量排序共存） */
-  sortMode: boolean;
-  source: SourceFilter;
-  status: StatusFilter;
-  favoritesOnly: boolean;
-  updatesOnly: boolean;
-  updatesAvailableCount: number;
-  activeTag: string | null;
-  officialTagList: TagOption[];
-  inferredTagList: TagOption[];
-  sourceCounts: { all: number; local: number; subscribed: number; imported: number };
-  statusCounts: { enabled: number; disabled: number; unknown: number };
-  favoriteLocalCount: number;
-}>();
+withDefaults(
+  defineProps<{
+    /** 排序模式：侧栏整体置灰锁定（条件不能与全量排序共存） */
+    sortMode: boolean;
+    source: SourceFilter;
+    status: StatusFilter;
+    updatesOnly: boolean;
+    updatesAvailableCount: number;
+    activeTag: string | null;
+    officialTagList: TagOption[];
+    inferredTagList: TagOption[];
+    sourceCounts: { all: number; local: number; subscribed: number; imported: number };
+    statusCounts: { enabled: number; disabled: number; unknown: number };
+    /** 是否渲染侧栏最顶部的「收藏」入口；收藏工作区自己渲染该入口时传 false，避免出现“收藏 → 收藏” */
+    showFavorites?: boolean;
+  }>(),
+  { showFavorites: true },
+);
 
 const emit = defineEmits<{
   (event: "pick-source", value: SourceFilter): void;
   (event: "pick-status", value: StatusFilter): void;
   (event: "pick-tag", value: string | null): void;
-  (event: "open-favorites"): void;
+  (event: "open-favorites", scope: "all" | "installed" | "uninstalled"): void;
   (event: "pick-updates-only"): void;
 }>();
 
@@ -72,6 +76,14 @@ const { t } = useI18n();
 </script>
 
 <template>
+  <!-- 最顶部：收藏一级入口（独立工作区，不属于本地 / 在线筛选）
+       收藏工作区自带高亮版入口，传入 show-favorites=false 时这里不重复渲染 -->
+  <FavoritesNav
+    v-if="showFavorites !== false"
+    :active="false"
+    @open-favorites="emit('open-favorites', $event)"
+  />
+
   <div v-if="sortMode" class="sort-lock-note">{{ t("sort.sidebarLocked") }}</div>
 
   <div class="side-group">
@@ -88,7 +100,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: source === 'all' && !favoritesOnly }"
+        :class="{ active: source === 'all' }"
         @click="emit('pick-source', 'all')"
       >
         <span class="label">{{ t("sidebar.allMods") }}</span>
@@ -96,7 +108,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: source === 'local' && !favoritesOnly }"
+        :class="{ active: source === 'local' }"
         @click="emit('pick-source', 'local')"
       >
         <span class="label">{{ t("sidebar.local") }}</span>
@@ -104,7 +116,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: source === 'subscribed' && !favoritesOnly }"
+        :class="{ active: source === 'subscribed' }"
         @click="emit('pick-source', 'subscribed')"
       >
         <span class="label">{{ t("sidebar.subscribed") }}</span>
@@ -112,7 +124,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: source === 'imported' && !favoritesOnly }"
+        :class="{ active: source === 'imported' }"
         @click="emit('pick-source', 'imported')"
       >
         <span class="label">{{ t("sidebar.imported") }}</span>
@@ -145,29 +157,6 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <!-- v0.5：我的收藏（只过滤 isFavorite，按 WorkshopID 匹配 user_data.json） -->
-  <div class="side-group">
-    <div
-      class="side-title collapsible"
-      :class="{ collapsed: collapsed.favorites }"
-      @click="toggleGroup('favorites')"
-    >
-      <span>{{ t("favorites.groupTitle") }}</span>
-      <span class="side-title-spacer"></span>
-      <svg class="side-caret" viewBox="0 0 8 8" aria-hidden="true"><path d="M2 2 L6 4 L2 6 Z" fill="currentColor"/></svg>
-    </div>
-    <div v-show="!collapsed.favorites">
-      <button
-        type="button"
-        class="side-item"
-        @click="emit('open-favorites')"
-      >
-        <span class="label">⭐ {{ t("favorites.label") }}</span>
-        <span class="count">{{ favoriteLocalCount }}</span>
-      </button>
-    </div>
-  </div>
-
   <div class="side-group">
     <div
       class="side-title collapsible"
@@ -182,7 +171,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: activeTag === null && !favoritesOnly }"
+        :class="{ active: activeTag === null }"
         @click="emit('pick-tag', null)"
       >
         <span class="label">{{ t("sidebar.allContent") }}</span>
@@ -192,7 +181,7 @@ const { t } = useI18n();
         :key="item.name"
         type="button"
         class="side-item"
-        :class="{ active: activeTag === item.name && !favoritesOnly }"
+        :class="{ active: activeTag === item.name }"
         :title="t('sidebar.tagCount', { name: localizedTagName(item.name), n: item.count })"
         @click="emit('pick-tag', item.name)"
       >
@@ -220,7 +209,7 @@ const { t } = useI18n();
         :key="item.name"
         type="button"
         class="side-item"
-        :class="{ active: activeTag === item.name && !favoritesOnly }"
+        :class="{ active: activeTag === item.name }"
         :title="t('sidebar.tagCount', { name: localizedTagName(item.name), n: item.count })"
         @click="emit('pick-tag', item.name)"
       >
@@ -243,7 +232,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: status === 'all' && !favoritesOnly }"
+        :class="{ active: status === 'all' }"
         @click="emit('pick-status', 'all')"
       >
         <span class="label">{{ t("sidebar.all") }}</span><span class="count">{{ sourceCounts.all }}</span>
@@ -251,7 +240,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: status === 'enabled' && !favoritesOnly }"
+        :class="{ active: status === 'enabled' }"
         @click="emit('pick-status', 'enabled')"
       >
         <span class="label">{{ t("sidebar.enabled") }}</span>
@@ -260,7 +249,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: status === 'disabled' && !favoritesOnly }"
+        :class="{ active: status === 'disabled' }"
         @click="emit('pick-status', 'disabled')"
       >
         <span class="label">{{ t("sidebar.disabled") }}</span>
@@ -269,7 +258,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: status === 'unknown' && !favoritesOnly }"
+        :class="{ active: status === 'unknown' }"
         @click="emit('pick-status', 'unknown')"
       >
         <span class="label">{{ t("sidebar.unknown") }}</span>

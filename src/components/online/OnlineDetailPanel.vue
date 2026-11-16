@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { DownloadProgress, OnlineMod } from "../../online/types";
 import type { InstalledIndexEntry } from "../../types";
 import { sourceLabel } from "../../format";
+import ModInfoFields from "../common/ModInfoFields.vue";
 
 /**
  * 在线页右侧详情面板（纯展示）。
@@ -42,7 +43,6 @@ const props = defineProps<{
   // 字段
   ratingText: string;
   sizeText: string;
-  fileCountText: string;
   diskText: string;
   versionText: string;
   createdText: string | null;
@@ -94,6 +94,14 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+/** 「更多信息」与本地 / 收藏详情共用同一字段组：只把缺失态显式标注出来 */
+const versionMissing = computed(
+  () => !props.versionText || props.versionText === t("labels.notProvided"),
+);
+const ratingMissing = computed(
+  () => !props.ratingText || props.ratingText === t("labels.notProvided"),
+);
 
 /** 在线封面重试阶段：获取地址 → 排队下载 → 完成 / 失败（无逐字节进度） */
 type CoverStage = "idle" | "fetching" | "downloading" | "done" | "failed";
@@ -286,7 +294,7 @@ watch(
         <span v-for="name in tags" :key="name" class="badge">{{ name }}</span>
       </div>
 
-      <!-- 基本信息：Workshop ID（可复制）+ 文件体积 + 文件数量，紧凑横排 -->
+      <!-- 基本信息：Workshop ID（可复制）+ 文件体积，紧凑横排 -->
       <div class="basic-row">
         <button
           type="button"
@@ -301,10 +309,6 @@ watch(
         <span class="basic-chip">
           <span class="chip-label">{{ t("online.fileSize") }}</span>
           <span class="chip-value">{{ sizeText }}</span>
-        </span>
-        <span class="basic-chip">
-          <span class="chip-label">{{ t("online.fileCount") }}</span>
-          <span class="chip-value">{{ fileCountText }}</span>
         </span>
       </div>
     </section>
@@ -488,40 +492,22 @@ watch(
       </div>
     </section>
 
-    <!-- ⑥ 更多信息：作者 / 发布时间 / 更新时间 / 版本 / 订阅数 / 评分。
+    <!-- ⑥ 更多信息：与本地 / 收藏详情共用 ModInfoFields（同一字段顺序 / 标签 / 缺失态）。
          发布时间取服务端 createDate，更新时间取 lastUpdate，二者不混用；
          服务端磁盘占用、内部状态串与服务端订阅标记属内部信息，不在普通界面展示。 -->
     <section class="dv-zone dv-zone-meta">
       <h4 class="dv-zone-title">{{ t("detailPanel.more") }}</h4>
-      <div class="field">
-        <span class="k">{{ t("online.author") }}</span>
-        <span class="v" :class="{ missing: !mod.creator }">
-          {{ mod.creator ?? t("labels.notProvided") }}
-        </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.created") }}</span>
-        <span class="v" :class="{ missing: !createdText }">{{ createdText ?? t("labels.notProvided") }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.updated") }}</span>
-        <span class="v" :class="{ missing: !updatedText }">{{ updatedText ?? t("labels.notProvided") }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.version") }}</span>
-        <span class="v">{{ versionText }}</span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.installs") }}</span>
-        <span class="v">
-          {{ mod.installs ?? t("labels.notProvided") }}
-          <template v-if="mod.installsTruncated">{{ t("online.installsTruncated") }}</template>
-        </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("online.rating") }}</span>
-        <span class="v">{{ ratingText }}</span>
-      </div>
+      <ModInfoFields
+        :author="mod.creator"
+        :created-text="createdText"
+        :updated-text="updatedText"
+        :version-text="versionText"
+        :version-missing="versionMissing"
+        :installs="mod.installs"
+        :installs-truncated="mod.installsTruncated"
+        :rating-text="ratingText"
+        :rating-missing="ratingMissing"
+      />
     </section>
   </div>
 

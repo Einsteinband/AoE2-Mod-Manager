@@ -83,6 +83,12 @@ export interface FavoriteOnlineInfo {
   version: string | null;
   /** 订阅数（官方 installs 口径） */
   installs: number | null;
+  /** 官方文件体积（压缩包字节数；与本地安装后目录体积不同口径） */
+  fileSize?: number | null;
+  /** 官方文件数量（详情 schema 未保证，取不到为 null） */
+  fileCount?: number | null;
+  /** 官方评分（0–5，取不到为 null） */
+  rating?: number | null;
   /** 官方缩略图地址（缺图时据此补图） */
   thumbnailUrl: string | null;
 }

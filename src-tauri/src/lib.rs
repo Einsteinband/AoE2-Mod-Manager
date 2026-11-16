@@ -1238,10 +1238,18 @@ async fn online_index_status(app: tauri::AppHandle) -> online_index::IndexStatus
         .unwrap_or_default()
 }
 
-/// 手动补全索引：受单飞 + 限流冷却保护，连点无效
+/// 手动 / 登录后补全索引：受单飞 + 限流冷却保护，连点无效。
+/// `reason` 只用于日志与底栏“今日 / 手动”标签，必须来自前端明确的触发来源。
 #[tauri::command]
-async fn online_index_sync(app: tauri::AppHandle) -> Result<online_index::SyncReport, ApiFailure> {
-    tauri::async_runtime::spawn_blocking(move || online_index::sync_blocking(&app, "manual"))
+async fn online_index_sync(
+    app: tauri::AppHandle,
+    reason: Option<String>,
+) -> Result<online_index::SyncReport, ApiFailure> {
+    let reason = match reason.as_deref() {
+        Some("startup" | "settings" | "resume" | "login") => reason.unwrap(),
+        _ => "manual".to_string(),
+    };
+    tauri::async_runtime::spawn_blocking(move || online_index::sync_blocking(&app, &reason))
         .await
         .map_err(|e| ApiFailure::new("internal", user_err("index.taskFailed", json!({ "error": e.to_string() })), None))?
 }

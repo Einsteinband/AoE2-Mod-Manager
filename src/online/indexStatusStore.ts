@@ -12,7 +12,7 @@
  * - `indexingEnabled === false`（自动更新关闭）→ 底栏完全静默，不显示任何索引字样；
  * - `syncing` → 实时进度（真实已处理条数 / 可靠总量），不显示手动按钮；
  * - `lastError` 非空且已停 → 失败原因 + 唯一「手动重试」入口；
- * - 一轮跑完 → 短暂显示成功与新增数量，随后回到正常状态。
+ * - 一轮**完整成功**跑完 → 常驻显示 Rust 记录的真实 `added`，不用 index 差值推算。
  */
 import { reactive } from "vue";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -24,10 +24,28 @@ import {
 import { runIndexSync } from "./indexSync";
 import type { IndexStatus } from "./types";
 
-/** 成功提示停留时长（之后回到「🟢 本地索引 N 条」常态） */
-export const INDEX_FLASH_MS = 8000;
 /** 同步期间的状态轮询间隔（事件推送为主，轮询只在事件丢失时兜底） */
 const POLL_MS = 4000;
+/** 自动同步结果缓存：只保存“今日完整成功”，重启后仍可显示；失败 / 部分完成绝不缓存 */
+const SYNC_CACHE_KEY = "aoe2mm.indexSyncResult.v1";
+
+/** Rust `SyncReport` 落到前端后的真实同步结果 */
+export interface IndexSyncResult {
+  /** 本轮 items.insert 真正新增的条目数 */
+  added: number;
+  updated: number;
+  failed: number;
+  atMs: number;
+  reason: string;
+  /** reason !== "manual"：自动同步（startup/settings/resume/login） */
+  auto: boolean;
+  /** 本轮是否完整结束；部分分页 / 暂停 / 预算用尽为 false */
+  complete: boolean;
+  /** 只有 complete 且同步成功才为 true */
+  ok: boolean;
+  /** 本地自然日（YYYY-MM-DD），用于“今日已同步” */
+  day: string;
+}
 
 export interface IndexBarState {
   status: IndexStatus | null;
@@ -37,8 +55,63 @@ export interface IndexBarState {
   needLogin: boolean;
   /** 底栏手动重试进行中 */
   retrying: boolean;
-  /** 成功提示里的新增条数；null = 不在成功提示期 */
-  flashAdded: number | null;
+  /** 最近一轮真实同步结果；null = 还没结果 / 新一轮已开始 */
+  lastSync: IndexSyncResult | null;
+}
+
+function localDayKey(ms = Date.now()): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+function readCachedSync(): IndexSyncResult | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(SYNC_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<IndexSyncResult> | null;
+    if (!parsed || parsed.complete !== true || parsed.ok !== true || parsed.auto !== true) return null;
+    const atMs = count(parsed.atMs);
+    if (atMs <= 0 || localDayKey(atMs) !== localDayKey()) return null;
+    return {
+      added: count(parsed.added),
+      updated: count(parsed.updated),
+      failed: count(parsed.failed),
+      atMs,
+      reason: typeof parsed.reason === "string" ? parsed.reason : "auto",
+      auto: true,
+      complete: true,
+      ok: true,
+      day: localDayKey(atMs),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedSync(result: IndexSyncResult): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SYNC_CACHE_KEY, JSON.stringify(result));
+  } catch {
+    /* 缓存失败不影响底栏：本次会话内仍能显示 */
+  }
+}
+
+function clearCachedSync(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(SYNC_CACHE_KEY);
+  } catch {
+    /* 忽略：缓存只是重启后的兜底 */
+  }
 }
 
 export const indexBar = reactive<IndexBarState>({
@@ -46,7 +119,7 @@ export const indexBar = reactive<IndexBarState>({
   failure: "",
   needLogin: false,
   retrying: false,
-  flashAdded: null,
+  lastSync: readCachedSync(),
 });
 
 export type IndexBarKind =
@@ -60,8 +133,10 @@ export type IndexBarKind =
 
 export interface IndexBarView {
   kind: IndexBarKind;
-  /** 成功提示里的新增条数（kind === "success" 时有效） */
+  /** 成功结果里的真实新增条数（kind === "success" 时有效） */
   added: number;
+  /** 失败是否来自自动同步（决定“今日同步失败”与“同步失败”） */
+  auto: boolean;
   /** 是否显示「手动重试」按钮（失败且可重试时唯一入口） */
   showRetry: boolean;
 }
@@ -71,51 +146,68 @@ export interface IndexBarView {
  * 单独抽出来是为了能脱离 Tauri / Vue 直接写单测。
  */
 export function deriveIndexBar(state: IndexBarState): IndexBarView {
-  const hidden: IndexBarView = { kind: "hidden", added: 0, showRetry: false };
+  const hidden: IndexBarView = { kind: "hidden", added: 0, auto: false, showRetry: false };
   // 手动重试在飞：无论 Rust 状态有没有跟上，都先显示进度并隐藏按钮
-  if (state.retrying) return { kind: "syncing", added: 0, showRetry: false };
+  if (state.retrying) return { kind: "syncing", added: 0, auto: false, showRetry: false };
   const st = state.status;
   if (!st) return hidden;
   // 自动更新关闭：底栏不出现任何索引内容（也不出现手动入口）
   if (!st.indexingEnabled) return hidden;
+  if (state.needLogin) return { kind: "needLogin", added: 0, auto: false, showRetry: false };
+  if (st.syncing) return { kind: "syncing", added: 0, auto: false, showRetry: false };
+
+  const sync = state.lastSync;
+  if (sync?.complete && !sync.ok) {
+    // 自动失败只认“今天”；昨天的失败不能在第二天继续冒充今日状态。
+    if (!sync.auto || sync.day === localDayKey()) {
+      return { kind: "failed", added: 0, auto: sync.auto, showRetry: true };
+    }
+    return { kind: st.done ? "ready" : "idle", added: 0, auto: false, showRetry: false };
+  }
+  if (sync?.complete && sync.ok) {
+    // 自动成功只认“今天”；手动成功在当前会话内保留到下一次结果覆盖。
+    if (!sync.auto || sync.day === localDayKey()) {
+      return { kind: "success", added: sync.added, auto: sync.auto, showRetry: false };
+    }
+    return { kind: st.done ? "ready" : "idle", added: 0, auto: false, showRetry: false };
+  }
   if (state.failure) {
-    return { kind: "failed", added: 0, showRetry: true };
+    return { kind: "failed", added: 0, auto: sync?.auto ?? false, showRetry: true };
   }
-  if (state.needLogin) return { kind: "needLogin", added: 0, showRetry: false };
-  if (st.syncing) return { kind: "syncing", added: 0, showRetry: false };
-  if (state.flashAdded !== null) {
-    return { kind: "success", added: state.flashAdded, showRetry: false };
-  }
-  if (st.done) return { kind: "ready", added: 0, showRetry: false };
-  return { kind: "idle", added: 0, showRetry: false };
+  if (st.done) return { kind: "ready", added: 0, auto: false, showRetry: false };
+  return { kind: "idle", added: 0, auto: false, showRetry: false };
 }
 
-/** 一轮同步的起点基线：成功提示里的「新增」= 结束时 indexed - 起点 indexed */
-let baseline = 0;
-/** 是否观察到过一轮进行中的同步（用来识别「跑完」的那一帧） */
-let sawSyncing = false;
+/** 把 Rust `IndexStatus` 里的最近同步结果转成前端结果；没有结果时为 null */
+function resultFromStatus(next: IndexStatus): IndexSyncResult | null {
+  if (!next.lastSyncAtMs) return null;
+  const atMs = count(next.lastSyncAtMs);
+  const reason = next.lastSyncReason || "auto";
+  return {
+    added: count(next.lastSyncAdded),
+    updated: count(next.lastSyncUpdated),
+    failed: count(next.lastSyncFailed),
+    atMs,
+    reason,
+    auto: reason !== "manual",
+    complete: next.lastSyncComplete === true,
+    ok: next.lastSyncComplete === true && next.lastSyncOk === true,
+    day: localDayKey(atMs),
+  };
+}
+
+function saveSyncResult(result: IndexSyncResult | null): void {
+  indexBar.lastSync = result;
+  if (result?.complete && result.ok && result.auto) {
+    writeCachedSync(result);
+  } else {
+    clearCachedSync();
+  }
+}
 
 let started = false;
 let unlisten: UnlistenFn | null = null;
 let pollTimer: number | null = null;
-let flashTimer: number | null = null;
-
-function clearFlash(): void {
-  if (flashTimer !== null) {
-    window.clearTimeout(flashTimer);
-    flashTimer = null;
-  }
-  indexBar.flashAdded = null;
-}
-
-function flashSuccess(added: number): void {
-  clearFlash();
-  indexBar.flashAdded = Math.max(0, Math.round(added));
-  flashTimer = window.setTimeout(() => {
-    indexBar.flashAdded = null;
-    flashTimer = null;
-  }, INDEX_FLASH_MS);
-}
 
 function stopPoll(): void {
   if (pollTimer !== null) {
@@ -146,13 +238,11 @@ function schedulePoll(): void {
  * 自动任务的开始 / 结束都只能从这里被观察到，因此成功与失败的判定集中在此。
  */
 export function applyIndexStatus(next: IndexStatus | null): void {
-  const prev = indexBar.status;
   indexBar.status = next;
   if (!next) {
     indexBar.failure = "";
     indexBar.needLogin = false;
-    sawSyncing = false;
-    clearFlash();
+    saveSyncResult(null);
     stopPoll();
     return;
   }
@@ -160,30 +250,22 @@ export function applyIndexStatus(next: IndexStatus | null): void {
   if (!next.indexingEnabled) {
     indexBar.failure = "";
     indexBar.needLogin = false;
-    sawSyncing = false;
-    clearFlash();
+    saveSyncResult(null);
     stopPoll();
     return;
   }
   if (next.syncing) {
-    if (!sawSyncing || !prev?.syncing) {
-      sawSyncing = true;
-      baseline = next.indexed;
-      clearFlash();
-    }
-    // 新一轮开始 → 上一次的失败提示与重试入口必须消失（进度优先）
+    // 新一轮开始 → 旧成功结果立刻消失，绝不在同步途中提前显示“今日已同步”
+    saveSyncResult(null);
     indexBar.failure = "";
     indexBar.needLogin = false;
     schedulePoll();
     return;
   }
-  if (sawSyncing && prev?.syncing) {
-    sawSyncing = false;
-    if (!next.lastError && next.phase !== "error") {
-      // 新增 = 结束条数 - 起点条数（更新已有条目不会改变总数）
-      flashSuccess(Math.max(0, next.indexed - baseline));
-    }
-  }
+
+  const result = resultFromStatus(next);
+  if (result) saveSyncResult(result);
+
   indexBar.failure = "";
   indexBar.needLogin = false;
   if (next.phase === "needLogin") {
@@ -212,7 +294,7 @@ export async function refreshIndexStatus(): Promise<IndexStatus | null> {
  *
  * - 与自动补建共享单飞 Promise，Rust 侧还有 `begin_run` 的 busy 闸门，
  *   自动任务在跑时点重试不会起第二条链路；
- * - 成功 → 短暂成功提示（新增条数取本轮真实 `fetched`）；
+ * - 成功 → 用本轮真实 `added` 常驻显示，不写“今日已同步”；
  * - 失败 → 保留 / 刷新失败原因，重试入口继续存在。
  */
 export async function retryIndexSync(): Promise<boolean> {
@@ -220,21 +302,49 @@ export async function retryIndexSync(): Promise<boolean> {
   indexBar.retrying = true;
   indexBar.failure = "";
   indexBar.needLogin = false;
-  clearFlash();
   try {
-    const report = await runIndexSync();
-    // 先刷新状态（可能顺带触发一次「结束帧」推导），再用本轮真实 fetched 覆盖成功提示，
-    // 否则「只更新了已有条目（fetched>0、indexed 不变）」会被算成「已是最新」。
+    const report = await runIndexSync("manual");
+    // 先刷新状态（Rust 已把本轮真实结果写进内存），再用手动报告兜底。
     await refreshIndexStatus();
-    flashSuccess(report?.fetched ?? 0);
+    if (report && !report.skipped && report.done) {
+      const atMs = Date.now();
+      indexBar.lastSync = {
+        added: count(report.added),
+        updated: count(report.updated),
+        failed: count(report.failed),
+        atMs,
+        reason: "manual",
+        auto: false,
+        complete: true,
+        ok: true,
+        day: localDayKey(atMs),
+      };
+      clearCachedSync();
+    } else if (report && !report.skipped) {
+      // 部分完成 / 暂停：不得显示成功结果
+      saveSyncResult(null);
+    }
     return true;
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
     await refreshIndexStatus();
-    // 状态里没带出失败原因（后端还没落盘）时，用命令返回的错误兜底
-    if (!indexBar.failure && !indexBar.needLogin) {
+    // 自动任务正在跑时点重试会拿到 busy：保持进度态，不要把“重复点击”误报成失败。
+    if (!indexBar.failure && !indexBar.needLogin && !indexBar.status?.syncing) {
+      const atMs = Date.now();
       indexBar.failure = raw || "sync failed";
       indexBar.needLogin = /unauthenticated|needLogin|未登录/i.test(raw);
+      indexBar.lastSync = {
+        added: 0,
+        updated: 0,
+        failed: 1,
+        atMs,
+        reason: "manual",
+        auto: false,
+        complete: true,
+        ok: false,
+        day: localDayKey(atMs),
+      };
+      clearCachedSync();
     }
     return false;
   } finally {
@@ -276,7 +386,6 @@ export async function startIndexStatusWatch(): Promise<void> {
 export function stopIndexStatusWatch(): void {
   started = false;
   stopPoll();
-  clearFlash();
   if (unlisten) {
     unlisten();
     unlisten = null;

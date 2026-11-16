@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
 import PageShell from "../layout/PageShell.vue";
 import ModGrid from "../common/ModGrid.vue";
@@ -13,10 +13,10 @@ import ConfirmDialog from "../ConfirmDialog.vue";
 import RenameDialog from "../RenameDialog.vue";
 import ContextMenu from "../common/ContextMenu.vue";
 import type { ContextMenuItem } from "../common/contextMenuTypes";
-import { useLocalScan } from "../../composables/local/useLocalScan";
-import { useContextMenu } from "../../composables/useContextMenu";
-import { useUninstalledFavorites } from "../../composables/local/useUninstalledFavorites";
+import { useLocalScan } from "../../composables/local/useLocalScan";import { useContextMenu } from "../../composables/useContextMenu";
 import { useLocalFilters } from "../../composables/local/useLocalFilters";
+import { consumeLocalNavIntent, publishLocalNav } from "../../composables/local/localNav";
+import type { FavoriteStatusFilter } from "../../favorites/useFavorites";
 import { useSortMode } from "../../composables/local/useSortMode";
 import { useLocalModActions } from "../../composables/local/useLocalModActions";
 import { buildLocalMenuItems } from "../../composables/local/useLocalModMenu";
@@ -29,9 +29,6 @@ import { useScrollRestore } from "../../composables/useScrollRestore";
 import { deleteModFiles, openExternalUrl, pickModZip, revealModFolder, toggleModEnabled } from "../../api";
 import { itemsById, updateIds, report as modUpdateReport, checkProgress } from "../../modUpdates";
 import { buildConflictIndex } from "../../modConflict";
-import { enrichFavoriteMetaFromDetail, favoriteMetaOf } from "../../favoriteMeta";
-import { enqueueDownload } from "../../online/downloadQueue";
-import { sessionPhase } from "../../sessionState";
 import {
   canTranslateText,
   currentTargetLanguageName,
@@ -86,8 +83,8 @@ const emit = defineEmits<{
   (e: "update:search", v: string): void;
   (e: "update:sortModel", v: string): void;
   (e: "update:orderModel", v: "DESC" | "ASC"): void;
-  /** 侧栏「我的收藏」= 进入独立的收藏工作区（收藏不再作为本地页的筛选视图） */
-  (e: "open-favorites"): void;
+  /** 侧栏「收藏」= 进入独立收藏工作区；可选带上收藏内部二级分类 */
+  (e: "open-favorites", scope: FavoriteStatusFilter): void;
 }>();
 
 const { t, locale } = useI18n();
@@ -109,7 +106,6 @@ const orderModelModel = computed({
 
 // ---------------- 扫描状态 ----------------
 const scan = useLocalScan();
-const uninstalledFavorites = useUninstalledFavorites({ mods: scan.mods });
 
 const {
   report,
@@ -126,19 +122,9 @@ const {
   chooseRoot,
 } = scan;
 
-// ---------------- 详情选中（含未安装收藏占位条目） ----------------
-const detailMod = computed<ModEntry | null>(() => {
-  const id = selectedId.value;
-  if (!id) return null;
-  if (selected.value) return selected.value;
-  return uninstalledFavorites.ghosts.value.find((mod) => mod.id === id) ?? null;
-});
+// ---------------- 详情选中 ----------------
+const detailMod = computed<ModEntry | null>(() => (selectedId.value ? selected.value : null));
 const selectedEntryId = computed(() => selectedId.value);
-
-watch(detailMod, (mod) => {
-  if (!mod?.uninstalled) return;
-  void enrichFavoriteMetaFromDetail(mod.workshopId ?? 0);
-});
 
 // ---------------- 区域设置（collation） ----------------
 const currentLocale = computed(() => String(locale.value));
@@ -149,7 +135,6 @@ const collationLocale = computed(() =>
 // ---------------- 筛选 ----------------
 const filters = useLocalFilters({
   mods: scan.mods,
-  ghostMods: uninstalledFavorites.ghosts,
   collationLocale,
 });
 
@@ -157,7 +142,6 @@ const {
   search: filtersSearch,
   source,
   status,
-  favoritesOnly,
   updatesOnly,
   updatesAvailableCount,
   activeTag,
@@ -167,14 +151,39 @@ const {
   officialTagList,
   inferredTagList,
   heading,
-  favoriteLocalCount,
   pickSource,
   pickStatus,
   pickTag,
   pickUpdatesOnly,
-  toggleFavorites,
   clearFilters,
 } = filters;
+
+// 侧栏是全局固定骨架：把本地页当前分类快照共享出去（收藏页只镜像展示，不重算口径），
+// 收藏页点击普通分类后，由本页 activated 时消费导航意图并套用同一个筛选。
+watchEffect(() => {
+  publishLocalNav({
+    source: source.value,
+    status: status.value,
+    updatesOnly: updatesOnly.value,
+    updatesAvailableCount: updatesAvailableCount.value,
+    activeTag: activeTag.value,
+    officialTagList: officialTagList.value,
+    inferredTagList: inferredTagList.value,
+    sourceCounts: sourceCounts.value,
+    statusCounts: statusCounts.value,
+  });
+});
+
+function applyLocalNavIntent(): void {
+  const intent = consumeLocalNavIntent();
+  if (!intent) return;
+  if (intent.source) pickSource(intent.source);
+  if (intent.status) pickStatus(intent.status);
+  if ("tag" in intent) pickTag(intent.tag ?? null);
+  if (intent.updatesOnly && !updatesOnly.value) pickUpdatesOnly();
+}
+
+onActivated(applyLocalNavIntent);
 
 // 桥接：外部 v-model ↔ filters 内部 ref
 watch(searchModel, (v) => { if (filtersSearch.value !== v) filtersSearch.value = v; });
@@ -302,7 +311,6 @@ const localMenuItems = computed<ContextMenuItem[]>(() => {
       translating,
       queued,
       showingOriginal,
-      offline: sessionPhase.value !== "online",
     },
     {
       enable: t("menu.enable"),
@@ -318,8 +326,6 @@ const localMenuItems = computed<ContextMenuItem[]>(() => {
       openFolder: t("detail.openFolder"),
       browseSite: t("detail.browseSite"),
       deleteMod: t("detail.deleteMod"),
-      downloadInstall: t("detail.downloadInstall"),
-      offlineHint: t("online.offlineBlocked"),
       notRegisteredHint: t("card.notRegisteredHint"),
     },
   );
@@ -349,11 +355,6 @@ async function onMenuSelect(itemId: string): Promise<void> {
       } catch (e) {
         showToast(normalizeBackendError(e), "error");
       }
-      return;
-    }
-    case "install": {
-      cardMenu.close();
-      downloadUninstalledFavorite(mod);
       return;
     }
     case "favorite": {
@@ -516,41 +517,7 @@ function cancelMenuDelete(): void {
 }
 
 
-// ---------------- 未安装收藏的下载入口 ----------------
-function downloadUninstalledFavorite(mod: ModEntry): void {
-  const modId = Number(mod.workshopId ?? 0);
-  if (!Number.isFinite(modId) || modId <= 0) {
-    showToast(t("favorites.downloadNoId"), "error");
-    return;
-  }
-  if (sessionPhase.value !== "online") {
-    showToast(t("online.offlineBlocked"), "error");
-    return;
-  }
-  const meta = favoriteMetaOf(modId);
-  const result = enqueueDownload({
-    modId,
-    title: meta?.title || mod.displayName,
-    kind: "install",
-    tagIds: meta?.tagIds ?? [],
-    tagNames: meta?.tagNames ?? [],
-    creator: meta?.creator ?? null,
-    description: meta?.description ?? null,
-    thumbnail: meta?.thumbnailUrl ?? null,
-  });
-  if (!result.accepted) {
-    showToast(t("favorites.downloadBusy"), "error");
-    return;
-  }
-  showToast(t("favorites.downloadQueued"));
-}
-
-function downloadSelected(): void {
-  const mod = detailMod.value;
-  if (!mod) return;
-  downloadUninstalledFavorite(mod);
-}
-
+// ---------------- 数据模组互斥 + 批量操作 ----------------
 function handleCoverUpdated(payload: { id: string; path: string }): void {
   scan.patchModCover(payload.id, payload.path);
 }
@@ -833,7 +800,6 @@ defineExpose({
         :sort-mode="sortMode"
         :source="source"
         :status="status"
-        :favorites-only="favoritesOnly"
         :updates-only="updatesOnly"
         :updates-available-count="updatesAvailableCount"
         :active-tag="activeTag"
@@ -841,11 +807,10 @@ defineExpose({
         :inferred-tag-list="inferredTagList"
         :source-counts="sourceCounts"
         :status-counts="statusCounts"
-        :favorite-local-count="favoriteLocalCount"
         @pick-source="pickSource"
         @pick-status="pickStatus"
         @pick-tag="pickTag"
-        @open-favorites="emit('open-favorites')"
+        @open-favorites="emit('open-favorites', $event)"
         @pick-updates-only="pickUpdatesOnly"
       />
     </template>
@@ -1050,24 +1015,6 @@ defineExpose({
           </div>
         </div>
 
-        <!-- 收藏视图空态 -->
-        <div v-else-if="!sorted.length && favoritesOnly" class="state-panel">
-          <h2>⭐ {{ t("favorites.empty") }}</h2>
-          <p>
-            {{
-              favoriteLocalCount && filtersSearch
-                ? t("favorites.emptyLocalHint", { n: favoriteLocalCount })
-                : t("favorites.emptyNone")
-            }}
-          </p>
-          <div class="actions">
-            <button v-if="filtersSearch" type="button" @click="filtersSearch = ''">
-              {{ t("search.clear") }}
-            </button>
-            <button type="button" @click="toggleFavorites">{{ t("favorites.exit") }}</button>
-          </div>
-        </div>
-
         <!-- 筛选后空态 -->
         <div v-else-if="!sorted.length" class="state-panel">
           <h2>{{ t("state.filteredTitle") }}</h2>
@@ -1118,7 +1065,6 @@ defineExpose({
         :conflict-hint="conflictHintOf(detailMod.id)"
         @toggled="handleToggle"
         @removed="handleRemoved"
-        @download="downloadSelected"
         @update="handleUpdateMod(detailMod)"
         @request-enable="requestEnableDataMod"
         @cover-updated="handleCoverUpdated"

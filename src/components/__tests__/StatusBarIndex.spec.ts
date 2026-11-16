@@ -48,6 +48,7 @@ vi.mock("../../api", () => ({
 }));
 
 vi.mock("../../online/service", () => ({
+  findMods: vi.fn(),
   getNetworkSettings: vi.fn(async () => ({ source: "direct" })),
   openLogin: vi.fn(async () => undefined),
   indexStatus: vi.fn(async () => null),
@@ -82,6 +83,36 @@ function status(overrides: Partial<IndexStatus> = {}): IndexStatus {
     paused: false,
     lastError: "",
     resumable: false,
+    lastSyncAdded: 0,
+    lastSyncUpdated: 0,
+    lastSyncFailed: 0,
+    lastSyncAtMs: 0,
+    lastSyncReason: "",
+    lastSyncComplete: false,
+    lastSyncOk: false,
+    ...overrides,
+  };
+}
+
+function todayKey(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const x = `${d.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${x}`;
+}
+
+function syncResult(overrides: Partial<NonNullable<typeof indexBar.lastSync>> = {}) {
+  return {
+    added: 0,
+    updated: 0,
+    failed: 0,
+    atMs: Date.now(),
+    reason: "login",
+    auto: true,
+    complete: true,
+    ok: true,
+    day: todayKey(),
     ...overrides,
   };
 }
@@ -93,11 +124,12 @@ function mountBar(warningCount = 0) {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   indexBar.status = null;
   indexBar.failure = "";
   indexBar.needLogin = false;
   indexBar.retrying = false;
-  indexBar.flashAdded = null;
+  indexBar.lastSync = null;
   vi.mocked(indexSync).mockReset();
   vi.mocked(fetchIndexStatus).mockReset();
   vi.mocked(fetchIndexStatus).mockResolvedValue(status({ phase: "paused", lastError: "network down" }));
@@ -143,13 +175,17 @@ describe("StatusBar 索引状态区", () => {
   it("失败时才出现唯一「手动重试」，点击后走同一个同步核心", async () => {
     indexBar.status = status({ phase: "paused", lastError: "network down" });
     indexBar.failure = "network down";
+    indexBar.lastSync = syncResult({ ok: false, failed: 1 });
     vi.mocked(indexSync).mockResolvedValue({
       fetched: 7,
+      added: 3,
+      updated: 4,
+      failed: 0,
       pages: 1,
       scanned: 7,
       totalCount: 200,
       indexed: 107,
-      done: false,
+      done: true,
       skipped: false,
       capped: false,
       message: "",
@@ -159,16 +195,21 @@ describe("StatusBar 索引状态区", () => {
     const retry = wrapper.find(".sb-index-retry");
     expect(retry.exists()).toBe(true);
     expect(retry.text()).toBe("statusbar.indexRetry");
-    expect(wrapper.find(".sb-index").text()).toContain("statusbar.indexFailed(network down)");
+    expect(wrapper.find(".sb-index").text()).toContain(
+      "statusbar.indexReady(100) · statusbar.indexSyncTodayFailed",
+    );
 
     // 重试成功后 Rust 状态里的 lastError 会被清空
     vi.mocked(fetchIndexStatus).mockResolvedValue(status({ phase: "done", done: true, indexed: 107 }));
     await retry.trigger("click");
     await flushPromises();
-    expect(vi.mocked(indexSync)).toHaveBeenCalledTimes(1);
-    // 成功后重试入口消失（进度 / 成功提示优先）
+    expect(vi.mocked(indexSync)).toHaveBeenCalledWith("manual");
+    // 成功后重试入口消失，底栏用本轮真实 added=3，而不是 fetched=7
     expect(wrapper.find(".sb-index-retry").exists()).toBe(false);
-    expect(indexBar.flashAdded).toBe(7);
+    expect(indexBar.lastSync?.added).toBe(3);
+    expect(wrapper.find(".sb-index").text()).toContain(
+      "statusbar.indexReady(107) · statusbar.indexSyncManualAdded(3)",
+    );
   });
 
   it("重试失败后重试入口继续保留", async () => {
@@ -198,6 +239,61 @@ describe("StatusBar 索引状态区", () => {
     const cells = right.element.children;
     expect((cells[cells.length - 1] as HTMLElement).className).toContain("sb-pill");
     expect(right.html().indexOf("sb-index")).toBeLessThan(right.html().indexOf("sb-pill"));
+  });
+
+  it("底栏不再显示在线 Mod 总数", async () => {
+    indexBar.status = status({ done: true, indexed: 41357, totalCount: 41327, phase: "done" });
+    const wrapper = mountBar();
+    await flushPromises();
+    expect(wrapper.find(".sb-online").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("statusbar.onlineMods");
+    expect(wrapper.find(".sb-index").text()).toContain("statusbar.indexReady(41357)");
+  });
+
+  it("自动同步成功：本地索引 + 今日已同步，新增真实 added", async () => {
+    indexBar.status = status({ done: true, indexed: 41357, phase: "done" });
+    indexBar.lastSync = syncResult({ added: 15, updated: 35 });
+    const wrapper = mountBar();
+    await flushPromises();
+    expect(wrapper.find(".sb-index").text()).toContain(
+      "statusbar.indexReady(41357) · statusbar.indexSyncAutoAdded(15)",
+    );
+  });
+
+  it("自动同步成功但无新增：显示无新增 Mod", async () => {
+    indexBar.status = status({ done: true, indexed: 41357, phase: "done" });
+    indexBar.lastSync = syncResult({ added: 0 });
+    const wrapper = mountBar();
+    await flushPromises();
+    expect(wrapper.find(".sb-index").text()).toContain(
+      "statusbar.indexReady(41357) · statusbar.indexSyncAutoNone",
+    );
+  });
+
+  it("悬停提示只显示当前完整索引文案，不暴露索引文件路径", async () => {
+    indexBar.status = status({
+      done: true,
+      indexed: 41357,
+      phase: "done",
+      path: "C:\\Users\\Libohan\\AppData\\Roaming\\com.aoe2.modmanager\\online_index.json",
+    });
+    indexBar.lastSync = syncResult({ added: 15 });
+    const wrapper = mountBar();
+    await flushPromises();
+    const cell = wrapper.find(".sb-index");
+    const title = cell.attributes("title");
+    expect(title).toBe(cell.find(".sb-index-text").text());
+    expect(title).not.toContain("online_index.json");
+    expect(title).not.toContain("C:\\Users");
+  });
+
+  it("同步中不会提前显示今日已同步", async () => {
+    indexBar.status = status({ syncing: true, phase: "syncing", indexed: 41357, totalCount: 41327 });
+    indexBar.lastSync = syncResult({ added: 15 });
+    const wrapper = mountBar();
+    await flushPromises();
+    expect(wrapper.find(".sb-index").text()).toContain("statusbar.indexProgressBare(41357)");
+    expect(wrapper.find(".sb-index").text()).not.toContain("statusbar.indexSyncAutoAdded");
   });
 
   it("旧版本残留的「暂停」标记会在启动观察时清掉（否则自动任务永久跳过）", async () => {

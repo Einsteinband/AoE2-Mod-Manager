@@ -306,6 +306,20 @@ pub struct IndexStatus {
     pub last_error: String,
     /// 还有断点可继续（未完成 / 暂停中 / 中断过）
     pub resumable: bool,
+    /// 最近一轮同步真实新增条目数（仅内存；0 = 无结果）
+    pub last_sync_added: usize,
+    /// 最近一轮同步真实更新条目数
+    pub last_sync_updated: usize,
+    /// 最近一轮同步失败条目数（整轮失败记 1）
+    pub last_sync_failed: usize,
+    /// 最近一轮同步结果时间（本地毫秒）
+    pub last_sync_at_ms: u64,
+    /// 最近一轮同步触发来源：startup / settings / resume / manual / login
+    pub last_sync_reason: String,
+    /// 最近一轮是否真正完整结束（部分分页 / 暂停 / 中途失败都为 false）
+    pub last_sync_complete: bool,
+    /// 最近一轮是否成功（只有 complete 且无错误才为 true）
+    pub last_sync_ok: bool,
 }
 
 /// 一轮同步的结果
@@ -314,6 +328,12 @@ pub struct IndexStatus {
 pub struct SyncReport {
     /// 本轮写入 / 更新的条目数
     pub fetched: usize,
+    /// 本轮真正新增的条目数（items.insert 时 key 原本不存在）
+    pub added: usize,
+    /// 本轮更新的已有条目数
+    pub updated: usize,
+    /// 本轮失败条目数（当前按“整轮失败”记 1，成功为 0）
+    pub failed: usize,
     pub pages: u32,
     pub scanned: i64,
     pub total_count: i64,
@@ -324,6 +344,13 @@ pub struct SyncReport {
     /// true = 触到 3 万条硬上限
     pub capped: bool,
     pub message: String,
+}
+
+/// 统一用真实写入量收口：`fetched` 是 items.insert 的写入/更新次数，
+/// `added` 是其中 key 原本不存在的次数，两者之差就是更新次数。
+fn finalize_report_counts(report: &mut SyncReport) {
+    report.updated = report.fetched.saturating_sub(report.added);
+    report.failed = 0;
 }
 
 /// 搜索命中的一条（字段与 `OnlineModSummary` 对齐，前端可直接喂给现有卡片组件）
@@ -402,6 +429,14 @@ struct Runtime {
     phase: String,
     message: String,
     cooldown_until_ms: u64,
+    /// 最近一轮同步的真实结果（只放内存，不写入 online_index.json）
+    last_sync_added: usize,
+    last_sync_updated: usize,
+    last_sync_failed: usize,
+    last_sync_at_ms: u64,
+    last_sync_reason: String,
+    last_sync_complete: bool,
+    last_sync_ok: bool,
 }
 
 static RUNTIME: Mutex<Runtime> = Mutex::new(Runtime {
@@ -409,6 +444,13 @@ static RUNTIME: Mutex<Runtime> = Mutex::new(Runtime {
     phase: String::new(),
     message: String::new(),
     cooldown_until_ms: 0,
+    last_sync_added: 0,
+    last_sync_updated: 0,
+    last_sync_failed: 0,
+    last_sync_at_ms: 0,
+    last_sync_reason: String::new(),
+    last_sync_complete: false,
+    last_sync_ok: false,
 });
 
 /// 「暂停」请求：同步线程在每个循环开头读它，读到就收手并保留分区游标。
@@ -438,6 +480,26 @@ fn now_ms() -> u64 {
 
 fn lock_runtime() -> std::sync::MutexGuard<'static, Runtime> {
     RUNTIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 记录最近一轮同步的真实结果（仅内存；**不写 online_index.json**）。
+/// `complete=false` 表示只完成了部分分页 / 暂停 / 预算用尽，底栏不得显示“今日已同步”。
+fn record_last_sync(
+    ok: bool,
+    complete: bool,
+    added: usize,
+    updated: usize,
+    failed: usize,
+    reason: &str,
+) {
+    let mut rt = lock_runtime();
+    rt.last_sync_added = added;
+    rt.last_sync_updated = updated;
+    rt.last_sync_failed = failed;
+    rt.last_sync_at_ms = now_ms();
+    rt.last_sync_reason = reason.to_string();
+    rt.last_sync_complete = complete;
+    rt.last_sync_ok = ok;
 }
 
 pub fn path_for(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -720,8 +782,8 @@ pub fn spawn_now(app: tauri::AppHandle) {
     });
 }
 
-/// 「继续索引」：**强制续爬**（跳过 24h / 7d 新鲜度闸门），后台线程跑。
-/// `reason = "resume"` 是 [`scan`] 里 force 的唯一来源，别改这个名字。
+/// 「继续索引 / 立即更新索引」：**强制续爬**（跳过 24h / 7d 新鲜度闸门），后台线程跑。
+/// `reason = "resume"` 与 `reason = "manual"` 是 [`scan`] 里 force 的两个来源，别改这两个名字。
 pub fn spawn_resume(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         if let Err(err) = sync_blocking(&app, "resume") {
@@ -1386,7 +1448,8 @@ fn phase_for(err: &ApiFailure) -> &'static str {
 
 /// 一轮同步（阻塞，调用方负责丢进 `spawn_blocking` 或后台线程）。
 ///
-/// `reason` 只用于日志：startup | manual | login。
+/// `reason` 用于日志与手动强制：startup | settings | resume | login | manual。
+/// `manual` 会绕过 24h 新鲜度闸门，保证用户主动点击「立即更新索引」真的发请求。
 pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport, ApiFailure> {
     // 开关关闭：一个请求都不发（本地搜索仍然可用，只是只查已缓存的条目）
     if !is_enabled(app) {
@@ -1405,14 +1468,30 @@ pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport,
     mark_paused(app, false);
     let started = now_ms();
     // 无论成功失败都把已拿到的进度落盘：断点续传的前提
-    let mut result = scan(app, reason == "resume");
+    // 手动同步（含设置页「立即更新索引」）与「继续索引」一样必须真的发请求，
+    // 不能让 24h 新鲜度闸门把用户主动操作变成一次空跳过。
+    let mut result = scan(app, reason == "resume" || reason == "manual");
     flush(app);
     match &mut result {
         Ok(report) => {
             let phase = if report.done || report.skipped { "done" } else { "paused" };
+            // 只有“完整成功”才记录为今日同步结果；skipped 是新鲜度闸门，不算一次同步。
+            if !report.skipped {
+                record_last_sync(
+                    report.done,
+                    report.done,
+                    report.added,
+                    report.updated,
+                    report.failed,
+                    reason,
+                );
+            }
             log::info!(
                 target: "index",
-                "索引同步结束（{reason}）：{}（本轮 {} 页 / {} 条，总计 {} 条，用时 {}ms）",
+                "索引同步结束（{reason}）：新增 {} 更新 {} 失败 {}；{}（本轮 {} 页 / 写入 {} 条，总计 {} 条，用时 {}ms）",
+                report.added,
+                report.updated,
+                report.failed,
                 report.message,
                 report.pages,
                 report.fetched,
@@ -1425,9 +1504,12 @@ pub fn sync_blocking(app: &tauri::AppHandle, reason: &str) -> Result<SyncReport,
         }
         Err(err) => {
             let cooldown = if is_rate_limited(err) { COOLDOWN_MS } else { 0 };
+            // 失败也是一轮“已结束”的同步：complete=true / ok=false，底栏据此显示“今日同步失败”；
+            // 部分分页 / 暂停（scan 返回 Ok(done=false)）仍是 complete=false，不能冒充失败或成功。
+            record_last_sync(false, true, 0, 0, 1, reason);
             log::warn!(
                 target: "index",
-                "索引同步中断（{reason}）：{}（{}ms，冷却={}ms）",
+                "索引同步中断（{reason}）：failed=1（本轮未完成，新增/更新未计入）；{}（{}ms，冷却={}ms）",
                 err.message,
                 now_ms().saturating_sub(started),
                 cooldown
@@ -1462,7 +1544,7 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
     //    以下三种情况绝不放行闸门：
     //    - 有断点（暂停中 / 上次中断过）；
     //    - 计划结构过期（老版本没有 q 窗口，必须重建后接着爬）；
-    //    - 用户点了「继续索引」（force = true，强探一次，不受 24h / 7d 限制）。
+    //    - 用户主动触发的「继续索引 / 立即更新索引」（force = true，强探一次，不受 24h / 7d 限制）。
     let interrupted = snap.paused || !snap.last_error.is_empty();
     if snap.done
         && !interrupted
@@ -1530,6 +1612,7 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
         }
         let probe_count = apply_global_page(app, &probe.items, global_total)?;
         report.fetched += probe_count.written;
+        report.added += probe_count.added;
         let indexed_now = snapshot(app).map(|s| s.items).unwrap_or(snap.items);
         let target = catch_up_target(global_total, snap.unindexable_gap);
         let gap = (global_total - indexed_now as i64).max(0);
@@ -1557,11 +1640,13 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
             // API 没报总量：既无法证明追平，也不该凭空补差，只报告事实
             report.done = true;
             report.message = format!("索引已是最新（{} 条，API 未返回总量）", indexed_now);
+            finalize_report_counts(&mut report);
             return Ok(report);
         }
         if !needs_catch_up {
             report.done = true;
             report.message = format!("索引已是最新（{} / {} 条）", indexed_now, global_total);
+            finalize_report_counts(&mut report);
             return Ok(report);
         }
 
@@ -1629,6 +1714,7 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
                 global_total,
             )?;
             report.fetched += count.written;
+            report.added += count.added;
             added_total += count.added;
             let indexed_now = snapshot(app).map(|s| s.items).unwrap_or(window.indexed);
             window.record_page(result.items.len(), indexed_now, page_total);
@@ -1725,6 +1811,7 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
                 );
             }
         }
+        finalize_report_counts(&mut report);
         return Ok(report);
     }
 
@@ -1901,14 +1988,15 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
         }
         // 页码 +1（不是 + 每页条数）：这就是之前「只能爬到 850」的根源
         let next_page = part.cursor + 1;
-        report.fetched += apply_partition_page(
+        let upsert = apply_partition_page(
             app,
             &result.items,
             next_page,
             part_total,
             global_total,
-        )?
-        .written;
+        )?;
+        report.fetched += upsert.written;
+        report.added += upsert.added;
         let current = snapshot(app)?;
         report.indexed = current.items;
         report.total_count = global_total;
@@ -1962,6 +2050,7 @@ fn scan(app: &tauri::AppHandle, force: bool) -> Result<SyncReport, ApiFailure> {
     } else {
         format!("已收录 {} 条，后台会继续补充", report.indexed)
     };
+    finalize_report_counts(&mut report);
     Ok(report)
 }
 
@@ -2064,6 +2153,13 @@ pub fn status_for_app(app: &tauri::AppHandle) -> IndexStatus {
         paused,
         last_error,
         resumable,
+        last_sync_added: rt.last_sync_added,
+        last_sync_updated: rt.last_sync_updated,
+        last_sync_failed: rt.last_sync_failed,
+        last_sync_at_ms: rt.last_sync_at_ms,
+        last_sync_reason: rt.last_sync_reason.clone(),
+        last_sync_complete: rt.last_sync_complete,
+        last_sync_ok: rt.last_sync_ok,
     }
 }
 

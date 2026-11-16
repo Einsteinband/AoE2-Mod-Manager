@@ -3,8 +3,8 @@ import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted,
 import { useI18n } from "vue-i18n";
 
 const emit = defineEmits<{
-  /** 侧栏「我的收藏」= 进入独立的收藏工作区（不再是本页的筛选态） */
-  (e: "open-favorites"): void;
+  /** 侧栏「收藏」= 进入独立收藏工作区；可带收藏内部二级分类 */
+  (e: "open-favorites", scope: "all" | "installed" | "uninstalled"): void;
 }>();
 import OnlineModCard from "./OnlineModCard.vue";
 import PageShell from "./layout/PageShell.vue";
@@ -46,7 +46,7 @@ import {
   sessionPhase,
   setStatusMessageKey,
 } from "../sessionState";
-import { customNameOf, ensureUserData, favoriteCount, isFavorite, setCustomName, setFavorite } from "../userData";
+import { customNameOf, ensureUserData, isFavorite, setCustomName, setFavorite } from "../userData";
 import { rememberOnlineMeta } from "../favoriteMeta";
 import { useToast } from "../composables/useToast";
 import { useContextMenu } from "../composables/useContextMenu";
@@ -118,8 +118,6 @@ const list = useOnlineList({
   onNetworkInterrupted: () => showToast(t("online.networkInterrupted"), "error"),
   // 本地搜索与官方列表互斥：切官方分类 / 来源 / 收藏时清空本地搜索框
   clearLocalSearch: () => localSearch.clearLocalSearch(),
-  // 收藏聚合视图来源判定：磁盘上有没有这个模组的安装目录（不看当前页面模式）
-  hasLocalCopy: (modId: number) => !!installed.localIndex.value[modId],
 });
 
 const detail = useOnlineDetail({ selection, showToast });
@@ -134,7 +132,6 @@ const install = useOnlineInstall({
 
 const sessionCtl = useOnlineSession({
   reloadAfterLogout: () => list.reload(false),
-  resetFavoritePool: list.resetFavoritePool,
   onLoginStart: () => {
     install.clearMessages();
   },
@@ -165,7 +162,6 @@ const {
   moreError,
   hasMore,
   onlySubscribed,
-  favoritesOnly,
   noCacheOffline,
   activeTag,
   sentinel,
@@ -187,7 +183,6 @@ const {
   titleSub,
   sizeText,
   diskText,
-  fileCountText,
   ratingText,
   versionText,
   createdText,
@@ -624,14 +619,11 @@ const visibleItems = computed<OnlineMod[]>(() => {
 
 const heading = computed(() => {
   if (localMode.value) return t("online.localSearchHeading", { q: localTerm.value });
-  if (favoritesOnly.value) return t("favorites.heading");
   if (onlySubscribed.value) return t("online.headingSubscribed");
   return query.value.trim() ? t("online.headingSearch") : t("online.headingAll");
 });
 
 const activeTagName = computed(() => {
-  // 收藏视图：分类已让位，标题栏直接说明作用域
-  if (favoritesOnly.value) return t("favorites.scopeHint");
   if (list.effectiveTag.value === null) return t("sidebar.allContent");
   const hit = tags.value.find((item) => item.modTypeId === list.effectiveTag.value);
   return hit ? tagLabel(hit) : t("online.tagFallback", { id: list.effectiveTag.value });
@@ -1016,7 +1008,6 @@ onUnmounted(() => {
     <template #sidebar>
       <OnlineSidebar
         :only-subscribed="onlySubscribed"
-        :favorites-only="favoritesOnly"
         :active-tag="activeTag"
         :tags="tags"
         :tags-error="tagsError"
@@ -1024,9 +1015,8 @@ onUnmounted(() => {
         :net-clearing="netClearing"
         :net-error="netError"
         :net-message="netMessage"
-        :favorite-count="favoriteCount"
         @pick-subscribed="pickSubscribed"
-        @open-favorites="emit('open-favorites')"
+        @open-favorites="emit('open-favorites', $event)"
         @pick-tag="pickTag"
         @refresh-session="refreshSession"
       />
@@ -1037,11 +1027,7 @@ onUnmounted(() => {
       <div class="content-head">
         <h2>{{ heading }}</h2>
         <span class="hint">
-          <!-- 收藏视图：不展示官方「共 N 条」总数（那是查询总数，与收藏无关），只报本地命中数 -->
-          <template v-if="favoritesOnly">
-            {{ t("favorites.localHint", { n: visibleItems.length }) }}
-          </template>
-          <template v-else-if="localMode">
+          <template v-if="localMode">
             {{ t("online.localSearchFound", { n: localTotal }) }}
             <template v-if="localIndexed > 0">
               · {{ t("online.localSearchIndexed", { n: localIndexed }) }}
@@ -1124,15 +1110,8 @@ onUnmounted(() => {
         </div>
 
         <template v-else>
-          <!-- 收藏视图的空态必须排在前面：它是纯本地结果，
-               不能报“官方接口没返回”这种误导文案 -->
-          <div v-if="favoritesOnly && !localMode && !visibleItems.length" class="state-panel">
-            <h2>⭐ {{ t("favorites.empty") }}</h2>
-            <p>{{ t("favorites.localEmpty") }}</p>
-          </div>
-
           <!-- 本地搜索空态：与官方接口完全无关，只说本地索引的情况。 -->
-          <div v-else-if="localMode && !visibleItems.length && !localSearching" class="state-panel">
+          <div v-if="localMode && !visibleItems.length && !localSearching" class="state-panel">
             <h2>{{ t("online.localSearchEmptyTitle") }}</h2>
             <!-- 边爬边搜：索引还没建完时不能说「没有结果」，要说清后台还在继续 -->
             <p v-if="indexBuilding" class="note">{{ t("online.localSearchPartial") }}</p>
@@ -1215,17 +1194,12 @@ onUnmounted(() => {
           />
         </template>
 
-        <!-- 页脚：本地搜索 / 收藏视图不挂哨兵，官方列表挂哨兵继续翻页 -->
+        <!-- 页脚：本地搜索不挂哨兵，官方列表挂哨兵继续翻页 -->
         <template #foot>
           <template v-if="visibleItems.length">
             <!-- 本地搜索：哨兵不挂（v-if 移除后 watch([scrollEl, sentinel]) 自动解绑），一次给完 60 条不翻页 -->
             <div v-if="localMode" class="scroll-foot">
               {{ t("online.localSearchFooter", { n: visibleItems.length }) }}
-            </div>
-            <!-- 收藏视图不挂哨兵：sentinel 为 null 后 watch([scrollEl, sentinel]) 会自动解绑
-                 IntersectionObserver 与滚动监听，从根上停掉自动翻页（双保险：loadMore 内还有一道 guard） -->
-            <div v-else-if="favoritesOnly" class="scroll-foot">
-              {{ t("favorites.footerLoaded", { fav: visibleItems.length, loaded: items.length }) }}
             </div>
             <div v-else ref="sentinel" class="scroll-foot">
               <template v-if="moreError">
@@ -1264,7 +1238,6 @@ onUnmounted(() => {
         :rename-busy="renameBusy"
         :rating-text="ratingText"
         :size-text="sizeText"
-        :file-count-text="fileCountText"
         :disk-text="diskText"
         :version-text="versionText"
         :created-text="createdText"

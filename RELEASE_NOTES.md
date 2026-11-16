@@ -1,3 +1,17 @@
+# v0.5.6 — 2026-11-16
+
+## v0.5.6 - What's New
+
+- **⭐Favorites:** Improved the favorites data source and interaction behavior. Installed favorites keep using cached official metadata instead of switching to local `info.json`, and installing or uninstalling no longer swaps the displayed information.
+- **🗂Index Cache:** Improved the official online mod index cache sync and status display. The settings page now offers a manual "Update Index" action, and the status bar can show longer localized index text without exposing local file paths.
+
+## v0.5.6 - 更新内容
+
+- **⭐收藏功能：** 优化收藏页的数据来源与操作表现。已安装的收藏继续使用缓存的官方元数据，安装或卸载不会切成 `info.json` 的本地信息。
+- **🗂索引缓存：** 优化官方在线模组索引的缓存同步与状态展示。设置页新增“立即更新索引”入口，底栏索引状态可完整显示更长的本地化文本，且悬停不再显示本地文件路径。
+
+---
+
 # v0.5.5 — 2026-11-16
 
 ## v0.5.5 - What's New

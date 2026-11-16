@@ -7,7 +7,7 @@
  *   - 本地状态：一次真实扫描（scanMods），按 WorkshopID 对上收藏项
  * 安装 / 卸载 / 启停只改本地状态，不触碰在线信息。
  */
-import { computed, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, reactive, ref } from "vue";
 import { getSettings, scanMods } from "../api";
 import {
   allCachedItems,
@@ -37,11 +37,13 @@ const IMAGE_BATCH = 60;
 
 export type FavoriteStatusFilter = "all" | "installed" | "uninstalled";
 
-export function useFavorites() {
+function createFavoritesWorkspace() {
   const loading = ref(false);
   const errorRaw = ref<string | null>(null);
   const error = computed(() => (errorRaw.value ? translateBackendMessage(errorRaw.value) : null));
 
+  /** 收藏内部二级分类：全部 / 本地模组（已安装）/ 在线模组（无本地副本） */
+  const scope = ref<FavoriteStatusFilter>("all");
   /** online_cache.json 里的列表条目（最实时的一层） */
   const listPool = ref<Record<number, OnlineMod>>({});
   /** 官方详情缓存（描述 / 版本 / 发布时间） */
@@ -197,16 +199,23 @@ export function useFavorites() {
   }
 
   /** 重新对齐在线信息与本地状态（进入工作区、安装完成、卸载、手动刷新时调用） */
+  let inFlight: Promise<void> | null = null;
   async function refresh(): Promise<void> {
-    loading.value = true;
-    errorRaw.value = null;
-    try {
-      await loadLocal();
-      await loadOnline();
-      await loadCovers();
-    } finally {
-      loading.value = false;
-    }
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      loading.value = true;
+      errorRaw.value = null;
+      try {
+        await loadLocal();
+        await loadOnline();
+        await loadCovers();
+      } finally {
+        loading.value = false;
+      }
+    })().finally(() => {
+      inFlight = null;
+    });
+    return inFlight;
   }
 
   /** 未安装收藏的下载入口：沿用现有队列，不新开安装通道 */
@@ -229,19 +238,29 @@ export function useFavorites() {
     return result.accepted ? { accepted: true, reason: "ok" } : { accepted: false, reason: "busy" };
   }
 
-  onBeforeUnmount(() => {
-    // onImagesReady 的监听由全局单例持有，这里没有可解绑的句柄；保持空实现便于将来迁移
-  });
-
   return {
     loading,
     error,
     entries,
+    scope,
     installedCount,
     uninstalledCount,
     refresh,
     install,
   };
+}
+
+/**
+ * 全应用共享同一个收藏工作区状态：
+ * 侧栏（本地页 / 在线页 / 收藏页）要读同一份计数与分类，
+ * 收藏页切换「本地模组 / 在线模组」也写同一个 scope。
+ * 只创建一次，避免每个入口各自扫描一遍。
+ */
+let sharedWorkspace: ReturnType<typeof createFavoritesWorkspace> | null = null;
+
+export function useFavorites(): ReturnType<typeof createFavoritesWorkspace> {
+  sharedWorkspace ??= createFavoritesWorkspace();
+  return sharedWorkspace;
 }
 
 export type FavoritesWorkspace = ReturnType<typeof useFavorites>;

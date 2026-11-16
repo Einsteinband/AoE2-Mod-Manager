@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { reactive } from "vue";
 import { useI18n } from "vue-i18n";
+import FavoritesNav from "../favorites/FavoritesNav.vue";
 import { tagLabel, type ModTag, type SessionStatus } from "../../online/types";
 
 /**
@@ -38,7 +39,6 @@ const toggleGroup = (key: string) => {
  */
 defineProps<{
   onlySubscribed: boolean;
-  favoritesOnly: boolean;
   activeTag: number | null;
   tags: ModTag[];
   tagsError: string | null;
@@ -46,12 +46,11 @@ defineProps<{
   netClearing: boolean;
   netError: string | null;
   netMessage: string | null;
-  favoriteCount: number;
 }>();
 
 const emit = defineEmits<{
   (event: "pick-subscribed", value: boolean): void;
-  (event: "open-favorites"): void;
+  (event: "open-favorites", scope: "all" | "installed" | "uninstalled"): void;
   (event: "pick-tag", value: number | null): void;
   (event: "refresh-session"): void;
   (event: "logout"): void;
@@ -61,6 +60,9 @@ const { t } = useI18n();
 </script>
 
 <template>
+  <!-- 最顶部：收藏一级入口（独立工作区，不属于本地 / 在线筛选） -->
+  <FavoritesNav :active="false" @open-favorites="emit('open-favorites', $event)" />
+
   <div class="side-group">
     <div
       class="side-title collapsible"
@@ -75,7 +77,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: !onlySubscribed && !favoritesOnly }"
+        :class="{ active: !onlySubscribed }"
         @click="emit('pick-subscribed', false)"
       >
         <span class="label">{{ t("sidebar.allMods") }}</span>
@@ -83,33 +85,10 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: onlySubscribed && !favoritesOnly }"
+        :class="{ active: onlySubscribed }"
         @click="emit('pick-subscribed', true)"
       >
         <span class="label">{{ t("sidebar.subscribed") }}</span>
-      </button>
-    </div>
-  </div>
-
-  <!-- v0.5：我的收藏（只过滤 isFavorite，按 modId 匹配 user_data.json） -->
-  <div class="side-group">
-    <div
-      class="side-title collapsible"
-      :class="{ collapsed: collapsed.favorites }"
-      @click="toggleGroup('favorites')"
-    >
-      <span>{{ t("favorites.groupTitle") }}</span>
-      <span class="side-title-spacer"></span>
-      <svg class="side-caret" viewBox="0 0 8 8" aria-hidden="true"><path d="M2 2 L6 4 L2 6 Z" fill="currentColor"/></svg>
-    </div>
-    <div v-show="!collapsed.favorites">
-      <button
-        type="button"
-        class="side-item"
-        @click="emit('open-favorites')"
-      >
-        <span class="label">⭐ {{ t("favorites.label") }}</span>
-        <span class="count">{{ favoriteCount }}</span>
       </button>
     </div>
   </div>
@@ -128,7 +107,7 @@ const { t } = useI18n();
       <button
         type="button"
         class="side-item"
-        :class="{ active: !favoritesOnly && activeTag === null }"
+        :class="{ active: activeTag === null }"
         @click="emit('pick-tag', null)"
       >
         <span class="label">{{ t("sidebar.allContent") }}</span>
@@ -138,7 +117,7 @@ const { t } = useI18n();
         :key="item.modTypeId"
         type="button"
         class="side-item"
-        :class="{ active: !favoritesOnly && activeTag === item.modTypeId }"
+        :class="{ active: activeTag === item.modTypeId }"
         :title="item.modTypeName"
         @click="emit('pick-tag', item.modTypeId)"
       >

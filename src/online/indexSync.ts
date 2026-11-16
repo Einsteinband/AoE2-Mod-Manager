@@ -27,9 +27,9 @@ let inFlight: Promise<IndexSyncReport> | null = null;
  * 两道保险，任何时刻最多只有一轮同步在飞，不会出现两个任务各爬一遍。
  * 与 `kickIndexSync` 的区别：这里不吞错误，调用方需要知道成功 / 失败。
  */
-export function runIndexSync(): Promise<IndexSyncReport> {
+export function runIndexSync(reason: "manual" | "login" = "manual"): Promise<IndexSyncReport> {
   if (inFlight) return inFlight;
-  const run = indexSync().finally(() => {
+  const run = indexSync(reason).finally(() => {
     if (inFlight === run) inFlight = null;
   });
   inFlight = run;
@@ -45,7 +45,7 @@ export function kickIndexSync(epoch: number): Promise<IndexSyncReport | null> {
   if (inFlight) return inFlight.catch(() => null).then((report) => report ?? null);
   if (epoch <= consumedEpoch) return Promise.resolve(null);
   consumedEpoch = epoch;
-  return runIndexSync().catch((error) => {
+  return runIndexSync("login").catch((error) => {
     console.info("[index] background index build skipped (expected: not signed in / already syncing / rate-limit cooldown)", error);
     return null;
   });

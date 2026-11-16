@@ -4,13 +4,11 @@
  * 边界：只处理**内存里的 ModEntry 列表**，不认识扫描、排序模式、弹窗。
  * 页面、排序模式、批量操作都从这里读 `sorted` / `filtered`，保证三处口径一致。
  *
- * 两条互斥规则原样保留（都是踩过坑的）：
- * 1. 收藏视图与「来源 / 状态 / 官方分类」互斥 —— 叠加会让侧栏计数与列表条数对不上；
- * 2. 标签索引把官方与推断的同名标签合并计数 —— 保证“侧栏显示的数量”与“点开后的条数”一致。
+ * 标签索引把官方与推断的同名标签合并计数 —— 保证“侧栏显示的数量”与“点开后的条数”一致。
  */
 import { computed, ref, watch, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
-import { customNameOf, displayTitle, isFavorite } from "../../userData";
+import { customNameOf, displayTitle } from "../../userData";
 import { TAG_RANK_BY_NAME } from "../../online/types";
 import { updateIds } from "../../modUpdates";
 import type { ModEntry, SortKey, SourceFilter, StatusFilter } from "../../types";
@@ -28,7 +26,6 @@ export interface FilterSnapshot {
   activeTag: string | null;
   sortKey: SortKey;
   order: "DESC" | "ASC";
-  favoritesOnly: boolean;
   updatesOnly: boolean;
 }
 
@@ -64,22 +61,14 @@ function stableTitleCompare(
 
 export function useLocalFilters(deps: {
   mods: ComputedRef<ModEntry[]>;
-  /**
-   * 已卸载 / 未安装的收藏占位条目（见 useUninstalledFavorites）。
-   * **只**在收藏视图里参与渲染：其它视图必须保持“侧栏计数 = 扫描结果条数”。
-   */
-  ghostMods?: ComputedRef<ModEntry[]>;
   collationLocale: ComputedRef<string>;
 }) {
   const { t } = useI18n();
   const { mods, collationLocale } = deps;
-  const ghostMods = deps.ghostMods ?? computed<ModEntry[]>(() => []);
 
   const search = ref("");
   const source = ref<SourceFilter>("all");
   const status = ref<StatusFilter>("all");
-  /** v0.5：只看收藏（只过滤 isFavorite === true，按 WorkshopID 匹配） */
-  const favoritesOnly = ref(false);
   /** v0.7：只看有更新的模组（matched && has_update=true） */
   const updatesOnly = ref(false);
   const sortKey = ref<SortKey>("name");
@@ -107,35 +96,21 @@ export function useLocalFilters(deps: {
 
   const filtered = computed<ModEntry[]>(() => {
     const q = search.value.trim().toLowerCase();
-    /**
-     * 收藏视图与「来源 / 状态 / 官方分类」互斥：
-     * 两套条件叠加时侧栏计数（3 个收藏）与列表条数（48/1037）必然对不上，
-     * 所以收藏视图下只按 isFavorite 过滤（外加搜索关键字）。
-     */
-    const fav = favoritesOnly.value;
-    /**
-     * 收藏视图的数据源 = 已安装条目 ∪ 已卸载/未安装占位条目。
-     * 这是”卸载后卡片不消失”的唯一改动点：占位条目同样按 isFavorite 过滤，天然就在结果里。
-     */
-    const base = fav ? [...mods.value, ...ghostMods.value] : mods.value;
-    return base.filter((m) => {
-      if (fav && !isFavorite(m.workshopId)) return false;
-      if (!fav) {
-        if (updatesOnly.value && !updateIds.value.has(m.id)) return false;
-        if (source.value !== "all") {
-          if (source.value === "imported") {
-            if (m.source !== "imported") return false;
-          } else if (source.value === "local") {
-            if (m.kind !== "local" || m.source === "imported") return false;
-          } else {
-            if (m.kind !== source.value) return false;
-          }
+    return mods.value.filter((m) => {
+      if (updatesOnly.value && !updateIds.value.has(m.id)) return false;
+      if (source.value !== "all") {
+        if (source.value === "imported") {
+          if (m.source !== "imported") return false;
+        } else if (source.value === "local") {
+          if (m.kind !== "local" || m.source === "imported") return false;
+        } else {
+          if (m.kind !== source.value) return false;
         }
-        if (status.value === "enabled" && m.enabled !== true) return false;
-        if (status.value === "disabled" && m.enabled !== false) return false;
-        if (status.value === "unknown" && m.enabled !== null) return false;
-        if (activeTag.value && !m.contentTags.includes(activeTag.value)) return false;
       }
+      if (status.value === "enabled" && m.enabled !== true) return false;
+      if (status.value === "disabled" && m.enabled !== false) return false;
+      if (status.value === "unknown" && m.enabled !== null) return false;
+      if (activeTag.value && !m.contentTags.includes(activeTag.value)) return false;
       if (!q) return true;
       const haystack = [
         displayTitle(m.workshopId, m.displayName),
@@ -246,16 +221,10 @@ export function useLocalFilters(deps: {
 
   const heading = computed(() => {
     if (updatesOnly.value) return t("updates.heading");
-    if (favoritesOnly.value) return t("favorites.heading");
     if (source.value === "local") return t("content.localMods");
     if (source.value === "subscribed") return t("content.subscribedMods");
     return t("content.allMods");
   });
-
-  /** v0.5：本地列表里的收藏数（侧栏计数）—— 已安装 + 已卸载占位，两者都算 */
-  const favoriteLocalCount = computed(
-    () => mods.value.filter((m) => isFavorite(m.workshopId)).length + ghostMods.value.length,
-  );
 
   /** v0.7：有更新的模组数量（侧栏计数） */
   const updatesAvailableCount = computed(() => updateIds.value.size);
@@ -268,49 +237,29 @@ export function useLocalFilters(deps: {
     return t("content.statusAll");
   });
 
-  /** 内容区副标题：收藏视图下明确说明「分类已让位」，避免用户以为分类还在生效 */
-  const contentHint = computed(() =>
-    favoritesOnly.value ? t("favorites.scopeHint") : `${activeTagLabel.value} · ${statusText.value}`,
-  );
-
-  /**
-   * 侧栏「⭐ 我的收藏」开关。
-   * 进入收藏视图时把来源 / 状态 / 分类全部复位：只按收藏过滤，计数与列表条数才一致。
-   */
-  function toggleFavorites(): void {
-    favoritesOnly.value = !favoritesOnly.value;
-    if (!favoritesOnly.value) return;
-    updatesOnly.value = false;
-    source.value = "all";
-    status.value = "all";
-    activeTag.value = null;
-  }
+  const contentHint = computed(() => `${activeTagLabel.value} · ${statusText.value}`);
 
   /** v0.7：切换「只看可更新」视图 */
   function pickUpdatesOnly(): void {
     updatesOnly.value = !updatesOnly.value;
     if (!updatesOnly.value) return;
-    favoritesOnly.value = false;
     source.value = "all";
     status.value = "all";
     activeTag.value = null;
   }
 
-  /** 点来源 / 状态 / 分类：先退出收藏视图，否则条件叠加又会出现计数错位 */
+  /** 点来源 / 状态 / 分类 */
   function pickSource(next: SourceFilter): void {
-    favoritesOnly.value = false;
     updatesOnly.value = false;
     source.value = next;
   }
 
   function pickStatus(next: StatusFilter): void {
-    favoritesOnly.value = false;
     updatesOnly.value = false;
     status.value = next;
   }
 
   function pickTag(next: string | null): void {
-    favoritesOnly.value = false;
     updatesOnly.value = false;
     activeTag.value = next;
   }
@@ -321,7 +270,6 @@ export function useLocalFilters(deps: {
     source.value = "all";
     status.value = "all";
     activeTag.value = null;
-    favoritesOnly.value = false;
     updatesOnly.value = false;
   }
 
@@ -334,7 +282,6 @@ export function useLocalFilters(deps: {
       activeTag: activeTag.value,
       sortKey: sortKey.value,
       order: order.value,
-      favoritesOnly: favoritesOnly.value,
       updatesOnly: updatesOnly.value,
     };
   }
@@ -346,7 +293,6 @@ export function useLocalFilters(deps: {
     activeTag.value = snap.activeTag;
     sortKey.value = snap.sortKey;
     order.value = snap.order;
-    favoritesOnly.value = snap.favoritesOnly;
     updatesOnly.value = snap.updatesOnly;
   }
 
@@ -363,7 +309,6 @@ export function useLocalFilters(deps: {
     search,
     source,
     status,
-    favoritesOnly,
     updatesOnly,
     sortKey,
     order,
@@ -375,9 +320,7 @@ export function useLocalFilters(deps: {
     inferredTagList,
     heading,
     contentHint,
-    favoriteLocalCount,
     updatesAvailableCount,
-    toggleFavorites,
     pickUpdatesOnly,
     pickSource,
     pickStatus,

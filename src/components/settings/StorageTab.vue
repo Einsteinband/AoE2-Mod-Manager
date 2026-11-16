@@ -11,8 +11,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import ConfirmDialog from "../ConfirmDialog.vue";
-import { msgText, normalizeBackendError, type Msg } from "../../format";
+import { formatDateTime, msgText, normalizeBackendError, type Msg } from "../../format";
 import type { DataDirView } from "../../types";
+import { indexBar, refreshIndexStatus, retryIndexSync } from "../../online/indexStatusStore";
 
 const { t } = useI18n();
 
@@ -38,6 +39,88 @@ const dataDirError = ref<Msg | null>(null);
 /** 已选好、等待二次确认的目标目录（null = 没有待确认的迁移） */
 const migrateTarget = ref<string | null>(null);
 const migrateError = ref<string | null>(null);
+
+// ---------------- 在线模组索引（复用全局索引状态，不另建状态） ----------------
+
+interface IndexSyncView {
+  atMs: number;
+  added: number;
+  complete: boolean;
+  ok: boolean;
+}
+
+function localDayKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+function isToday(ms: number): boolean {
+  return localDayKey(ms) === localDayKey(Date.now());
+}
+
+function clockText(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** IndexStatus 的 lastSync* 与全局 lastSync 取较新的一份，避免手动完成后设置页短暂落后 */
+const indexSyncInfo = computed<IndexSyncView | null>(() => {
+  const st = indexBar.status;
+  const last = indexBar.lastSync;
+  const fromStatus: IndexSyncView | null = st?.lastSyncAtMs
+    ? {
+        atMs: st.lastSyncAtMs,
+        added: st.lastSyncAdded,
+        complete: st.lastSyncComplete,
+        ok: st.lastSyncOk,
+      }
+    : null;
+  const fromLast: IndexSyncView | null = last
+    ? { atMs: last.atMs, added: last.added, complete: last.complete, ok: last.ok }
+    : null;
+  if (fromStatus && fromLast) return fromLast.atMs >= fromStatus.atMs ? fromLast : fromStatus;
+  return fromLast ?? fromStatus;
+});
+
+const indexCountText = computed(() =>
+  indexBar.status
+    ? t("settings.onlineIndexCount", { n: indexBar.status.indexed })
+    : t("settings.onlineIndexLoading"),
+);
+
+/** 冷启动时 Rust 的 lastSync* 只在内存里；退回索引文件的持久更新时间，避免把已有索误导成“尚未同步” */
+const indexLastSyncAtMs = computed(
+  () => indexSyncInfo.value?.atMs ?? indexBar.status?.updatedAtMs ?? 0,
+);
+
+const indexLastSyncText = computed(() => {
+  const atMs = indexLastSyncAtMs.value;
+  if (!atMs) return t("settings.onlineIndexNever");
+  if (isToday(atMs)) {
+    return t("settings.onlineIndexLastToday", { time: clockText(atMs) });
+  }
+  return t("settings.onlineIndexLastAt", { time: formatDateTime(atMs) });
+});
+
+const indexResultText = computed(() => {
+  const info = indexSyncInfo.value;
+  if (!info) return "";
+  if (!info.complete) return t("settings.onlineIndexLastPartial");
+  if (!info.ok) return t("settings.onlineIndexLastFailed");
+  if (!isToday(info.atMs)) return "";
+  return t("settings.onlineIndexAddedToday", { n: info.added });
+});
+
+const indexBusy = computed(
+  () => indexBar.retrying || indexBar.status?.syncing === true,
+);
+
+/** 唯一入口：复用底栏同一个 retryIndexSync()（内部 reason="manual"），不是第二条同步链路 */
+async function updateOnlineIndex(): Promise<void> {
+  if (indexBusy.value) return;
+  await retryIndexSync();
+}
 
 const dataDirSizeText = computed(() => {
   const view = dataDirView.value;
@@ -124,6 +207,8 @@ async function runMigrate() {
 
 onMounted(() => {
   void loadDataDir();
+  // 设置页打开时读一次真实索引状态；观察器仍由 App 顶层统一持有
+  void refreshIndexStatus();
 });
 </script>
 
@@ -178,6 +263,36 @@ onMounted(() => {
     <div v-if="dataDirError" class="settings-msg error">{{ msgText(dataDirError) }}</div>
     <div v-else-if="dataDirMessage" class="settings-msg">{{ msgText(dataDirMessage) }}</div>
 
+    <div class="settings-sep"></div>
+
+    <!-- 在线模组索引：手动触发复用底栏同一个同步入口，不另起统计 -->
+    <div class="settings-row index-sync-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settings.onlineIndexTitle") }}</span>
+        <span class="row-note">{{ t("settings.onlineIndexNote") }}</span>
+        <div class="index-sync-meta">
+          <span>{{ indexCountText }}</span>
+          <span>{{ indexLastSyncText }}</span>
+          <span v-if="indexResultText">{{ indexResultText }}</span>
+        </div>
+      </div>
+      <div class="index-sync-actions">
+        <button
+          type="button"
+          class="settings-check"
+          :disabled="indexBusy"
+          @click="updateOnlineIndex"
+        >
+          <span v-if="indexBusy" class="spinner"></span>
+          {{
+            indexBusy
+              ? t("settings.onlineIndexUpdating")
+              : t("settings.onlineIndexUpdate")
+          }}
+        </button>
+      </div>
+    </div>
+
     <!-- 数据目录迁移的二次确认（含登录凭证，绝不能直接执行） -->
     <ConfirmDialog
       v-if="migrateTarget"
@@ -222,6 +337,24 @@ onMounted(() => {
   justify-content: flex-start;
   gap: 6px;
   flex-wrap: wrap;
+}
+.index-sync-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.index-sync-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: calc(11px * var(--global-scale));
+  line-height: 1.6;
+  color: var(--parch-dim);
+}
+.index-sync-meta span + span::before {
+  content: "·";
+  margin: 0 6px;
+  color: var(--muted);
 }
 .cache-dir-badge {
   margin-left: 6px;

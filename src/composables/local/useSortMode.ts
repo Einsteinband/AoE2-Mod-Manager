@@ -110,7 +110,6 @@ export function useSortMode(deps: {
     filters.source.value = "all";
     filters.status.value = "all";
     filters.activeTag.value = null;
-    filters.favoritesOnly.value = false;
     filters.sortKey.value = "priority";
 
     // v1.2：排序只针对已启用模组。未启用模组的 Priority 没有实际意义，

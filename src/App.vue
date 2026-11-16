@@ -48,6 +48,7 @@ import { hydrateFavoriteMeta } from "./favoriteMeta";
 import { normalizeBackendError } from "./format";
 import { SORT_OPTIONS } from "./online/types";
 import { useToast } from "./composables/useToast";
+import { useFavorites } from "./favorites/useFavorites";
 import { useViewPrefs } from "./composables/useViewPrefs";
 import {
   normalizeOnlineSortForSetting,
@@ -81,8 +82,35 @@ import { useGameLaunch } from "./composables/useGameLaunch";
  */
 
 // ---------------- 页面模式 ----------------
-// favorites = 第三个独立工作区（官方在线信息 + 本机安装状态），不是本地/在线页的筛选态
+// favorites = 独立收藏工作区（官方在线信息 + 本机安装状态），由侧栏「收藏」进入，
+// 顶层「本地 / 在线」只决定浏览页，不参与、不过滤收藏内容。
 const mode = ref<"local" | "online" | "favorites">("local");
+
+/**
+ * 顶部「本地模组 / 在线模组」的高亮上下文：
+ * 进入收藏后 mode 变成 favorites，但顶部仍需保留“从哪个主板块进入收藏”的高亮，
+ * 因此单独记住最后一次非收藏板块，避免收藏态把两个板块一起置为未选中。
+ */
+const lastMainSection = ref<"local" | "online">("local");
+const mainSection = computed<"local" | "online">(() =>
+  mode.value === "favorites" ? lastMainSection.value : mode.value,
+);
+watch(
+  mode,
+  (next) => {
+    if (next !== "favorites") lastMainSection.value = next;
+  },
+  { immediate: true },
+);
+
+/** 共享收藏工作区：侧栏计数与二级分类都读这里，避免每个入口各建一套状态 */
+const favoritesWorkspace = useFavorites();
+
+/** 侧栏「收藏 / 本地模组 / 在线模组」入口：进入收藏工作区并切到对应分类 */
+function openFavorites(scope: "all" | "installed" | "uninstalled"): void {
+  favoritesWorkspace.scope.value = scope;
+  mode.value = "favorites";
+}
 
 // ---------------- 收藏页搜索/排序（顶栏持有） ----------------
 const favoritesSearch = ref("");
@@ -560,13 +588,16 @@ onMounted(async () => {
   // 底部状态栏的索引进度：全局观察器（自动任务由 Rust 启动，前端只负责订阅与展示）
   void startIndexStatusWatch();
   void ensureUserData().then(() => hydrateFavoriteMeta()).catch(() => undefined);
+  // 收藏工作区只建一次：启动时预热计数，侧栏在任何页面都能显示收藏 / 本地模组 / 在线模组数量
+  void favoritesWorkspace.refresh();
 
   // 下载完成 → 通知 LocalBrowser 重扫
   offDownloadSettled = onTaskSettled((task) => {
     if (task.status !== "done") return;
     localRef.value?.refresh();
-    // 安装 / 卸载只改收藏页的本地状态，信息区保持官方来源
-    void favoritesRef.value?.refresh();
+    // 安装 / 卸载只改收藏的本地状态：刷新共享工作区，侧栏计数与收藏内部分类一起更新，
+    // 信息区保持官方来源（收藏页没挂载时也要更新，否则本地 / 在线页的侧栏计数会过期）。
+    void favoritesWorkspace.refresh();
   });
 
   try {
@@ -643,6 +674,7 @@ onBeforeUnmount(() => {
 <template>
   <AppShell
     v-model:mode="mode"
+    :main-section="mainSection"
     :author-url="AUTHOR_URL"
     :warning-count="localRef?.warnings?.length ?? 0"
     @open-author="openAuthorPage"
@@ -816,7 +848,7 @@ onBeforeUnmount(() => {
         :mod-root="modRoot"
         :view-mode="viewMode"
         :card-size="cardSize"
-        @open-favorites="mode = 'favorites'"
+        @open-favorites="openFavorites"
       />
     </KeepAlive>
 
@@ -829,7 +861,7 @@ onBeforeUnmount(() => {
         v-model:order="onlineOrder"
         :view-mode="viewMode"
         :card-size="cardSize"
-        @open-favorites="mode = 'favorites'"
+        @open-favorites="openFavorites"
       />
     </KeepAlive>
 
@@ -844,6 +876,8 @@ onBeforeUnmount(() => {
         :view-mode="viewMode"
         :card-size="cardSize"
         @open-online="mode = 'online'"
+        @open-local="mode = 'local'"
+        @reset-search="favoritesSearch = ''"
       />
     </KeepAlive>
 

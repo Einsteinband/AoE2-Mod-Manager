@@ -14,15 +14,15 @@
  * 官方搜索词 / 排序 / 升降序由顶栏（App.vue）持有，这里只通过 deps 读取，不自己维护一份。
  */
 import { computed, ref, type Ref } from "vue";
-import { allCachedItems, readCachedPages, readInstalledPages } from "../../online/cache";
+import { readCachedPages, readInstalledPages } from "../../online/cache";
 import { messageOf } from "../../online/errors";
 import { isNetworkError, isNetworkFailure } from "../../online/networkError";
 import { findMods, installedMods } from "../../online/service";
 import { isApiFailure, type OnlineMod } from "../../online/types";
 import { ONLINE_SIZE_SORT, validSize } from "./sortOnlineMods";
 import { sessionPhase, setStatusMessageKey } from "../../sessionState";
-import { ensureUserData, favoriteIdSet, isFavorite } from "../../userData";
-import { favoriteMetaOf } from "../../favoriteMeta";
+
+
 import type { OnlineSelection } from "./useOnlineSelection";
 
 /** 每批加载数量：本地网格每行 6 个（约 197px 列宽），24 = 4 行 */
@@ -49,29 +49,6 @@ function clockText(ms: number): string {
   const date = new Date(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
   return pad(date.getHours()) + ":" + pad(date.getMinutes());
-}
-
-/** 最低限度的占位列表项：只有离线元数据里有的字段，其余留空，界面自行降级展示 */
-function placeholderFavorite(modId: number): OnlineMod {
-  const meta = favoriteMetaOf(modId);
-  return {
-    modId,
-    title: meta?.title?.trim() || `#${modId}`,
-    creator: meta?.creator ?? null,
-    thumbnail: meta?.thumbnailUrl ?? null,
-    installs: null,
-    installsTruncated: false,
-    rating: null,
-    modStatus: null,
-    userInstalled: false,
-    userDownloaded: false,
-    updateAvailable: false,
-    gameTitleId: 2,
-    tagIds: meta?.tagIds ?? [],
-    tagNames: meta?.tagNames ?? [],
-    fileSize: null,
-    raw: {},
-  };
 }
 
 /** 只有字段真的变了才写回：避免无意义的响应式更新让卡片重绘（“不闪”的关键） */
@@ -118,11 +95,6 @@ export function useOnlineList(deps: {
   onNetworkInterrupted?: () => void;
   /** 退出本地搜索态（返回调用前是否处于本地搜索视图）—— 与官方列表互斥 */
   clearLocalSearch: () => boolean;
-  /**
-   * 「我的收藏」是聚合视图：同一个 ID 可能是本机已安装副本。
-   * 页面层用本机安装索引回答这个问题，收藏项据此记下来源（`origin`）。
-   */
-  hasLocalCopy?: (modId: number) => boolean;
 }) {
   const { selection, scrollEl } = deps;
 
@@ -140,10 +112,6 @@ export function useOnlineList(deps: {
   const cursor = ref(1);
 
   const onlySubscribed = ref(false);
-  /** v0.7：只看收藏（纯本地：user_data.json 的收藏 ID × 缓存池，绝不发网络请求） */
-  const favoritesOnly = ref(false);
-  /** 收藏视图的本地候选池（online_cache.json 里的全部条目，只读一次） */
-  const favoritePool = ref<OnlineMod[] | null>(null);
   /** 当前 query/tag/服务端排序条件命中的本地列表缓存大小映射；只按 modId 补当前列表缺失大小。 */
   const cachedSizeByModId = ref<Map<number, number>>(new Map());
   /** true = 断网且该分类无缓存：显示“暂无本地缓存”的空态，不发任何请求 */
@@ -155,16 +123,12 @@ export function useOnlineList(deps: {
   const activeTag = ref<number | null>(null);
 
   /**
-   * 实际生效的分类：收藏视图下一律为 null。
-   * 单一出口 —— 请求参数、缓存 key、前端过滤全部只读它，
-   * 避免「收藏 + 官方分类」叠加导致侧栏计数与列表条数对不上（如 3 收藏却只剩 48/1037）。
+   * 实际生效的分类：已订阅接口不支持 tags 过滤，单一出口保证请求参数 / 缓存 key / 前端过滤口径一致。
    */
-  const effectiveTag = computed<number | null>(() => (favoritesOnly.value ? null : activeTag.value));
+  const effectiveTag = computed<number | null>(() => activeTag.value);
 
   /** 网格实际渲染的官方列表（本地搜索态由页面另行决定，不在这里掺和） */
-  const visibleOfficialItems = computed<OnlineMod[]>(() =>
-    favoritesOnly.value ? items.value.filter((m) => isFavorite(m.modId)) : items.value,
-  );
+  const visibleOfficialItems = computed<OnlineMod[]>(() => items.value);
 
   /** 请求序号：筛选条件变化时自增，丢弃过期响应 */
   let seq = 0;
@@ -205,7 +169,7 @@ export function useOnlineList(deps: {
   /** 当前筛选条件的签名：变了 = 另一个列表（整体替换），没变 = 同一列表（逐条比对） */
   function signatureOf(): string {
     return [
-      favoritesOnly.value ? "fav" : onlySubscribed.value ? "sub" : "all",
+      onlySubscribed.value ? "sub" : "all",
       deps.query.value.trim().toLowerCase(),
       deps.sort.value,
       deps.order.value,
@@ -334,62 +298,6 @@ export function useOnlineList(deps: {
   }
 
   /**
-   * 「⭐ 我的收藏」：纯本地视图。
-   * 数据源 = user_data.json 的收藏 ID ×（缓存池 + 当前列表），
-   * **绝不调用 Find / Installed**，断网也完全可用。
-   */
-  async function loadFavorites(mode: "merge" | "replace"): Promise<void> {
-    if (!favoritePool.value) {
-      try {
-        const cached = await allCachedItems();
-        favoritePool.value = cached.filter((mod) => typeof mod?.modId === "number");
-      } catch {
-        favoritePool.value = [];
-      }
-    }
-    const byId = new Map<number, OnlineMod>();
-    for (const mod of favoritePool.value ?? []) byId.set(mod.modId, mod);
-    // 当前列表可能比缓存更新（刚装过 / 刚翻到），以它为准
-    for (const mod of items.value) byId.set(mod.modId, mod);
-
-    await ensureUserData().catch(() => undefined);
-    const favorites = favoriteIdSet.value;
-    const matched = [...byId.values()]
-      .filter((mod) => favorites.has(mod.modId))
-      .sort((a, b) => (b.installs ?? 0) - (a.installs ?? 0));
-
-    /**
-     * v0.6：收藏过但「缓存池 + 当前列表」里都没有的 ID（从未下载、或缓存被清）
-     * → 用离线元数据拼一条占位列表项，保证“只要收藏过就一定显示”。
-     * 点开详情仍走原有 online_detail（缓存优先），可正常下载安装。
-     */
-    for (const id of favorites) {
-      if (matched.some((mod) => mod.modId === id)) continue;
-      matched.push(placeholderFavorite(id));
-    }
-
-    /**
-     * 来源标记：收藏是聚合视图，必须把「本机有安装副本」这件事随条目一起带下去，
-     * 否则合并 / 筛选 / 排序 / 打开详情之后就被当成纯在线模组（封面会去请求服务器）。
-     * 用浅拷贝而不是原地改：pool 里的对象还会被搜索列表复用，不能污染。
-     */
-    const withOrigin: OnlineMod[] = matched.map((mod) => ({
-      ...mod,
-      origin: deps.hasLocalCopy?.(mod.modId) ? "local" : "online",
-    }));
-
-    totalCount.value = withOrigin.length;
-    hasMore.value = false;
-    cursor.value = 1;
-    error.value = null;
-    loading.value = false;
-    loadingMore.value = false;
-    applyList(withOrigin, mode);
-    setStatusMessageKey("favorites.localHint", { n: withOrigin.length });
-    deps.syncImages(withOrigin);
-  }
-
-  /**
    * 列表加载唯一入口（官方搜索专用）。
    *
    * 规则（严格按需求）：
@@ -410,13 +318,6 @@ export function useOnlineList(deps: {
 
     // 换筛选：先归零（在替换数据之前，避免高度变化导致跳动）
     if (mode === "replace") resetScrollToTop();
-
-    // 收藏：纯本地，直接返回（不发任何网络请求）
-    if (favoritesOnly.value) {
-      listSignature = signature;
-      await loadFavorites(mode);
-      return;
-    }
 
     // 本地搜索不再掺入官方列表——两条搜索链路彻底分开，这里只管官方（缓存 → /Find）
     const cached = await loadCachePages(1);
@@ -564,7 +465,7 @@ export function useOnlineList(deps: {
   async function loadMore(): Promise<void> {
     if (loading.value || loadingMore.value || !hasMore.value) return;
     // 收藏视图纯本地：不翻页、不发请求
-    if (favoritesOnly.value || error.value || !items.value.length) return;
+    if (error.value || !items.value.length) return;
     // 连续滚轮 / 惯性滚动：两次加载之间至少间隔 900ms
     const now = Date.now();
     if (now - lastLoadMoreMs < MIN_LOAD_MORE_GAP_MS) return;
@@ -647,8 +548,6 @@ export function useOnlineList(deps: {
   function keepFilling(): void {
     const el = scrollEl.value;
     const marker = sentinel.value;
-    // 收藏视图不补页：保持视口不变量只会变成无意义的循环请求
-    if (favoritesOnly.value) return;
     if (!el || !marker || !hasMore.value || moreError.value) return;
     const box = el.getBoundingClientRect();
     const markerBox = marker.getBoundingClientRect();
@@ -670,20 +569,14 @@ export function useOnlineList(deps: {
   }
 
   function pickTag(id: number | null): void {
-    // 分类与收藏视图互斥：选了分类就必然要退出收藏视图
-    const wasFavorites = favoritesOnly.value;
-    if (wasFavorites) favoritesOnly.value = false;
     // 点官方分类 = 回到官方列表，本地搜索框自动清空
     const wasLocal = deps.clearLocalSearch();
-    if (activeTag.value === id && !wasFavorites && !wasLocal) return;
+    if (activeTag.value === id && !wasLocal) return;
     activeTag.value = id;
     void reload();
   }
 
   function pickSubscribed(value: boolean): void {
-    // 来源与收藏视图互斥：在收藏视图里点来源，先退出收藏再按来源重查
-    const wasFavorites = favoritesOnly.value;
-    if (wasFavorites) favoritesOnly.value = false;
     // 切来源也是回官方列表，本地搜索框一并清空
     const wasLocal = deps.clearLocalSearch();
     if (onlySubscribed.value === value && !wasLocal) return;
@@ -693,24 +586,6 @@ export function useOnlineList(deps: {
     if (value) activeTag.value = null;
     noCacheOffline.value = false;
     void reload();
-  }
-
-  /**
-   * 「⭐ 我的收藏」开关（纯本地）。
-   * 切换后 reload() 内部会直接走 loadFavorites()：
-   * 只用 user_data.json 的收藏 ID 匹配「缓存池 + 当前列表」，
-   * **不会调用 Find / Installed**，断网也可用；哨兵被 v-if 移除后自动翻页也会停掉。
-   */
-  function toggleFavorites(): void {
-    // 收藏是纯本地视图，与本地搜索互斥
-    deps.clearLocalSearch();
-    favoritesOnly.value = !favoritesOnly.value;
-    void reload();
-  }
-
-  /** 退出登录后丢弃收藏候选池（下次收藏视图重新读缓存） */
-  function resetFavoritePool(): void {
-    favoritePool.value = null;
   }
 
   /**
@@ -752,7 +627,6 @@ export function useOnlineList(deps: {
     moreError,
     hasMore,
     onlySubscribed,
-    favoritesOnly,
     cachedSizeByModId,
     noCacheOffline,
     activeTag,
@@ -765,8 +639,6 @@ export function useOnlineList(deps: {
     patchMod,
     pickTag,
     pickSubscribed,
-    toggleFavorites,
-    resetFavoritePool,
     rememberScroll,
     restoreScrollTop,
   };

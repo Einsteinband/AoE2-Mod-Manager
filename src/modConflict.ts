@@ -64,8 +64,8 @@ export function buildConflictIndex(mods: ModEntry[]): ConflictIndex {
   const locals: ModEntry[] = [];
   const subs: ModEntry[] = [];
   for (const mod of mods) {
-    // 占位条目（已卸载的收藏，useUninstalledFavorites 里 kind 固定为 "subscribed"）
-    // 在磁盘上并不存在，绝不能参与比对，否则会一片误报。
+    // 已卸载的收藏（详情面板 / 收藏工作区里的 uninstalled 条目）在磁盘上并不存在，
+    // 绝不能参与比对，否则会一片误报。
     if (mod.uninstalled === true) continue;
     if (mod.kind === "local") locals.push(mod);
     else if (mod.kind === "subscribed") subs.push(mod);

@@ -4,7 +4,7 @@
  *
  * 左侧：账号灯（⚪离线 / 🟡验证中 / 🟢已登录），点击弹出登录入口与「立即重新校验」。
  * 中间：动态提示（已从缓存加载 / 正在请求网络数据… / 上次校验时间）。
- * 右侧：代理链路 + 本地模组数 + 当前模式。
+ * 右侧：扫描警告 + 本地索引状态 + 代理链路。
  *
  * 所有登录态都来自 src/sessionState.ts（与在线页共用同一个探测 Promise），
  * 这里绝不做自己的阻塞式检查。
@@ -163,14 +163,14 @@ function clock(ms: number): string {
  * 索引进度不再常驻在线页，而是统一在这里展示：
  * - 自动更新关闭 → 整块隐藏（不显示任何索引字样，也不显示手动入口）；
  * - 同步中 → 真实已处理条数 / 可靠总量（拿不到总量时不带百分比）；
- * - 成功 → 短提示 + 新增条数，随后回到常态；
- * - 失败 → 失败原因 + 唯一「手动重试」按钮（复用同一个同步核心）。
+ * - 完整成功 → 本地条数 + 本轮真实新增（自动：今日已同步；手动：已同步），常驻到下一轮结果；
+ * - 失败 → 本地条数 + 失败状态 + 唯一「手动重试」按钮（复用同一个同步核心）。
  */
 const indexView = computed(() => deriveIndexBar(indexBar));
 
-const indexReason = computed(() =>
-  indexView.value.kind === "failed" ? translateBackendMessage(indexBar.failure) : "",
-);
+function indexBaseText(): string {
+  return t("statusbar.indexReady", { n: indexBar.status?.indexed ?? 0 });
+}
 
 const indexText = computed(() => {
   const st = indexBar.status;
@@ -185,14 +185,25 @@ const indexText = computed(() => {
         ? t("statusbar.indexProgress", { n, total })
         : t("statusbar.indexProgressBare", { n });
     }
-    case "success":
-      return indexView.value.added > 0
-        ? t("statusbar.indexUpdated", { n: indexView.value.added })
-        : t("statusbar.indexLatest");
+    case "success": {
+      const n = indexView.value.added;
+      const suffix = indexView.value.auto
+        ? n > 0
+          ? t("statusbar.indexSyncAutoAdded", { n })
+          : t("statusbar.indexSyncAutoNone")
+        : n > 0
+          ? t("statusbar.indexSyncManualAdded", { n })
+          : t("statusbar.indexSyncManualNone");
+      return `${indexBaseText()} · ${suffix}`;
+    }
     case "ready":
-      return t("statusbar.indexReady", { n: st?.indexed ?? 0 });
-    case "failed":
-      return t("statusbar.indexFailed", { reason: indexReason.value });
+      return indexBaseText();
+    case "failed": {
+      const suffix = indexView.value.auto
+        ? t("statusbar.indexSyncTodayFailed")
+        : t("statusbar.indexSyncManualFailed");
+      return `${indexBaseText()} · ${suffix}`;
+    }
     case "needLogin":
       return t("statusbar.indexNeedLogin");
     default:
@@ -200,12 +211,7 @@ const indexText = computed(() => {
   }
 });
 
-const indexTitle = computed(() => {
-  const st = indexBar.status;
-  if (!st) return t("statusbar.indexTitle");
-  if (indexView.value.kind === "failed") return `${indexReason.value} · ${t("statusbar.indexTitle")}`;
-  return `${t("statusbar.indexTitle")}${st.path ? ` · ${st.path}` : ""}`;
-});
+const indexTitle = computed(() => indexText.value);
 
 async function retryIndex(): Promise<void> {
   if (indexBar.retrying) return;
@@ -592,15 +598,15 @@ onBeforeUnmount(() => {
   letter-spacing: calc(0.2px * var(--ui-tracking));
 }
 
-/* 索引状态块（右侧状态区）：中性信息区，放在代理胶囊之后；
-   窄窗口只省略文字，重试按钮始终可见 */
+/* 索引状态块（右侧状态区）：中性信息区，放在代理胶囊之前；
+   宽屏尽量完整显示，窄屏由省略号截断；重试按钮始终可见 */
 .sb-index {
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  max-width: 240px;
+  max-width: min(560px, 42vw);
   overflow: hidden;
   white-space: nowrap;
   color: var(--parch-dim);
@@ -620,9 +626,11 @@ onBeforeUnmount(() => {
   color: var(--danger-text);
 }
 .sb-index-text {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sb-index-spin {
   flex: 0 0 auto;
@@ -648,15 +656,9 @@ onBeforeUnmount(() => {
 .sb-index-retry:focus-visible {
   outline-color: var(--text-soft);
 }
-/* 窄窗口：右侧索引文字让位（右侧还有统计组与代理胶囊），只保留「手动重试」这种可操作项 */
-@media (max-width: 1200px) {
-  .sb-index-text {
-    display: none;
-  }
-}
 
 .sb-right {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
   gap: 8px;

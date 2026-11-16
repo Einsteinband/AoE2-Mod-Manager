@@ -73,7 +73,6 @@ function mountPanel(props: Record<string, unknown> = {}) {
       renameBusy: false,
       ratingText: "4.5/5",
       sizeText: "5.0 MB",
-      fileCountText: "12",
       diskText: "5.0 MB",
       versionText: "1.0",
       createdText: "2024-01-01",

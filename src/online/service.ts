@@ -313,8 +313,8 @@ export function indexStatus(): Promise<IndexStatus> {
  * 未登录会立刻抛 `unauthenticated`（官方 /Find 匿名 401），调用方静默处理即可；
  * 同一时刻只允许一个同步，重复调用抛 `busy`。
  */
-export function indexSync(): Promise<IndexSyncReport> {
-  return invoke<IndexSyncReport>("online_index_sync");
+export function indexSync(reason: "manual" | "login" = "manual"): Promise<IndexSyncReport> {
+  return invoke<IndexSyncReport>("online_index_sync", { reason });
 }
 
 /**

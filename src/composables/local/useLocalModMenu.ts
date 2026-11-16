@@ -14,7 +14,6 @@ export interface LocalMenuState {
   translating: boolean;
   queued: boolean;
   showingOriginal: boolean;
-  offline: boolean;
 }
 
 export interface LocalMenuLabels {
@@ -31,8 +30,6 @@ export interface LocalMenuLabels {
   openFolder: string;
   browseSite: string;
   deleteMod: string;
-  downloadInstall: string;
-  offlineHint: string;
   notRegisteredHint: string;
 }
 
@@ -42,11 +39,10 @@ export function buildLocalMenuItems(
   labels: LocalMenuLabels,
 ): ContextMenuItem[] {
   const id = mod.workshopId ?? 0;
-  const uninstalled = mod.uninstalled === true;
   const items: ContextMenuItem[] = [];
 
-  // ① 启用 / 禁用：幽灵条目无 mod-status 记录，整项隐藏
-  if (!uninstalled) {
+  // ① 启用 / 禁用：本地列表只包含已安装条目
+  {
     const registered = mod.enabled !== null;
     items.push({
       id: "toggle",
@@ -56,24 +52,13 @@ export function buildLocalMenuItems(
     });
   }
 
-  // ② 幽灵条目：只提供下载安装（与详情面板「下载安装」入口一致）
-  if (uninstalled) {
-    items.push({
-      id: "install",
-      icon: "⬇️",
-      label: labels.downloadInstall,
-      disabled: id <= 0 || state.offline,
-      hint: state.offline ? labels.offlineHint : undefined,
-    });
-  }
-
-  // ③ 收藏 / 翻译 / 备注（无 WorkshopID 不可用；顺序：收藏 → 翻译 → 备注）
+  // ② 收藏 / 翻译 / 备注（无 WorkshopID 不可用；顺序：收藏 → 翻译 → 备注）
   items.push({
     id: "favorite",
     icon: state.favorited ? "⭐" : "☆",
     label: state.favorited ? labels.favorited : labels.favorite,
     disabled: id <= 0,
-    dividerBefore: !uninstalled,
+    dividerBefore: true,
   });
 
   let translateLabel = labels.translateTrigger;
@@ -96,15 +81,13 @@ export function buildLocalMenuItems(
     disabled: id <= 0,
   });
 
-  // ④ 目录 / 官网：幽灵条目无本地目录，只保留官网入口
-  if (!uninstalled) {
-    items.push({
-      id: "folder",
-      icon: "📁",
-      label: labels.openFolder,
-      disabled: !mod.path,
-    });
-  }
+  // ④ 目录 / 官网
+  items.push({
+    id: "folder",
+    icon: "📁",
+    label: labels.openFolder,
+    disabled: !mod.path,
+  });
   items.push({
     id: "website",
     icon: "🌐",
@@ -112,10 +95,8 @@ export function buildLocalMenuItems(
     disabled: id <= 0,
   });
 
-  // ⑤ 危险分组：卸载（幽灵条目隐藏）
-  if (!uninstalled) {
-    items.push({ id: "delete", danger: true, label: labels.deleteMod, dividerBefore: true });
-  }
+  // ⑤ 危险分组：卸载
+  items.push({ id: "delete", danger: true, label: labels.deleteMod, dividerBefore: true });
 
   return items;
 }

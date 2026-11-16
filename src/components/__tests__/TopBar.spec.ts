@@ -173,6 +173,35 @@ describe("TopBar responsive scheduling", () => {
     expect(wrapper.classes("is-compact")).toBe(false);
   });
 
+  it("顶栏只有「本地 / 在线」两个页签，收藏不是顶部入口，且在收藏 mode 下无页签高亮", async () => {
+    const wrapper = mountTopBar();
+    await flushPromises();
+    const tabs = wrapper.findAll(".mode-tabs button");
+    expect(tabs).toHaveLength(2);
+    expect(tabs.map((b) => b.text())).toEqual(["nav.localnav.localShort", "nav.onlinenav.onlineShort"]);
+    expect(wrapper.find(".mode-tabs").text()).not.toContain("nav.favorites");
+
+    await wrapper.setProps({ mode: "favorites" });
+    await flushPromises();
+    expect(wrapper.findAll(".mode-tabs button.active")).toHaveLength(0);
+  });
+
+  it("收藏工作区传入 mainSection 时保留进入收藏前的板块高亮", async () => {
+    const wrapper = mountTopBar();
+    await flushPromises();
+    await wrapper.setProps({ mode: "favorites", mainSection: "local" });
+    await flushPromises();
+    let active = wrapper.findAll(".mode-tabs button.active");
+    expect(active).toHaveLength(1);
+    expect(active[0].text()).toContain("nav.local");
+
+    await wrapper.setProps({ mainSection: "online" });
+    await flushPromises();
+    active = wrapper.findAll(".mode-tabs button.active");
+    expect(active).toHaveLength(1);
+    expect(active[0].text()).toContain("nav.online");
+  });
+
   it("disconnects observer and removes resize listener on unmount", async () => {
     const removeSpy = vi.spyOn(window, "removeEventListener");
     const wrapper = mountTopBar();

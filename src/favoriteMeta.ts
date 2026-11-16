@@ -145,7 +145,7 @@ export function favoriteMetaOf(modId: number | null | undefined): FavoriteMeta |
  * 合并一条元数据：**只补空字段，不覆盖已有内容**。
  * （新拿到的 title 为空时不会把旧标题抹掉，这是崩溃 / 半截数据下的保命行为）
  */
-function mergeEntry(next: FavoriteMeta): boolean {
+function mergeEntry(next: FavoriteMeta, overwrite = false): boolean {
   const key = String(next.modId);
   const current = store.value[key];
   if (!current) {
@@ -154,43 +154,43 @@ function mergeEntry(next: FavoriteMeta): boolean {
   }
   let changed = false;
   const merged: FavoriteMeta = { ...current };
-  if (!merged.title && next.title) {
+  if ((overwrite || !merged.title) && next.title) {
     merged.title = next.title;
     changed = true;
   }
-  if (!merged.creator && next.creator) {
+  if ((overwrite || !merged.creator) && next.creator) {
     merged.creator = next.creator;
     changed = true;
   }
-  if (!merged.description && next.description) {
+  if ((overwrite || !merged.description) && next.description) {
     merged.description = next.description;
     changed = true;
   }
-  if (!merged.tagIds.length && next.tagIds.length) {
+  if ((overwrite || !merged.tagIds.length) && next.tagIds.length) {
     merged.tagIds = next.tagIds;
     changed = true;
   }
-  if (!merged.tagNames.length && next.tagNames.length) {
+  if ((overwrite || !merged.tagNames.length) && next.tagNames.length) {
     merged.tagNames = next.tagNames;
     changed = true;
   }
-  if (!merged.thumbnailUrl && next.thumbnailUrl) {
+  if ((overwrite || !merged.thumbnailUrl) && next.thumbnailUrl) {
     merged.thumbnailUrl = next.thumbnailUrl;
     changed = true;
   }
-  if (merged.publishedMs == null && next.publishedMs != null) {
+  if ((overwrite || merged.publishedMs == null) && next.publishedMs != null) {
     merged.publishedMs = next.publishedMs;
     changed = true;
   }
-  if (merged.updatedMs == null && next.updatedMs != null) {
+  if ((overwrite || merged.updatedMs == null) && next.updatedMs != null) {
     merged.updatedMs = next.updatedMs;
     changed = true;
   }
-  if (!merged.version && next.version) {
+  if ((overwrite || !merged.version) && next.version) {
     merged.version = next.version;
     changed = true;
   }
-  if (merged.installs == null && next.installs != null) {
+  if ((overwrite || merged.installs == null) && next.installs != null) {
     merged.installs = next.installs;
     changed = true;
   }
@@ -222,8 +222,38 @@ export function rememberOnlineMeta(source: MetaSource): void {
   if (changed) persistSoon();
 }
 
-/** 记忆一条本地扫描条目（卸载 / 移出列表前必须调用） */
-export function rememberModMeta(entry: ModEntry | null | undefined): void {
+/**
+ * 记忆一条「刚重新获取到的官方元数据」：**覆盖同名字段**，而不是只补缺。
+ *
+ * 场景：本地 Mod 的 info.json 是旧的，作者可能缺失或写成官方账号名；
+ * 用户点「刷新 Mod 信息」拿到官方 Detail 后，必须让官方值盖掉旧值，
+ * 否则刷新成功但界面仍显示旧作者。空字段不覆盖（官方没给的不清空已有值）。
+ * 写入 localStorage 后重启仍生效，避免回到「作者未知」。
+ */
+export function rememberOfficialMeta(source: MetaSource): void {
+  const modId = Number(source.modId);
+  if (!Number.isFinite(modId) || modId <= 0) return;
+  const changed = mergeEntry(
+    {
+      modId,
+      title: toStr(source.title),
+      creator: toStr(source.creator) || null,
+      description: toStr(source.description) || null,
+      tagIds: toNumList(source.tagIds),
+      tagNames: toStrList(source.tagNames),
+      thumbnailUrl: toStr(source.thumbnail) || null,
+      publishedMs: source.publishedMs ?? null,
+      updatedMs: source.updatedMs ?? null,
+      version: toStr(source.version) || null,
+      installs: source.installs ?? null,
+      savedAtMs: Date.now(),
+    },
+    true,
+  );
+  if (changed) persistSoon();
+}
+
+/** 记忆一条本地扫描条目（卸载 / 移出列表前必须调用） */export function rememberModMeta(entry: ModEntry | null | undefined): void {
   if (!entry) return;
   const modId = Number(entry.workshopId ?? 0);
   if (!Number.isFinite(modId) || modId <= 0) return;

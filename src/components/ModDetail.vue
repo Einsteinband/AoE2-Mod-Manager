@@ -5,7 +5,7 @@ import type { ModEntry, ModStats, ModUpdateItem } from "../types";
 import { deleteModFiles, fileUrl, refreshLocalCover, revealModFolder, toggleModEnabled } from "../api";
 import { fetchImages } from "../online/images";
 import { isRemoteThumbnail, modEntryOrigin } from "../online/modSource";
-import { favoriteMetaOf } from "../favoriteMeta";
+import { favoriteMetaOf, rememberOfficialMeta } from "../favoriteMeta";
 import { activeTaskOfMod, latestTaskOfMod } from "../online/downloadQueue";
 import {
   formatBytes,
@@ -15,7 +15,9 @@ import {
   statusLabel,
 } from "../format";
 import ConfirmDialog from "./ConfirmDialog.vue";
-import { openModWebpage } from "../online/service";
+import ModInfoFields from "./common/ModInfoFields.vue";
+import { modDetail, openModWebpage } from "../online/service";
+import { snapshotFromDetail } from "../favorites/model";
 import { localizedTagName } from "../online/types";
 import {
   activeTranslation,
@@ -129,6 +131,78 @@ const favError = ref<string | null>(null);
 const renameOpen = ref(false);
 const renameBusy = ref(false);
 const renameError = ref<string | null>(null);
+
+/**
+ * 官方元数据刷新（「刷新 Mod 信息」）：
+ * 复用既有 `online_detail`（命中即写入官方详情缓存），成功后把官方字段
+ * **覆盖式**写进 favoriteMeta（localStorage），因此重启后不会退回「作者未知」。
+ * 信息优先级：官方刷新缓存 → 已有官方快照（mod.onlineInfo）→ 本地扫描信息 → 未提供。
+ */
+const infoRefreshing = ref(false);
+const infoError = ref<string | null>(null);
+const officialMeta = computed(() => favoriteMetaOf(props.mod.workshopId));
+const canRefreshInfo = computed(() => (props.mod.workshopId ?? 0) > 0);
+
+function dateText(ms: number | null | undefined): string | null {
+  return ms && ms > 0 ? formatDateTime(ms) : null;
+}
+
+const infoAuthor = computed(() => officialMeta.value?.creator ?? props.mod.author);
+const infoCreated = computed(() =>
+  dateText(officialMeta.value?.publishedMs ?? props.mod.onlineInfo?.publishedMs),
+);
+const infoUpdated = computed(() =>
+  dateText(officialMeta.value?.updatedMs ?? props.mod.onlineInfo?.updatedMs ?? props.mod.lastUpdateMs),
+);
+const infoVersion = computed(() => officialMeta.value?.version ?? props.mod.onlineInfo?.version ?? null);
+const infoInstalls = computed(() => officialMeta.value?.installs ?? props.mod.onlineInfo?.installs ?? null);
+/** 评分：只有收藏条目带官方 onlineInfo 时才显示这一行；本地条目保持原样 */
+const infoRatingText = computed(() => {
+  const info = props.mod.onlineInfo;
+  if (!info) return undefined;
+  return info.rating !== null && info.rating !== undefined
+    ? String(info.rating)
+    : t("labels.notProvided");
+});
+const infoRatingMissing = computed(() => {
+  const info = props.mod.onlineInfo;
+  return !!info && (info.rating === null || info.rating === undefined);
+});
+
+async function refreshModInfo(): Promise<void> {
+  if (infoRefreshing.value) return;
+  const modId = props.mod.workshopId ?? 0;
+  if (modId <= 0) return;
+  infoRefreshing.value = true;
+  infoError.value = null;
+  try {
+    const raw = await modDetail(modId);
+    const snapshot = snapshotFromDetail(modId, raw);
+    if (!snapshot.title && !snapshot.creator && !snapshot.description) {
+      throw new Error("aoe2mm:err:online.emptyDetail");
+    }
+    rememberOfficialMeta({
+      modId,
+      title: snapshot.title,
+      creator: snapshot.creator,
+      description: snapshot.description,
+      tagIds: snapshot.tagIds,
+      tagNames: snapshot.tagNames,
+      thumbnail: snapshot.thumbnailUrl,
+      publishedMs: snapshot.publishedMs,
+      updatedMs: snapshot.updatedMs,
+      version: snapshot.version,
+      installs: snapshot.installs,
+    });
+    showToast(t("detail.infoRefreshed"), "ok");
+  } catch (e) {
+    // 失败只提示，不清空已有信息
+    infoError.value = translateBackendMessage(errorText(e, "detail.infoRefreshFailed"));
+    showToast(infoError.value, "error");
+  } finally {
+    infoRefreshing.value = false;
+  }
+}
 
 /**
  * 收藏 / 备注的即时反馈。
@@ -337,18 +411,18 @@ const confirmMessage = computed(
 /** 有 WorkshopID 才能定位官网页面；无 ID 的本地模组不算失败，只是没得浏览 */
 const canOpenWebsite = computed(() => (props.mod.workshopId ?? 0) > 0);
 
-/** 基本信息区：文件体积（安装后目录统计，非压缩包大小） */
+/** 基本信息区：文件体积（安装后目录统计，非压缩包大小）
+ *  收藏页没有本地 stats：退回官方 onlineInfo.fileSize（与在线详情同一来源），避免显示「—」 */
 const sizeText = computed(() => {
   if (props.statsLoading) return t("detail.counting");
   if (props.stats) return formatBytes(props.stats.sizeBytes);
   if (props.statsError) return translateBackendMessage(props.statsError);
-  return "—";
-});
-
-/** 基本信息区：文件数量 */
-const fileCountText = computed(() => {
-  if (props.statsLoading) return t("detail.counting");
-  if (props.stats) return t("detail.files", { n: props.stats.fileCount.toLocaleString() });
+  if (props.mod.onlineInfo) {
+    const onlineSize = props.mod.onlineInfo.fileSize;
+    return onlineSize !== null && onlineSize !== undefined
+      ? formatBytes(onlineSize)
+      : t("labels.notProvided");
+  }
   return "—";
 });
 
@@ -557,6 +631,7 @@ watch(
     // 换模组时描述折叠状态归零，避免上一个模组的「展开」状态被带过来
     descExpanded.value = false;
     toggleError.value = null;
+    infoError.value = null;
     confirmOpen.value = false;
     deleteError.value = null;
     favError.value = null;
@@ -639,7 +714,7 @@ watch(
         <span v-for="tag in mod.contentTags" :key="tag" class="badge">{{ localizedTagName(tag) }}</span>
       </div>
 
-      <!-- 基本信息：Workshop ID（可复制）+ 文件体积 + 文件数量，紧凑横排 -->
+      <!-- 基本信息：Workshop ID（可复制）+ 文件体积，紧凑横排 -->
       <div class="basic-row">
         <button
           type="button"
@@ -655,13 +730,6 @@ watch(
         <span class="basic-chip">
           <span class="chip-label">{{ t("detail.fileSize") }}</span>
           <span class="chip-value">{{ sizeText }}</span>
-        </span>
-        <span
-          class="basic-chip"
-          :title="stats?.truncated ? t('detail.sizeTruncated') : undefined"
-        >
-          <span class="chip-label">{{ t("detail.fileCount") }}</span>
-          <span class="chip-value">{{ fileCountText }}</span>
         </span>
       </div>
     </section>
@@ -790,6 +858,23 @@ watch(
           <span class="sr-only">{{ t("favorites.rename") }}</span>
         </button>
       </div>
+      <!-- 刷新官方元数据：与「刷新封面」是两个独立操作（这里只动信息，不动图片） -->
+      <div v-if="canRefreshInfo" class="dv-action-row dv-action-secondary">
+        <button
+          type="button"
+          class="dv-btn-ghost info-refresh-btn"
+          :disabled="infoRefreshing"
+          :title="t('detail.refreshInfoTitle')"
+          :aria-label="infoRefreshing ? t('detail.refreshingInfo') : t('detail.refreshInfo')"
+          @click="refreshModInfo"
+        >
+          <span class="info-refresh-glyph" aria-hidden="true">⟳</span>
+          <span>{{ infoRefreshing ? t("detail.refreshingInfo") : t("detail.refreshInfo") }}</span>
+        </button>
+      </div>
+      <div v-if="infoError" class="path-actions">
+        <span class="path-error">{{ infoError }}</span>
+      </div>
       <div v-if="favError" class="path-actions">
         <span class="path-error">{{ translateBackendMessage(favError) }}</span>
       </div>
@@ -854,43 +939,21 @@ watch(
       </div>
     </section>
 
-    <!-- ⑥ 更多信息：作者 / 发布时间 / 更新时间。
+    <!-- ⑥ 更多信息：与在线详情共用 ModInfoFields（同一字段顺序 / 标签 / 缺失态）。
+         数据优先级：官方刷新缓存（favoriteMeta）→ 官方快照（onlineInfo）→ 本地扫描信息。
          本地模组没有可靠的首次发布时间来源：installedAtMs 是本机安装时间、
-         lastUpdateMs 是最近更新时间，都不能冒充发布时间，这里固定显示未知，不推算。 -->
+         lastUpdateMs 是最近更新时间，都不能冒充发布时间，官方没给就显示「未提供」。 -->
     <section class="dv-zone dv-zone-meta">
       <h4 class="dv-zone-title">{{ t("detailPanel.more") }}</h4>
-      <div class="field">
-        <span class="k">{{ t("detail.author") }}</span>
-        <span class="v" :class="{ missing: !mod.author }">
-          {{ mod.author ?? t("detail.authorMissing") }}
-        </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("detail.published") }}</span>
-        <span class="v" :class="{ missing: !mod.onlineInfo?.publishedMs }">
-          {{
-            mod.onlineInfo?.publishedMs
-              ? formatDateTime(mod.onlineInfo.publishedMs)
-              : t("labels.unknown")
-          }}
-        </span>
-      </div>
-      <div v-if="mod.onlineInfo" class="field">
-        <span class="k">{{ t("online.version") }}</span>
-        <span class="v" :class="{ missing: !mod.onlineInfo.version }">
-          {{ mod.onlineInfo.version ?? t("labels.notProvided") }}
-        </span>
-      </div>
-      <div v-if="mod.onlineInfo" class="field">
-        <span class="k">{{ t("online.installs") }}</span>
-        <span class="v" :class="{ missing: mod.onlineInfo.installs === null }">
-          {{ mod.onlineInfo.installs ?? t("labels.notProvided") }}
-        </span>
-      </div>
-      <div class="field">
-        <span class="k">{{ t("detail.lastUpdate") }}</span>
-        <span class="v" :class="{ missing: !mod.lastUpdateMs }">{{ formatDateTime(mod.lastUpdateMs) }}</span>
-      </div>
+      <ModInfoFields
+        :author="infoAuthor"
+        :created-text="infoCreated"
+        :updated-text="infoUpdated"
+        :version-text="infoVersion"
+        :installs="infoInstalls"
+        :rating-text="infoRatingText"
+        :rating-missing="infoRatingMissing"
+      />
     </section>
   </div>
 
@@ -955,5 +1018,20 @@ watch(
 .dv-action-secondary {
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* 「刷新 Mod 信息」：与同排图标按钮同族的文字按钮，高度 / 圆角沿用 .dv-btn-ghost */
+.info-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  height: 30px;
+  white-space: nowrap;
+  font-size: calc(11.5px * var(--global-scale));
+}
+.info-refresh-glyph {
+  font-size: calc(13px * var(--global-scale));
+  line-height: 1;
 }
 </style>

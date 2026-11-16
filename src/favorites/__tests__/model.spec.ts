@@ -55,6 +55,9 @@ const onlineSnapshot: FavoriteOnlineSnapshot = {
   updatedMs: 1791000000000,
   version: "2.7",
   installs: 1281,
+  fileSize: 123456,
+  fileCount: 321,
+  rating: 4.5,
 };
 
 describe("parseOnlineDate", () => {
@@ -82,12 +85,18 @@ describe("snapshotFromDetail", () => {
       lastUpdate: 1791000000,
       installs: 1281,
       imageThumbnail: "https://cdn.example/thumb.jpg",
+      modFileSize: 2048000,
+      fileCount: 12,
+      currentRating: 4.2,
     });
     expect(snapshot.title).toBe("官方标题");
     expect(snapshot.creator).toBe("PoisonousSnakes");
     expect(snapshot.description).toBe("第一行\n第二行");
     expect(snapshot.version).toBe("2.7");
     expect(snapshot.installs).toBe(1281);
+    expect(snapshot.fileSize).toBe(2048000);
+    expect(snapshot.fileCount).toBe(12);
+    expect(snapshot.rating).toBe(4.2);
     expect(snapshot.publishedMs).toBe(Date.parse("2026-08-22T13:43:00"));
     expect(snapshot.updatedMs).toBe(1791000000000);
   });
@@ -132,6 +141,9 @@ describe("buildFavoriteEntry", () => {
     expect(entry.onlineInfo?.publishedMs).toBe(1790000000000);
     expect(entry.onlineInfo?.version).toBe("2.7");
     expect(entry.onlineInfo?.installs).toBe(1281);
+    expect(entry.onlineInfo?.fileSize).toBe(123456);
+    expect(entry.onlineInfo?.fileCount).toBe(321);
+    expect(entry.onlineInfo?.rating).toBe(4.5);
     expect(entry.contentTags).toEqual(["UI"]);
     expect(entry.categorySource).toBe("official");
   });
@@ -150,6 +162,9 @@ describe("buildFavoriteEntry", () => {
     expect(entry.displayName).toBe("官方标题");
     expect(entry.author).toBe("PoisonousSnakes");
     expect(entry.onlineInfo?.installs).toBe(1281);
+    expect(entry.onlineInfo?.fileSize).toBe(123456);
+    expect(entry.onlineInfo?.fileCount).toBe(321);
+    expect(entry.onlineInfo?.rating).toBe(4.5);
     expect(entry.coverUrl).toBe("asset://cache/123.jpg");
   });
 

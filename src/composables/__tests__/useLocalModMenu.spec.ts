@@ -49,8 +49,6 @@ const labels = {
   openFolder: "Open folder",
   browseSite: "Open webpage",
   deleteMod: "Uninstall",
-  downloadInstall: "Download",
-  offlineHint: "Offline",
   notRegisteredHint: "Not registered",
 };
 
@@ -61,7 +59,6 @@ const baseState = {
   translating: false,
   queued: false,
   showingOriginal: false,
-  offline: false,
 };
 
 describe("buildLocalMenuItems", () => {
@@ -93,19 +90,19 @@ describe("buildLocalMenuItems", () => {
     expect(toggle.hint).toBe("Not registered");
   });
 
-  it("ghost (uninstalled) entry hides toggle/folder/delete and shows download", () => {
-    const ghost = makeMod({
+  it("旧收藏幽灵条目的下载入口已移除：即使带 uninstalled 标记也按本地条目出菜单", () => {
+    const stale = makeMod({
       uninstalled: true,
       enabled: null,
       path: "",
       folderName: "",
     });
-    const items = buildLocalMenuItems(ghost, baseState, labels);
+    const items = buildLocalMenuItems(stale, baseState, labels);
     const ids = items.map((i) => i.id);
-    expect(ids).toEqual(["install", "favorite", "translate", "rename", "website"]);
-    expect(ids).not.toContain("toggle");
-    expect(ids).not.toContain("folder");
-    expect(ids).not.toContain("delete");
+    expect(ids).toEqual(["toggle", "favorite", "translate", "rename", "folder", "website", "delete"]);
+    expect(ids).not.toContain("install");
+    // 无 mod-status 记录时启用项禁用并给出提示，而不是走下载安装
+    expect(items.find((i) => i.id === "toggle")!.disabled).toBe(true);
   });
 
   it("mod without workshop id disables favorite/rename/website", () => {
@@ -122,13 +119,5 @@ describe("buildLocalMenuItems", () => {
       labels,
     );
     expect(items.find((i) => i.id === "translate")!.disabled).toBe(true);
-  });
-
-  it("offline ghost download item is disabled with offline hint", () => {
-    const ghost = makeMod({ uninstalled: true, enabled: null, path: "", folderName: "" });
-    const items = buildLocalMenuItems(ghost, { ...baseState, offline: true }, labels);
-    const install = items.find((i) => i.id === "install")!;
-    expect(install.disabled).toBe(true);
-    expect(install.hint).toBe("Offline");
   });
 });

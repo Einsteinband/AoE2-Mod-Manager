@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   decideTopbarLayout,
@@ -18,11 +18,20 @@ const props = withDefaults(
   defineProps<{
     /** 作者主页地址（只用于 <a> 的 href，真正的打开由父组件交给系统浏览器） */
     authorUrl?: string;
+    /**
+     * 顶部主板块高亮上下文。收藏工作区（mode=favorites）下由 App 传入进入收藏前
+     * 的板块，保证顶部仍有一项高亮；不传时退回按 mode 推导。
+     */
+    mainSection?: "local" | "online";
   }>(),
   { authorUrl: "https://github.com/Einsteinband" },
 );
 
 const mode = defineModel<"local" | "online" | "favorites">("mode", { default: "local" });
+
+const activeSection = computed<"local" | "online" | null>(() =>
+  props.mainSection ?? (mode.value === "favorites" ? null : mode.value),
+);
 
 const emit = defineEmits<{
   (event: "open-author"): void;
@@ -319,19 +328,15 @@ onBeforeUnmount(() => {
     </div>
 
     <nav class="mode-tabs">
-      <button type="button" :class="{ active: mode === 'local' }" @click="mode = 'local'">
+      <button type="button" :class="{ active: activeSection === 'local' }" @click="mode = 'local'">
         <span class="nav-full">{{ t("nav.local") }}</span>
         <span class="nav-short">{{ t("nav.localShort") }}</span>
       </button>
-      <button type="button" :class="{ active: mode === 'online' }" @click="mode = 'online'">
+      <button type="button" :class="{ active: activeSection === 'online' }" @click="mode = 'online'">
         <span class="nav-full">{{ t("nav.online") }}</span>
         <span class="nav-short">{{ t("nav.onlineShort") }}</span>
       </button>
-      <!-- 收藏 = 第三个独立工作区（在线信息 + 本地安装状态），不是任何页面的筛选态 -->
-      <button type="button" :class="{ active: mode === 'favorites' }" @click="mode = 'favorites'">
-        <span class="nav-full">{{ t("nav.favorites") }}</span>
-        <span class="nav-short">{{ t("nav.favoritesShort") }}</span>
-      </button>
+      <!-- 收藏不是顶部页签：它由侧栏「收藏」一级入口进入，且不受这里的本地 / 在线状态控制。 -->
     </nav>
 
     <!-- v2.0：搜索 / 排序切换——由父组件塞入 <ModToolbar>，两种模式同一位置。

@@ -27,6 +27,12 @@ export interface FavoriteOnlineSnapshot {
   updatedMs: number | null;
   version: string | null;
   installs: number | null;
+  /** 官方压缩包体积（字节） */
+  fileSize: number | null;
+  /** 官方文件数量 */
+  fileCount: number | null;
+  /** 官方评分 */
+  rating: number | null;
 }
 
 function str(value: unknown): string {
@@ -104,6 +110,9 @@ function emptySnapshot(modId: number): FavoriteOnlineSnapshot {
     updatedMs: null,
     version: null,
     installs: null,
+    fileSize: null,
+    fileCount: null,
+    rating: null,
   };
 }
 
@@ -122,6 +131,10 @@ export function snapshotFromList(mod: OnlineMod): FavoriteOnlineSnapshot {
     updatedMs: parseOnlineDate(pickRaw(raw, ["lastUpdate", "updated", "lastModified"])),
     version: str(pickRaw(raw, ["modVersion", "version"])) || null,
     installs: num(pickRaw(raw, ["installs", "downloadCount", "subscriptions"])) ?? mod.installs,
+    // 与在线详情同一口径：详情 modFileSize → 列表 fileSize；列表没有就保持 null
+    fileSize: num(pickRaw(raw, ["modFileSize", "fileSize"])) ?? mod.fileSize ?? null,
+    fileCount: num(pickRaw(raw, ["fileCount", "numFiles", "file_count", "modFileCount"])) ?? null,
+    rating: mod.rating ?? num(pickRaw(raw, ["currentRating", "rating", "averageRating"])) ?? null,
   };
 }
 
@@ -143,6 +156,9 @@ export function snapshotFromDetail(
   out.updatedMs = parseOnlineDate(pickRaw(raw, ["lastUpdate", "updated", "lastModified"]));
   out.version = str(pickRaw(raw, ["modVersion", "version"])) || null;
   out.installs = num(pickRaw(raw, ["installs", "downloadCount", "subscriptions"]));
+  out.fileSize = num(pickRaw(raw, ["modFileSize", "fileSize"]));
+  out.fileCount = num(pickRaw(raw, ["fileCount", "numFiles", "file_count", "modFileCount"]));
+  out.rating = num(pickRaw(raw, ["currentRating", "rating", "averageRating"]));
   return out;
 }
 
@@ -161,6 +177,10 @@ export function snapshotFromMeta(meta: FavoriteMeta | null): FavoriteOnlineSnaps
     updatedMs: meta.updatedMs ?? null,
     version: meta.version ?? null,
     installs: meta.installs ?? null,
+    // 离线快照目前不存体积 / 文件数 / 评分：保持 null，由列表或详情缓存补
+    fileSize: null,
+    fileCount: null,
+    rating: null,
   };
 }
 
@@ -187,6 +207,9 @@ export function mergeSnapshots(
       updatedMs: out.updatedMs ?? layer.updatedMs,
       version: out.version ?? layer.version,
       installs: out.installs ?? layer.installs,
+      fileSize: out.fileSize ?? layer.fileSize,
+      fileCount: out.fileCount ?? layer.fileCount,
+      rating: out.rating ?? layer.rating,
     };
   }
   return out;
@@ -225,6 +248,9 @@ export function buildFavoriteEntry(input: {
     updatedMs: online.updatedMs,
     version: online.version,
     installs: online.installs,
+    fileSize: online.fileSize,
+    fileCount: online.fileCount,
+    rating: online.rating,
     thumbnailUrl: online.thumbnailUrl,
   };
   const tags = online.tagNames.length ? [...online.tagNames] : local?.officialTags ?? [];

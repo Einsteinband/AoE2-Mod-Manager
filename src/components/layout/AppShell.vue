@@ -24,6 +24,11 @@ withDefaults(
     authorUrl?: string;
     /** 本地扫描警告数量（>0 时底栏出现「⚠ 警告」入口） */
     warningCount?: number;
+    /**
+     * 顶部主板块高亮上下文：收藏工作区（mode=favorites）下仍保留进入收藏前的
+     * 「本地模组 / 在线模组」高亮；不传时由 TopBar 按 mode 自行推导。
+     */
+    mainSection?: "local" | "online";
   }>(),
   {
     authorUrl: "https://github.com/Einsteinband",
@@ -50,6 +55,7 @@ const emit = defineEmits<{
     <!-- ① 顶部导航：纹章 / 模式切换 / 工具栏 / 设置入口 -->
     <TopBar
       v-model:mode="mode"
+      :main-section="mainSection"
       :author-url="authorUrl"
       @open-author="emit('open-author')"
       @open-settings="emit('open-settings')"

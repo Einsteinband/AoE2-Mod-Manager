@@ -43,8 +43,6 @@ const TAGS_TIMEOUT_MS = 20_000;
 export function useOnlineSession(deps: {
   /** 退出登录后用缓存重绘列表（不清空 items，离线也能继续看） */
   reloadAfterLogout: () => Promise<void>;
-  /** 退出登录后丢弃收藏候选池 */
-  resetFavoritePool: () => void;
   /** 开始登录：清掉上一条安装提示（避免“登录前那个模组的报错”一直挂着） */
   onLoginStart?: () => void;
 }) {
@@ -172,7 +170,6 @@ export function useOnlineSession(deps: {
       const text = await withTimeout(clearLoginCache(), 30_000, t("online.clearCache"));
       netMessage.value = translateBackendMessage(text);
       session.value = null;
-      deps.resetFavoritePool();
       await refreshSession();
       // 退出登录不清空列表：直接用缓存重绘，离线也能继续看
       await deps.reloadAfterLogout();

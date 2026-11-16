@@ -1,22 +1,22 @@
-import { computed, ref } from "vue";
+import { computed } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import type { ModEntry } from "../../types";
 
 /**
- * 本地页收藏视图的来源身份必须穿过「合并 / 筛选 / 排序」：
- * 已安装条目（本地来源）与在线占位条目（origin: "online"）同处一列，
- * 排序后各自的来源标记不能被抹掉，也不能因为同 ID 出现两份。
+ * 回归：本地页不再承载任何「收藏视图」。
+ *
+ * 收藏已经是独立工作区（App 的第三个 mode + 侧栏 FavoritesNav），
+ * 本地筛选只负责扫描结果本身——不得再出现 favoritesOnly 开关、
+ * 也不得把收藏占位条目混进本地列表。
  */
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-
-const favIds = new Set<number>([45782, 99991]);
 vi.mock("../../userData", () => ({
   customNameOf: vi.fn(() => null),
   displayTitle: vi.fn((_id: number, title: string) => title),
-  isFavorite: vi.fn((id: number) => favIds.has(id)),
+  isFavorite: vi.fn(() => false),
 }));
-vi.mock("../../modUpdates", () => ({ updateIds: ref(new Set<string>()) }));
+vi.mock("../../modUpdates", () => ({ updateIds: computed(() => new Set<string>()) }));
 vi.mock("../../online/types", () => ({ TAG_RANK_BY_NAME: {} }));
 
 import { useLocalFilters } from "../local/useLocalFilters";
@@ -54,50 +54,43 @@ function base(id: string, name: string, extra: Partial<ModEntry> = {}): ModEntry
   };
 }
 
-function createFilters(mods: ModEntry[], ghosts: ModEntry[]) {
+function createFilters(mods: ModEntry[]) {
   return useLocalFilters({
     mods: computed(() => mods),
-    ghostMods: computed(() => ghosts),
     collationLocale: computed(() => "en"),
   });
 }
 
-const installed = base("subscribed/abewwwe", "abewwwe", { workshopId: 45782, thumbnail: "F:/m/abewwwe/thumbnail.jpg" });
-const ghost = base("fav:99991", "#99991", { workshopId: 99991, uninstalled: true, origin: "online", path: "", folderName: "" });
+const installed = base("subscribed/abewwwe", "abewwwe", { workshopId: 45782 });
+const second = base("subscribed/zzz", "zzz", { workshopId: 1001 });
 
-describe("useLocalFilters 收藏视图的跨来源合并", () => {
-  it("收藏视图同时包含本地与在线条目，在线条目的 origin 在排序后仍保留", () => {
-    const filters = createFilters([installed], [ghost]);
-    filters.toggleFavorites();
-    const ids = filters.sorted.value.map((m) => m.id);
-    // 默认按名称排序：占位标题是 "#99991"，排在 "abewwwe" 之前
-    expect(ids).toEqual(["fav:99991", "subscribed/abewwwe"]);
-    const online = filters.sorted.value.find((m) => m.id === "fav:99991");
-    expect(online?.origin).toBe("online");
-    expect(online?.uninstalled).toBe(true);
+describe("useLocalFilters 不再提供收藏视图", () => {
+  it("返回值里没有 favoritesOnly / toggleFavorites 等旧收藏 API", () => {
+    const filters = createFilters([installed]);
+    expect("favoritesOnly" in filters).toBe(false);
+    expect("toggleFavorites" in filters).toBe(false);
+    expect("favoriteLocalCount" in filters).toBe(false);
+    expect("ghostMods" in filters).toBe(false);
   });
 
-  it("按名称重排不会丢来源标记", () => {
-    const filters = createFilters([installed], [ghost]);
-    filters.toggleFavorites();
+  it("列表只来自传入的扫描结果，排序不掺入任何收藏占位条目", () => {
+    const filters = createFilters([installed, second]);
+    expect(filters.sorted.value.map((m) => m.id)).toEqual(["subscribed/abewwwe", "subscribed/zzz"]);
+    expect(filters.sorted.value.every((m) => m.uninstalled !== true)).toBe(true);
+
     filters.sortKey.value = "name";
     filters.order.value = "ASC";
-    expect(filters.sorted.value.map((m) => m.workshopId)).toEqual([99991, 45782]);
-    expect(filters.sorted.value[0].origin).toBe("online");
+    expect(filters.sorted.value.map((m) => m.id)).toEqual(["subscribed/abewwwe", "subscribed/zzz"]);
   });
 
-  it("退出收藏视图后在线占位不参与列表（不污染本地扫描口径）", () => {
-    const filters = createFilters([installed], [ghost]);
-    filters.toggleFavorites();
-    filters.toggleFavorites();
-    expect(filters.sorted.value.map((m) => m.id)).toEqual(["subscribed/abewwwe"]);
-  });
+  it("筛选快照只保存本地筛选维度，恢复后不产生收藏状态", () => {
+    const filters = createFilters([installed, second]);
+    filters.source.value = "local";
+    const snap = filters.snapshot();
+    expect(Object.keys(snap)).not.toContain("favoritesOnly");
 
-  it("同一 Workshop ID 只出现一次：已安装时该 ID 不进占位集合（由 ghosts 来源保证）", () => {
-    const filters = createFilters([installed], [ghost]);
-    filters.toggleFavorites();
-    const byId = filters.sorted.value.filter((m) => m.workshopId === 45782);
-    expect(byId).toHaveLength(1);
-    expect(byId[0].origin).toBeUndefined();
+    filters.source.value = "all";
+    filters.restore(snap);
+    expect(filters.source.value).toBe("local");
   });
 });

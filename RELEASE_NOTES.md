@@ -1,3 +1,23 @@
+# v0.5.7 — 2026-11-20
+
+## v0.5.7 - What's New
+
+- **🗂 Hidden Local Mods:** Right-click a local mod to hide it from the default list. Hidden mods remain available in a dedicated "Hidden" sidebar category and can be restored at any time. The preference is stored locally only; it does not change the mod's enabled state, favorites, files, or game loading order.
+- **⭐ Favorites Workspace:** The Favorites sidebar now filters only **Installed** and **Not installed**. Local source, status, and tag filters no longer appear in the Favorites page. Installed favorite cards reuse the local context-menu actions, while uninstalled favorites keep the online install actions.
+- **⏸ Download Pause & Resume:** Active ZIP downloads can be paused. The retained temporary file can be resumed from the download queue within the same app session. If the server does not return a resumable segment, or the retained file does not match, the queue reports the reason and cleans up before retrying. Restarting the app does not restore an in-progress resume context; old interrupted tasks fall back to failure and must be downloaded again.
+- **🌐 Translation Fix:** Title translation is no longer blocked when the description is too short or missing. Short or empty descriptions are handled separately from content that has not finished loading.
+- **🎨 Topbar & Sidebar:** The Favorites entry and grid/list switch keep a consistent order across Local, Online, and Favorites. On narrow windows, the Favorites button collapses to a star icon.
+
+## v0.5.7 - 更新内容
+
+- **🗂 本地模组隐藏：** 右键本地模组即可从默认列表隐藏；隐藏条目会保留在左侧「隐藏」分类中，可随时取消隐藏。该偏好只保存在本机，不改变模组的启用状态、收藏、文件或游戏加载顺序。
+- **⭐ 收藏工作区：** 收藏页左侧现在只保留「已安装」和「未安装」两个筛选，不再混入本地页的来源、启用状态和标签分类。已安装的收藏卡片复用本地卡片右键操作；未安装的收藏保留在线安装操作。
+- **⏸ 下载暂停与继续：** ZIP 下载过程中可以暂停；在同一应用会话内，可基于保留的临时文件从下载队列继续下载。如果服务器不返回可续传片段，或临时文件与下载记录不匹配，队列会说明原因并清理后再重试。重启应用不会恢复进行中的续传上下文，旧的中断任务按失败处理，需要重新下载。
+- **🌐 翻译修复：** 描述过短或为空时，不再连带阻止标题翻译；短内容、空内容与「描述尚未加载」现在分开判断。
+- **🎨 顶栏与侧栏：** 本地、在线、收藏三个页面的收藏入口与网格 / 列表切换顺序保持一致；窄窗口下收藏按钮折叠为星星图标。
+
+---
+
 # v0.5.6 — 2026-11-16
 
 ## v0.5.6 - What's New

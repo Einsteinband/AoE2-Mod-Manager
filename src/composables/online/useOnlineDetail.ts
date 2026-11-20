@@ -18,7 +18,8 @@ import { isNetworkError, isNetworkFailure, noteRequestFailure } from "../../onli
 import { modDetail } from "../../online/service";
 import {
   activeTranslation,
-  canTranslateText,
+  canTranslateDescription,
+  hasTranslatableText,
   currentTargetLanguageName,
   ensureTranslation,
   isQueued,
@@ -271,11 +272,26 @@ export function useOnlineDetail(deps: {
   const translateQueued = computed(() => isQueued(selected.value?.modId));
   const showingOriginalText = computed(() => isShowingOriginal(selected.value?.modId));
 
-  const canTranslate = computed(() => !!selected.value && canTranslateText(descriptionText.value));
+  // 标题与描述独立：标题非空就能翻译，描述为空 / 过短 / 未加载都不再拦标题
+  const canTranslate = computed(
+    () => !!selected.value && hasTranslatableText(selected.value.title, descriptionText.value),
+  );
 
-  /** 详情还没拉回来 / 官方描述太短：不允许翻译（否则空文本会被写进缓存，永久漏翻） */
+  /**
+   * 真正的「还没加载」：详情仍在请求，或本地详情缓存未命中。
+   * 不再用「描述长度 / 像不像正常句子」冒充加载状态 —— 描述为 "🙂" 也是已加载。
+   */
   const waitingDetail = computed(
-    () => !!selected.value && !canTranslateText(descriptionText.value),
+    () => !!selected.value && (detailLoading.value || detailUncached.value),
+  );
+
+  /** 描述已取到、但官方没有给出可翻译内容（空描述 / 无描述字段）：不是加载问题 */
+  const noDescriptionText = computed(
+    () =>
+      !!selected.value &&
+      !detailLoading.value &&
+      !detailUncached.value &&
+      !canTranslateDescription(descriptionText.value),
   );
 
   /** 详情标题优先级：备注名 > 中文译文 / 本地索引标题 > 官方原名 */
@@ -329,7 +345,8 @@ export function useOnlineDetail(deps: {
       case "quota":
         return t("translate.failQuota");
       case "not_ready":
-        return t("translate.notReady");
+        // 后端按 MIN_DESC_CHARS 拒绝：描述存在但内容过短，不是「还没加载」
+        return t("translate.tooShort");
       default:
         return t("translate.failGeneric", { msg: messageOf(error) });
     }
@@ -388,6 +405,7 @@ export function useOnlineDetail(deps: {
     descText,
     canTranslate,
     waitingDetail,
+    noDescriptionText,
     /** 详情面板已拿到的纯文本描述（右键菜单复用同一份，避免两处口径不一致） */
     descriptionText,
     selectedTranslated,

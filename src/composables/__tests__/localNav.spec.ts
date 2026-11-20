@@ -13,7 +13,7 @@ describe("localNav：侧栏普通分类的共享快照与导航意图", () => {
       status: "all",
       activeTag: null,
       sourceCounts: { all: 0, local: 0, subscribed: 0, imported: 0 },
-      statusCounts: { enabled: 0, disabled: 0, unknown: 0 },
+      statusCounts: { enabled: 0, disabled: 0, unknown: 0, hidden: 0 },
     });
     consumeLocalNavIntent();
   });
@@ -23,7 +23,7 @@ describe("localNav：侧栏普通分类的共享快照与导航意图", () => {
       source: "subscribed",
       activeTag: "UI",
       sourceCounts: { all: 57, local: 12, subscribed: 45, imported: 0 },
-      statusCounts: { enabled: 40, disabled: 17, unknown: 0 },
+      statusCounts: { enabled: 40, disabled: 17, unknown: 0, hidden: 0 },
     });
     const nav = useLocalNav();
     expect(nav.source).toBe("subscribed");

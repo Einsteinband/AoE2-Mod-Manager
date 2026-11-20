@@ -106,6 +106,8 @@ describe("FavoritesBrowser：收藏内部二级分类（与顶部本地 / 在线
       entry(3, "OnlineOnly", true),
     ];
     scope.value = "all";
+    installedCount.value = 2;
+    uninstalledCount.value = 1;
   });
 
   it("全部收藏 = 已安装 + 未安装都在同一页", async () => {
@@ -140,25 +142,40 @@ describe("FavoritesBrowser：收藏内部二级分类（与顶部本地 / 在线
     expect(wrapper.emitted("reset-search")).toHaveLength(1);
   });
 
-  it("收藏页侧栏是固定骨架：收藏入口 + 普通分类都在，且不出现两个收藏入口", async () => {
+  it("收藏页侧栏只保留已安装 / 未安装两个收藏分类，不再镜像本地模组分类", async () => {
     const wrapper = mountBrowser();
     await wrapper.vm.$nextTick();
 
-    // 收藏入口只渲染一次（收藏页自己的高亮版），下面的本地分类继续存在
-    expect(wrapper.findAll(".fav-nav-root")).toHaveLength(1);
-    expect(wrapper.find(".fav-nav-root").text()).toContain("favorites.groupTitle");
+    expect(wrapper.findAll(".view-switch")).toHaveLength(1);
+    expect(wrapper.findAll(".fav-nav-root")).toHaveLength(0);
 
     const titles = wrapper.findAll(".side-title").map((n) => n.text());
-    expect(titles).toContain("sidebar.source");
-    expect(titles).toContain("sidebar.status");
+    expect(titles).toEqual(["favorites.groupTitle"]);
 
-    const labels = wrapper.findAll(".label").map((n) => n.text());
-    expect(labels).toContain("sidebar.allMods");
-    expect(labels).toContain("sidebar.all");
-    // 收藏内部不再有「本地 / 在线」二级分类
-    expect(wrapper.find(".fav-nav-children").exists()).toBe(false);
-    expect(labels).not.toContain("favorites.stateLocal");
-    expect(labels).not.toContain("favorites.stateOnline");
+    const labels = wrapper.findAll(".side-item .label").map((n) => n.text());
+    expect(labels).toEqual(["favorites.filterInstalled", "favorites.filterUninstalled"]);
+    expect(labels).not.toContain("sidebar.allMods");
+    expect(labels).not.toContain("sidebar.all");
+    expect(wrapper.text()).not.toContain("sidebar.source");
+    expect(wrapper.text()).not.toContain("sidebar.status");
+
+    const counts = wrapper.findAll(".side-item .count").map((n) => n.text());
+    expect(counts).toEqual(["2", "1"]);
+  });
+
+  it("点击侧栏分类只切换收藏安装状态，不跳转本地页", async () => {
+    const wrapper = mountBrowser();
+    await wrapper.vm.$nextTick();
+
+    const buttons = wrapper.findAll(".side-item");
+    await buttons[0].trigger("click");
+    expect(scope.value).toBe("installed");
+    expect(cardNames(wrapper).sort()).toEqual(["InstalledA", "InstalledB"]);
+
+    await buttons[1].trigger("click");
+    expect(scope.value).toBe("uninstalled");
+    expect(cardNames(wrapper)).toEqual(["OnlineOnly"]);
+    expect(wrapper.emitted("open-local")).toBeUndefined();
   });
 
   it("选中项跟随当前可见列表：分类切换后详情不会是已被过滤掉的条目", async () => {
@@ -169,5 +186,16 @@ describe("FavoritesBrowser：收藏内部二级分类（与顶部本地 / 在线
     scope.value = "uninstalled";
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".detail").text()).toBe("OnlineOnly");
+  });
+
+  it("收藏页侧栏视图切换只更新 viewMode，不触发本地页跳转", async () => {
+    const wrapper = mountBrowser();
+    await wrapper.vm.$nextTick();
+
+    const listButton = wrapper.findAll(".view-btn")[1];
+    await listButton.trigger("click");
+
+    expect(wrapper.emitted("update:viewMode")?.at(-1)).toEqual(["list"]);
+    expect(wrapper.emitted("open-local")).toBeUndefined();
   });
 });

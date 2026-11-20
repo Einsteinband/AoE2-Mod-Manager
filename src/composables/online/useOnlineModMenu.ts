@@ -9,7 +9,7 @@
  */
 import type { InstalledIndexEntry } from "../../types";
 import type { ContextMenuItem } from "../../components/common/contextMenuTypes";
-import { canTranslateText } from "../../online/translation";
+import { canTranslateDescription } from "../../online/translation";
 
 export type OnlineTaskStatus = "installing" | "downloading" | "queued" | null;
 
@@ -35,9 +35,12 @@ export interface MenuDescriptionSources {
 
 export function resolveMenuDescription(sources: MenuDescriptionSources): string {
   const { targetId, listText, cached, selectedId, selectedText } = sources;
-  if (canTranslateText(listText)) return listText;
-  if (cached && cached.modId === targetId && canTranslateText(cached.text)) return cached.text;
-  if (selectedId === targetId && canTranslateText(selectedText)) return selectedText ?? "";
+  // 只看「有没有内容」：列表里只有 "🙂" 也算有描述，不能因为短就退回空串
+  if (canTranslateDescription(listText)) return listText;
+  if (cached && cached.modId === targetId && canTranslateDescription(cached.text)) {
+    return cached.text;
+  }
+  if (selectedId === targetId && canTranslateDescription(selectedText)) return selectedText ?? "";
   return listText;
 }
 

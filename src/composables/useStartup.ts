@@ -23,7 +23,7 @@ import { applyTranslateSettings, syncUiLocale } from "../online/translation";
 import type { ModEntry } from "../types";
 
 export function useStartup(options: {
-  mode: Ref<"local" | "online">;
+  mode: Ref<"local" | "online" | "favorites">;
   localSearchEnabled: Ref<boolean>;
   locale: Ref<string>;
   scan: {
@@ -171,6 +171,8 @@ export function useStartup(options: {
   /** 切到在线页时强制退出排序模式（本地网格会被销毁） */
   watch(mode, (next) => {
     if (next === "local") return;
+    // 收藏是独立工作区，不销毁、也不重置本地页的排序状态，不能套用这条守卫
+    if (next === "favorites") return;
     // 有未保存改动就不让切页：切走会销毁本地网格，等于静默丢弃
     if (sort.blocksRescan.value) {
       mode.value = "local";

@@ -9,7 +9,7 @@ import type {
   IndexSearchResult,
   IndexStatus,
   IndexSyncReport,
-  InstallOutcome,
+  InstallCommandResponse,
   TitleJobStatus,
   ModTag,
   NetworkSettingsView,
@@ -146,13 +146,17 @@ export function installMod(
   modId: number,
   title: string,
   force: boolean,
+  taskId: string,
+  resume: boolean,
   tagIds: number[] = [],
   tagNames: string[] = [],
   author: string | null = null,
   description: string | null = null,
   thumbnailUrl: string | null = null,
-): Promise<InstallOutcome> {
-  return invoke<InstallOutcome>("online_install", {
+): Promise<InstallCommandResponse> {
+  return invoke<InstallCommandResponse>("online_install", {
+    taskId,
+    resume,
     modId,
     title,
     force,
@@ -162,6 +166,14 @@ export function installMod(
     description,
     thumbnailUrl,
   });
+}
+
+export function pauseInstall(taskId: string): Promise<void> {
+  return invoke<void>("online_pause_install", { taskId });
+}
+
+export function clearResume(taskId: string): Promise<void> {
+  return invoke<void>("online_clear_resume", { taskId });
 }
 
 export function cancelInstall(): Promise<void> {

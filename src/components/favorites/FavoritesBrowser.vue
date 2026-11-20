@@ -12,16 +12,43 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "../../composables/useToast";
-import { displayTitle, customNameOf } from "../../userData";
+import {
+  customNameOf,
+  displayTitle,
+  ensureUserData,
+  isFavorite,
+  setCustomName,
+  setFavorite,
+} from "../../userData";
 import ModCard from "../ModCard.vue";
 import ModGrid from "../common/ModGrid.vue";
 import ModDetail from "../ModDetail.vue";
 import PageShell from "../layout/PageShell.vue";
-import LocalSidebar from "../local/LocalSidebar.vue";
-import { useLocalNav, queueLocalNavIntent } from "../../composables/local/localNav";
+import ViewSwitch from "../common/ViewSwitch.vue";
+import ConfirmDialog from "../ConfirmDialog.vue";
+import RenameDialog from "../RenameDialog.vue";
+import ContextMenu from "../common/ContextMenu.vue";
+import type { ContextMenuItem } from "../common/contextMenuTypes";
+import { useContextMenu } from "../../composables/useContextMenu";
+import { buildLocalMenuItems } from "../../composables/local/useLocalModMenu";
+import { buildOnlineMenuItems } from "../../composables/online/useOnlineModMenu";
 import { useFavorites } from "../../favorites/useFavorites";
 import { favoriteIsInstalled } from "../../favorites/model";
-import FavoritesNav from "./FavoritesNav.vue";
+import { deleteModFiles, revealModFolder, toggleModEnabled } from "../../api";
+import { openModWebpage } from "../../online/service";
+import {
+  hasTranslatableText,
+  isDescriptionLoaded,
+  currentTargetLanguageName,
+  ensureTranslation,
+  isQueued,
+  isShowingOriginal,
+  isTranslating,
+  toggleOriginal,
+  translationErrorKind,
+  translationOf,
+} from "../../online/translation";
+import { normalizeBackendError, translateBackendMessage } from "../../format";
 import type { ModEntry } from "../../types";
 
 const props = withDefaults(
@@ -29,54 +56,29 @@ const props = withDefaults(
     search?: string;
     sort?: string;
     order?: "DESC" | "ASC";
-    viewMode?: "grid" | "list";
     cardSize?: number;
   }>(),
   {
     search: "",
     sort: "updated",
     order: "DESC",
-    viewMode: "grid",
     cardSize: 200,
   },
 );
+
+/** 收藏页的网格 / 列表切换：与 App 的全局 viewMode 双向同步 */
+const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
 
 const emit = defineEmits<{
   (event: "open-online"): void;
   /** 空态「清除筛选」：搜索词归 App 持有，这里只上抛请求 */
   (event: "reset-search"): void;
-  /** 侧栏普通分类点击 = 切到本地模组并套用同一个筛选 */
-  (event: "open-local"): void;
 }>();
 
 const { t } = useI18n();
-const { showToast } = useToast();
+const { toast, showToast } = useToast();
 const workspace = useFavorites();
-const { loading, error, entries, scope, refresh, install } = workspace;
-
-/** 左侧固定骨架里的普通分类：只镜像本地页快照，不在收藏页重算一套 */
-const localNav = useLocalNav();
-
-function goLocal(intent: Parameters<typeof queueLocalNavIntent>[0]): void {
-  queueLocalNavIntent(intent);
-  emit("open-local");
-}
-
-function pickLocalSource(value: Parameters<typeof queueLocalNavIntent>[0]["source"]): void {
-  if (value) goLocal({ source: value });
-}
-
-function pickLocalStatus(value: Parameters<typeof queueLocalNavIntent>[0]["status"]): void {
-  if (value) goLocal({ status: value });
-}
-
-function pickLocalTag(value: string | null): void {
-  goLocal({ tag: value });
-}
-
-function pickLocalUpdates(): void {
-  goLocal({ updatesOnly: true });
-}
+const { loading, error, entries, scope, installedCount, uninstalledCount, refresh, install } = workspace;
 
 const selectedModId = ref<number | null>(null);
 
@@ -166,9 +168,7 @@ function patchCover(id: string, path: string): void {
   entry.coverUrl = null;
 }
 
-function download(): void {
-  const entry = selected.value;
-  if (!entry) return;
+function downloadEntry(entry: ModEntry): void {
   const result = install(entry);
   if (result.accepted) {
     showToast(t("favorites.downloadQueued"));
@@ -183,8 +183,307 @@ function download(): void {
   showToast(t(key), "error");
 }
 
+function download(): void {
+  const entry = selected.value;
+  if (!entry) return;
+  downloadEntry(entry);
+}
+
 function removed(): void {
   void refresh();
+}
+
+// ---------------- 卡片右键上下文菜单 ----------------
+// 与本地页 / 在线页共用同一套菜单构建器与浮层组件：
+// 收藏项不是「一种新数据」，而是「官方信息 + 本机安装状态」，
+// 因此按 `favoriteIsInstalled` 分流到已安装（本地菜单口径）或未安装（在线菜单口径），
+// 菜单本身永远可以打开，内容随安装状态变化。
+
+const cardMenu = useContextMenu<ModEntry>();
+const menuOpen = cardMenu.open;
+const menuX = cardMenu.x;
+const menuY = cardMenu.y;
+
+/** 备注弹窗 / 卸载确认作用在右键快照上，不改选中态 */
+const renameTarget = ref<ModEntry | null>(null);
+const renameBusy = ref(false);
+const renameError = ref<string | null>(null);
+const deleteTarget = ref<ModEntry | null>(null);
+const deleting = ref(false);
+const deleteError = ref<string | null>(null);
+
+function onCardContextMenu(mod: ModEntry, event: MouseEvent | KeyboardEvent): void {
+  cardMenu.openAt(event, mod);
+}
+
+const deleteConfirmMessage = computed(() => {
+  const mod = deleteTarget.value;
+  if (!mod) return "";
+  const body =
+    mod.source === "tool"
+      ? t("detail.confirmTool")
+      : mod.source === "official"
+        ? t("detail.confirmOfficial")
+        : t("detail.confirmUnknown");
+  return `${body}\n\n${t("detail.confirmLocalOnly")}`;
+});
+
+const menuItems = computed<ContextMenuItem[]>(() => {
+  const mod = cardMenu.target.value;
+  if (!mod) return [];
+  const id = mod.workshopId ?? 0;
+  const favorited = id > 0 && isFavorite(id);
+  const hasTranslation = id > 0 && translationOf(id) !== null;
+  const canText = hasTranslatableText(mod.displayName, mod.description);
+  const translating = id > 0 && isTranslating(id);
+  const queued = id > 0 && isQueued(id);
+  const showingOriginal = id > 0 && isShowingOriginal(id);
+
+  if (!favoriteIsInstalled(mod)) {
+    return buildOnlineMenuItems(
+      id,
+      {
+        entry: null,
+        taskStatus: null,
+        favorited,
+        offline: false,
+        cachedTranslation: hasTranslation,
+        showingOriginal,
+        translating,
+        queued,
+        canText,
+      },
+      {
+        installLocal: t("online.installLocal"),
+        reinstallLocal: t("online.reinstallLocal"),
+        installing: t("online.installing"),
+        downloading: t("online.downloading"),
+        enqueued: t("downloader.enqueued"),
+        favorite: t("favorites.favorite"),
+        favorited: t("favorites.favorited"),
+        rename: t("favorites.rename"),
+        translateBusy: t("translate.busy"),
+        translateQueued: t("translate.queued"),
+        translateTrigger: t("translate.trigger", { lang: currentTargetLanguageName() }),
+        translateShowTranslated: t("translate.showTranslated", { lang: currentTargetLanguageName() }),
+        translateShowOriginal: t("translate.showOriginal"),
+        // 只有描述**确实没取到**时才说「等待加载」
+        waitingHint: isDescriptionLoaded(mod.description)
+          ? t("translate.noContent")
+          : t("translate.waitingContent"),
+        openFolder: t("detail.openFolder"),
+        browseSite: t("detail.browseSite"),
+        offlineHint: t("online.offlineBlocked"),
+      },
+    );
+  }
+
+  const items = buildLocalMenuItems(
+    mod,
+    { favorited, hasTranslation, canText, translating, queued, showingOriginal, hidden: false },
+    {
+      enable: t("menu.enable"),
+      disable: t("menu.disable"),
+      favorite: t("favorites.favorite"),
+      favorited: t("favorites.favorited"),
+      rename: t("favorites.rename"),
+      translateBusy: t("translate.busy"),
+      translateQueued: t("translate.queued"),
+      translateTrigger: t("translate.trigger", { lang: currentTargetLanguageName() }),
+      translateShowTranslated: t("translate.showTranslated", { lang: currentTargetLanguageName() }),
+      translateShowOriginal: t("translate.showOriginal"),
+      openFolder: t("detail.openFolder"),
+      browseSite: t("detail.browseSite"),
+      deleteMod: t("detail.deleteMod"),
+      notRegisteredHint: t("card.notRegisteredHint"),
+    },
+  );
+
+  // 数据模组互斥裁决依赖本地页的完整模组列表，收藏页不绕过它
+  if (mod.isDataMod && mod.enabled !== true) {
+    const index = items.findIndex((item) => item.id === "toggle");
+    if (index >= 0) {
+      items[index] = { ...items[index], disabled: true, hint: t("detail.dataModWarning") };
+    }
+  }
+  return items;
+});
+
+async function onMenuSelect(itemId: string): Promise<void> {
+  const mod = cardMenu.target.value;
+  if (!mod) return;
+  const id = mod.workshopId ?? 0;
+
+  switch (itemId) {
+    case "install": {
+      cardMenu.close();
+      downloadEntry(mod);
+      return;
+    }
+    case "toggle": {
+      cardMenu.close();
+      if (mod.enabled === null) {
+        showToast(t("card.notRegisteredHint"), "error");
+        return;
+      }
+      const target = mod.enabled !== true;
+      // 数据模组启用必须走本地页的互斥流程，菜单里已置灰，这里再兜一层
+      if (target && mod.isDataMod) return;
+      try {
+        const result = await toggleModEnabled(id, mod.kind, mod.folderName, target);
+        patchEnabled(mod.id, result.enabled);
+        void refresh();
+      } catch (e) {
+        showToast(normalizeBackendError(e), "error");
+      }
+      return;
+    }
+    case "favorite": {
+      if (id <= 0) return;
+      cardMenu.close();
+      await ensureUserData();
+      try {
+        const next = await setFavorite(id, !isFavorite(id));
+        showToast(next ? t("favorites.addedToast") : t("favorites.removedToast"));
+        // 收藏页以收藏集合为数据源：取消收藏后必须重读，条目才会消失
+        void refresh();
+      } catch (e) {
+        showToast(normalizeBackendError(e), "error");
+      }
+      return;
+    }
+    case "rename": {
+      if (id <= 0) return;
+      cardMenu.close();
+      renameError.value = null;
+      renameTarget.value = mod;
+      return;
+    }
+    case "translate": {
+      cardMenu.close();
+      await translateFromMenu(mod);
+      return;
+    }
+    case "folder": {
+      cardMenu.close();
+      if (!mod.path) return;
+      try {
+        await revealModFolder(mod.path);
+      } catch (e) {
+        showToast(normalizeBackendError(e), "error");
+      }
+      return;
+    }
+    case "website": {
+      cardMenu.close();
+      if (id <= 0) return;
+      try {
+        await openModWebpage(id);
+      } catch (e) {
+        showToast(normalizeBackendError(e), "error");
+      }
+      return;
+    }
+    case "delete": {
+      cardMenu.close();
+      deleteError.value = null;
+      deleteTarget.value = mod;
+      return;
+    }
+  }
+}
+
+function translationErrorMessage(error: unknown): string {
+  switch (translationErrorKind(error)) {
+    case "network":
+      return t("translate.failNetwork");
+    case "busy":
+      return t("translate.failBusy");
+    case "quota":
+      return t("translate.failQuota");
+    case "not_ready":
+      // 后端 MIN_DESC_CHARS 拦截：描述存在但内容过短，不是「还没加载」
+      return t("translate.tooShort");
+    default:
+      return t("translate.failGeneric", { msg: translateBackendMessage(String(error ?? "")) });
+  }
+}
+
+async function translateFromMenu(mod: ModEntry): Promise<void> {
+  const id = mod.workshopId ?? 0;
+  if (id <= 0) return;
+  // 已有译文：只切原文 / 译文，不发请求
+  if (translationOf(id)) {
+    toggleOriginal(id);
+    return;
+  }
+  if (isTranslating(id) || isQueued(id)) return;
+  if (!hasTranslatableText(mod.displayName, mod.description)) {
+    showToast(
+      isDescriptionLoaded(mod.description)
+        ? t("translate.noContent")
+        : t("translate.notReady"),
+      "error",
+    );
+    return;
+  }
+  try {
+    const tr = await ensureTranslation({ modId: id, title: mod.displayName }, mod.description ?? "");
+    if (tr.truncated) {
+      showToast(t("translate.truncated", { chars: tr.charCount }));
+    } else {
+      showToast(tr.cached ? t("translate.fromCacheToast") : t("translate.okToast"));
+    }
+  } catch (e) {
+    showToast(translationErrorMessage(e), "error");
+  }
+}
+
+async function applyMenuRename(name: string): Promise<void> {
+  const mod = renameTarget.value;
+  if (!mod || renameBusy.value) return;
+  const id = mod.workshopId ?? 0;
+  if (id <= 0) {
+    renameTarget.value = null;
+    return;
+  }
+  renameBusy.value = true;
+  renameError.value = null;
+  try {
+    await setCustomName(id, name);
+    renameTarget.value = null;
+    showToast(t("favorites.savedToast"));
+    void refresh();
+  } catch (e) {
+    renameError.value = normalizeBackendError(e);
+  } finally {
+    renameBusy.value = false;
+  }
+}
+
+function closeMenuRename(): void {
+  renameTarget.value = null;
+}
+
+async function confirmMenuDelete(): Promise<void> {
+  const mod = deleteTarget.value;
+  if (!mod || deleting.value) return;
+  deleting.value = true;
+  deleteError.value = null;
+  try {
+    await deleteModFiles(mod.kind, mod.folderName, mod.workshopId);
+    deleteTarget.value = null;
+    // 卸载只改本机安装状态：重读收藏，信息区仍用官方值
+    void refresh();
+  } catch (e) {
+    deleteError.value = normalizeBackendError(e);
+  } finally {
+    deleting.value = false;
+  }
+}
+
+function cancelMenuDelete(): void {
+  deleteTarget.value = null;
 }
 
 defineExpose({ refresh, loading });
@@ -193,27 +492,31 @@ defineExpose({ refresh, loading });
 <template>
   <PageShell sidebar-class="fav-sidebar">
     <template #sidebar>
-      <!-- 侧栏是固定导航骨架，不是「收藏专用 Sidebar」：
-           收藏入口在最顶部（不再展开二级分类），下面继续保留本地页原本的分类 / 导航。 -->
-      <FavoritesNav :active="true" @open-favorites="scope = $event" />
-      <LocalSidebar
-        :show-favorites="false"
-        :sort-mode="false"
-        :source="localNav.source"
-        :status="localNav.status"
-        :updates-only="localNav.updatesOnly"
-        :updates-available-count="localNav.updatesAvailableCount"
-        :active-tag="localNav.activeTag"
-        :official-tag-list="localNav.officialTagList"
-        :inferred-tag-list="localNav.inferredTagList"
-        :source-counts="localNav.sourceCounts"
-        :status-counts="localNav.statusCounts"
-        @pick-source="pickLocalSource"
-        @pick-status="pickLocalStatus"
-        @pick-tag="pickLocalTag"
-        @pick-updates-only="pickLocalUpdates"
-        @open-favorites="scope = $event"
-      />
+      <div class="sidebar-top">
+        <ViewSwitch v-model:view-mode="viewMode" />
+      </div>
+
+      <div class="side-group">
+        <div class="side-title"><span>{{ t("favorites.groupTitle") }}</span></div>
+        <button
+          type="button"
+          class="side-item"
+          :class="{ active: scope === 'installed' }"
+          @click="scope = 'installed'"
+        >
+          <span class="label">{{ t("favorites.filterInstalled") }}</span>
+          <span class="count">{{ installedCount }}</span>
+        </button>
+        <button
+          type="button"
+          class="side-item"
+          :class="{ active: scope === 'uninstalled' }"
+          @click="scope = 'uninstalled'"
+        >
+          <span class="label">{{ t("favorites.filterUninstalled") }}</span>
+          <span class="count">{{ uninstalledCount }}</span>
+        </button>
+      </div>
     </template>
 
     <template #content>
@@ -263,6 +566,7 @@ defineExpose({ refresh, loading });
             @select="selectMod"
             @toggled="(payload) => patchEnabled(payload.id, payload.enabled)"
             @toggle-error="(message) => showToast(message, 'error')"
+            @context-menu="onCardContextMenu"
           />
         </template>
       </ModGrid>
@@ -283,6 +587,43 @@ defineExpose({ refresh, loading });
       <div v-else class="fav-detail-empty">
         <p>{{ t("online.detailEmpty") }}</p>
       </div>
+
+      <!-- 卡片右键：备注名弹窗（作用于右键快照） -->
+      <RenameDialog
+        v-if="renameTarget"
+        :original="renameTarget.displayName"
+        :initial="customNameOf(renameTarget.workshopId)"
+        :busy="renameBusy"
+        :error="renameError ? translateBackendMessage(renameError) : null"
+        @save="applyMenuRename"
+        @cancel="closeMenuRename"
+      />
+
+      <!-- 卡片右键：卸载二次确认（危险操作，确认后才删目录） -->
+      <ConfirmDialog
+        v-if="deleteTarget"
+        :title="t('detail.confirmTitle')"
+        :message="deleteConfirmMessage"
+        :detail="deleteTarget.path"
+        :confirm-label="t('detail.deleteConfirmLabel')"
+        :busy="deleting"
+        :error="deleteError ? translateBackendMessage(deleteError) : null"
+        @confirm="confirmMenuDelete"
+        @cancel="cancelMenuDelete"
+      />
+
+      <!-- 卡片右键上下文菜单（fixed 浮层；关闭逻辑由共享组件统一处理） -->
+      <ContextMenu
+        v-if="menuOpen"
+        :x="menuX"
+        :y="menuY"
+        :items="menuItems"
+        @select="onMenuSelect"
+        @close="cardMenu.close"
+      />
+
+      <!-- 轻量提示（收藏页自己的 toast 实例，Actions 的反馈必须可见） -->
+      <div v-if="toast" class="app-toast" :class="toast.kind">{{ toast.text }}</div>
     </template>
   </PageShell>
 </template>
@@ -290,6 +631,11 @@ defineExpose({ refresh, loading });
 <style scoped>
 .fav-sidebar {
   padding: 10px 10px 18px;
+}
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  margin: 0 0 12px;
 }
 .fav-head {
   padding: 8px var(--layout-page-pad-x, 18px) 2px;

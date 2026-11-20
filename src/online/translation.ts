@@ -373,6 +373,39 @@ export function canTranslateText(description: string | null | undefined): boolea
   return (description ?? "").trim().length >= MIN_DESC_CHARS;
 }
 
+/**
+ * 「描述是否已取到」只看数据是否存在，**不看内容有没有意义**。
+ *
+ * 项目数据模型：`null / undefined` = 详情还没拿到；`""` = 已取到但官方没给描述；
+ * `"🙂"`、`"?"`、`"test"` 等再短也是已取到的真实内容，绝不能再当成「未加载」。
+ */
+export function isDescriptionLoaded(description: string | null | undefined): boolean {
+  return description !== null && description !== undefined;
+}
+
+/**
+ * 描述字段**要不要提交翻译**：只看这块字段有没有内容。
+ * 它只决定「描述这一个字段」，绝不代表「整个模组能不能翻译」—— 那由
+ * [`hasTranslatableText`] 决定，标题永远是独立的一条。
+ */
+export function canTranslateDescription(description: string | null | undefined): boolean {
+  return typeof description === "string" && description.trim().length > 0;
+}
+
+/**
+ * 是否存在至少一个可翻译字段（标题、描述各自独立）。
+ *
+ * 标题非空 → 可以翻译标题（描述为空 / 过短 / 未加载都不影响）；
+ * 描述有内容 → 描述也一并提交（过短由后端既有 MIN_DESC_CHARS 规则跳过）。
+ * 只有两边都是空的时候，翻译入口才该置灰。
+ */
+export function hasTranslatableText(
+  title: string | null | undefined,
+  description?: string | null,
+): boolean {
+  return (title ?? "").trim().length > 0 || canTranslateDescription(description);
+}
+
 export interface TranslationProbeInput {
   modId: number;
   title: string;

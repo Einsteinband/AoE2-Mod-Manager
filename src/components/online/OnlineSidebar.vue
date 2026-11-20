@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive } from "vue";
 import { useI18n } from "vue-i18n";
-import FavoritesNav from "../favorites/FavoritesNav.vue";
+import ViewSwitch from "../common/ViewSwitch.vue";
 import { tagLabel, type ModTag, type SessionStatus } from "../../online/types";
 
 /**
@@ -32,11 +32,13 @@ const toggleGroup = (key: string) => {
 };
 
 /**
- * 在线页左侧栏：来源 / 收藏 / 官方分类 / 账号。
+ * 在线页左侧栏：来源 / 官方分类 / 账号。
  *
  * 纯展示组件：状态真源在 `useOnlineList`（来源、收藏、分类）与 `useOnlineSession`（账号），
  * 这里只把交互上抛给页面。样式全部复用 style.css 的 .side-group / .side-item。
  */
+const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
+
 defineProps<{
   onlySubscribed: boolean;
   activeTag: number | null;
@@ -50,7 +52,6 @@ defineProps<{
 
 const emit = defineEmits<{
   (event: "pick-subscribed", value: boolean): void;
-  (event: "open-favorites", scope: "all" | "installed" | "uninstalled"): void;
   (event: "pick-tag", value: number | null): void;
   (event: "refresh-session"): void;
   (event: "logout"): void;
@@ -60,8 +61,10 @@ const { t } = useI18n();
 </script>
 
 <template>
-  <!-- 最顶部：收藏一级入口（独立工作区，不属于本地 / 在线筛选） -->
-  <FavoritesNav :active="false" @open-favorites="emit('open-favorites', $event)" />
+  <!-- 侧栏顶部：网格 / 列表切换；收藏入口统一由顶栏右侧承载 -->
+  <div class="sidebar-top">
+    <ViewSwitch v-model:view-mode="viewMode" />
+  </div>
 
   <div class="side-group">
     <div
@@ -136,6 +139,12 @@ const { t } = useI18n();
 </template>
 
 <style scoped>
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  margin: 0 0 12px;
+}
+
 /* 只补充本地界面没有的元素；布局全部复用 style.css 的本地类 */
 .side-note {
   padding: 2px 10px 4px;

@@ -3,9 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import AppShell from "./components/layout/AppShell.vue";
 import ModToolbar from "./components/common/ModToolbar.vue";
-import ViewSwitch from "./components/common/ViewSwitch.vue";
 import OnlineBrowser from "./components/OnlineBrowser.vue";
 import FavoritesBrowser from "./components/favorites/FavoritesBrowser.vue";
+import FavoritesNav from "./components/favorites/FavoritesNav.vue";
 import SettingsModal from "./components/SettingsModal.vue";
 import DownloadManager from "./components/DownloadManager.vue";
 import LocalBrowser from "./components/local/LocalBrowser.vue";
@@ -82,7 +82,7 @@ import { useGameLaunch } from "./composables/useGameLaunch";
  */
 
 // ---------------- 页面模式 ----------------
-// favorites = 独立收藏工作区（官方在线信息 + 本机安装状态），由侧栏「收藏」进入，
+// favorites = 独立收藏工作区（官方在线信息 + 本机安装状态），由顶栏右侧收藏入口进入，
 // 顶层「本地 / 在线」只决定浏览页，不参与、不过滤收藏内容。
 const mode = ref<"local" | "online" | "favorites">("local");
 
@@ -106,7 +106,7 @@ watch(
 /** 共享收藏工作区：侧栏计数与二级分类都读这里，避免每个入口各建一套状态 */
 const favoritesWorkspace = useFavorites();
 
-/** 侧栏「收藏 / 本地模组 / 在线模组」入口：进入收藏工作区并切到对应分类 */
+/** 顶栏收藏入口：进入收藏工作区并切到对应分类 */
 function openFavorites(scope: "all" | "installed" | "uninstalled"): void {
   favoritesWorkspace.scope.value = scope;
   mode.value = "favorites";
@@ -566,16 +566,22 @@ function dismissVersionNotes() {
 let offDownloadSettled: (() => void) | null = null;
 
 // ---------------- 切页保护：排序模式有未保存改动时不允许切到在线 ----------------
+// 收藏是独立工作区：进入收藏既不销毁本地网格（KeepAlive 保留），也不改本地排序状态，
+// 所以这里必须先放行 favorites —— 历史上把收藏也套用「未保存排序就退回本地页」的守卫，
+// 会让「在线 / 本地 → 点击我的收藏」被强行弹回 LocalBrowser。
 watch(mode, (next) => {
   if (next === "local") return;
+  if (next === "favorites") {
+    // 收藏页每次进入都重新对齐「在线信息 + 本地状态」
+    void favoritesRef.value?.refresh();
+    return;
+  }
   if (localRef.value?.sortBlocksRescan) {
     mode.value = "local";
     showToast(t("sort.unsavedBlock"), "error");
     return;
   }
   localRef.value?.exitSortMode();
-  // 收藏页每次进入都重新对齐「在线信息 + 本地状态」
-  if (next === "favorites") void favoritesRef.value?.refresh();
 });
 
 // ---------------- 语言切换联动 ----------------
@@ -833,7 +839,10 @@ onBeforeUnmount(() => {
           <span class="glyph">🎮</span>
           <span class="btn-text">{{ gameLaunching ? t("toolbar.launchGameBusy") : t("toolbar.launchGame") }}</span>
         </button>
-        <ViewSwitch v-model:view-mode="viewMode" />
+        <FavoritesNav
+          :active="mode === 'favorites'"
+          @open-favorites="openFavorites($event)"
+        />
       </div>
     </template>
 
@@ -846,9 +855,8 @@ onBeforeUnmount(() => {
         v-model:sort-model="localSortModel"
         v-model:order-model="localOrder"
         :mod-root="modRoot"
-        :view-mode="viewMode"
+        v-model:view-mode="viewMode"
         :card-size="cardSize"
-        @open-favorites="openFavorites"
       />
     </KeepAlive>
 
@@ -859,9 +867,8 @@ onBeforeUnmount(() => {
         v-model:query="onlineQuery"
         v-model:sort="onlineSort"
         v-model:order="onlineOrder"
-        :view-mode="viewMode"
+        v-model:view-mode="viewMode"
         :card-size="cardSize"
-        @open-favorites="openFavorites"
       />
     </KeepAlive>
 
@@ -873,10 +880,9 @@ onBeforeUnmount(() => {
         :search="favoritesSearch"
         :sort="favoritesSort"
         :order="favoritesOrder"
-        :view-mode="viewMode"
+        v-model:view-mode="viewMode"
         :card-size="cardSize"
         @open-online="mode = 'online'"
-        @open-local="mode = 'local'"
         @reset-search="favoritesSearch = ''"
       />
     </KeepAlive>

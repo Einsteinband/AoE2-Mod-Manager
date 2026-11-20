@@ -34,6 +34,18 @@ vi.mock("../../online/downloadQueue", () => ({
 vi.mock("../../online/translation", () => ({
   activeTranslation: vi.fn(() => null),
   canTranslateText: vi.fn(() => true),
+  // 与真实实现同口径：加载态只看数据是否存在；标题与描述各自独立判断
+  isDescriptionLoaded: vi.fn(
+    (text: string | null | undefined) => text !== null && text !== undefined,
+  ),
+  canTranslateDescription: vi.fn(
+    (text: string | null | undefined) => typeof text === "string" && text.trim().length > 0,
+  ),
+  hasTranslatableText: vi.fn(
+    (title: string | null | undefined, description?: string | null) =>
+      (title ?? "").trim().length > 0 ||
+      (typeof description === "string" && description.trim().length > 0),
+  ),
   currentTargetLanguageName: vi.fn(() => "中文"),
   ensureTranslation: mocks.mockEnsureTranslation,
   isQueued: vi.fn(() => false),
@@ -376,6 +388,61 @@ describe("ModDetail: 加载优先级只读展示", () => {
 
     expect(wrapper.find("button.toggle.dv-toggle").exists()).toBe(true);
     expect(priorityField(wrapper)!.find(".v").text()).toBe("7");
+  });
+});
+
+// ============================================================
+// 描述只有符号时不再被判成「未加载」
+// ============================================================
+describe("ModDetail: 符号描述也能发起翻译", () => {
+  function translateBtn(wrapper: ReturnType<typeof mountDetail>) {
+    return wrapper
+      .findAll("button.fav-btn")
+      .find((b) => b.attributes("aria-label") === "translate.trigger");
+  }
+
+  it.each(["🙂", "👍", ":)", "?"])("描述为 %s 时翻译按钮可点击", (desc) => {
+    const wrapper = mountDetail(makeMod({ description: desc }));
+
+    const btn = translateBtn(wrapper);
+    expect(btn).toBeTruthy();
+    // 关键回归：内容短 / 只有 emoji 不再等于「未加载」
+    expect(btn!.attributes("disabled")).toBeUndefined();
+  });
+
+  it("点击符号描述的翻译按钮会进入既有翻译链路（不弹「未加载」）", async () => {
+    mocks.mockEnsureTranslation.mockResolvedValue({
+      cached: false,
+      truncated: false,
+      charCount: 1,
+    });
+
+    const wrapper = mountDetail(makeMod({ description: "🙂" }));
+    const btn = translateBtn(wrapper);
+    await btn!.trigger("click");
+    await flushPromises();
+
+    expect(mocks.mockEnsureTranslation).toHaveBeenCalledWith(
+      expect.objectContaining({ modId: 12345 }),
+      "🙂",
+    );
+  });
+
+  it("正常标题 + null / 空描述：标题仍可翻译，入口不置灰", () => {
+    for (const desc of [null, "", "   "]) {
+      const wrapper = mountDetail(makeMod({ description: desc }));
+      const btn = translateBtn(wrapper);
+      expect(btn).toBeTruthy();
+      expect(btn!.attributes("disabled")).toBeUndefined();
+    }
+  });
+
+  it("标题与描述都没有可翻译内容时才禁用", () => {
+    const wrapper = mountDetail(makeMod({ displayName: "", description: null }));
+
+    const btn = translateBtn(wrapper);
+    expect(btn).toBeTruthy();
+    expect(btn!.attributes("disabled")).toBeDefined();
   });
 });
 

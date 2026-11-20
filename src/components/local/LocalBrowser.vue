@@ -16,7 +16,6 @@ import type { ContextMenuItem } from "../common/contextMenuTypes";
 import { useLocalScan } from "../../composables/local/useLocalScan";import { useContextMenu } from "../../composables/useContextMenu";
 import { useLocalFilters } from "../../composables/local/useLocalFilters";
 import { consumeLocalNavIntent, publishLocalNav } from "../../composables/local/localNav";
-import type { FavoriteStatusFilter } from "../../favorites/useFavorites";
 import { useSortMode } from "../../composables/local/useSortMode";
 import { useLocalModActions } from "../../composables/local/useLocalModActions";
 import { buildLocalMenuItems } from "../../composables/local/useLocalModMenu";
@@ -30,7 +29,8 @@ import { deleteModFiles, openExternalUrl, pickModZip, revealModFolder, toggleMod
 import { itemsById, updateIds, report as modUpdateReport, checkProgress } from "../../modUpdates";
 import { buildConflictIndex } from "../../modConflict";
 import {
-  canTranslateText,
+  hasTranslatableText,
+  isDescriptionLoaded,
   currentTargetLanguageName,
   ensureTranslation,
   hydrateTranslations,
@@ -50,6 +50,7 @@ import {
   setCustomName,
   setFavorite,
 } from "../../userData";
+import { isHiddenMod, setHiddenMod } from "../../hiddenMods";
 import { normalizeBackendError, normalizeError, translateBackendMessage } from "../../format";
 import type { ModEntry, SortKey } from "../../types";
 
@@ -73,8 +74,6 @@ const props = defineProps<{
   sortModel?: string;
   /** 文件大小排序方向（v-model，App.vue 顶栏 ModToolbar 持有） */
   orderModel?: "DESC" | "ASC";
-  /** 视图模式（grid/list，App.vue 顶栏 ViewSwitch 持有） */
-  viewMode: "grid" | "list";
   /** 卡片大小 */
   cardSize: number;
 }>();
@@ -83,9 +82,9 @@ const emit = defineEmits<{
   (e: "update:search", v: string): void;
   (e: "update:sortModel", v: string): void;
   (e: "update:orderModel", v: "DESC" | "ASC"): void;
-  /** 侧栏「收藏」= 进入独立收藏工作区；可选带上收藏内部二级分类 */
-  (e: "open-favorites", scope: FavoriteStatusFilter): void;
 }>();
+
+const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
 
 const { t, locale } = useI18n();
 const { toast, showToast } = useToast();
@@ -297,10 +296,11 @@ const localMenuItems = computed<ContextMenuItem[]>(() => {
   const id = mod.workshopId ?? 0;
   const favorited = id > 0 && isFavorite(id);
   const hasTranslation = id > 0 && translationOf(id) !== null;
-  const canText = canTranslateText(mod.description ?? "");
+  const canText = hasTranslatableText(mod.displayName, mod.description);
   const translating = id > 0 && isTranslating(id);
   const queued = id > 0 && isQueued(id);
   const showingOriginal = id > 0 && isShowingOriginal(id);
+  const hidden = isHiddenMod(mod.id);
 
   return buildLocalMenuItems(
     mod,
@@ -311,6 +311,7 @@ const localMenuItems = computed<ContextMenuItem[]>(() => {
       translating,
       queued,
       showingOriginal,
+      hidden,
     },
     {
       enable: t("menu.enable"),
@@ -327,6 +328,8 @@ const localMenuItems = computed<ContextMenuItem[]>(() => {
       browseSite: t("detail.browseSite"),
       deleteMod: t("detail.deleteMod"),
       notRegisteredHint: t("card.notRegisteredHint"),
+      hide: t("menu.hide"),
+      unhide: t("menu.unhide"),
     },
   );
 });
@@ -391,6 +394,14 @@ async function onMenuSelect(itemId: string): Promise<void> {
       await openWebsiteFromMenu(mod);
       return;
     }
+    case "hide": {
+      cardMenu.close();
+      const next = !isHiddenMod(mod.id);
+      setHiddenMod(mod.id, next);
+      if (next && selectedId.value === mod.id) selectedId.value = null;
+      showToast(next ? t("menu.hiddenToast") : t("menu.unhiddenToast"));
+      return;
+    }
     case "delete": {
       cardMenu.close();
       deleteError.value = null;
@@ -415,7 +426,8 @@ function translationErrorMessage(error: unknown): string {
     case "quota":
       return t("translate.failQuota");
     case "not_ready":
-      return t("translate.notReady");
+      // 后端 MIN_DESC_CHARS 拦截：描述存在但内容过短，不是「还没加载」
+      return t("translate.tooShort");
     default:
       return t("translate.failGeneric", { msg: rawBackendMessage(error) });
   }
@@ -430,8 +442,13 @@ async function translateFromMenu(mod: ModEntry): Promise<void> {
     return;
   }
   if (isTranslating(id) || isQueued(id)) return;
-  if (!canTranslateText(mod.description ?? "")) {
-    showToast(t("translate.notReady"), "error");
+  if (!hasTranslatableText(mod.displayName, mod.description)) {
+    showToast(
+      isDescriptionLoaded(mod.description)
+        ? t("translate.noContent")
+        : t("translate.notReady"),
+      "error",
+    );
     return;
   }
   try {
@@ -797,6 +814,7 @@ defineExpose({
     <!-- 左：来源 / 收藏 / 分类 / 状态筛选 -->
     <template #sidebar>
       <LocalSidebar
+        v-model:view-mode="viewMode"
         :sort-mode="sortMode"
         :source="source"
         :status="status"
@@ -810,7 +828,6 @@ defineExpose({
         @pick-source="pickSource"
         @pick-status="pickStatus"
         @pick-tag="pickTag"
-        @open-favorites="emit('open-favorites', $event)"
         @pick-updates-only="pickUpdatesOnly"
       />
     </template>

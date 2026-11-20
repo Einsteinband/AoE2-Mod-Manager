@@ -21,7 +21,8 @@ import { snapshotFromDetail } from "../favorites/model";
 import { localizedTagName } from "../online/types";
 import {
   activeTranslation,
-  canTranslateText,
+  hasTranslatableText,
+  isDescriptionLoaded,
   currentTargetLanguageName,
   ensureTranslation,
   isQueued,
@@ -294,8 +295,13 @@ const descText = computed(() => {
   return zh ? zh : props.mod.description ?? "";
 });
 
-/** 描述过短（无描述的手工模组）= 不够翻译，按钮置灰并提示 */
-const canTranslate = computed(() => canTranslateText(props.mod.description));
+/**
+ * 翻译入口是否可用：标题与描述**各自独立**判断 —— 标题非空就能翻标题，
+ * 描述为空 / 过短（如 "🙂"）只会跳过描述，不会让整个入口失效。
+ */
+const canTranslate = computed(() =>
+  hasTranslatableText(props.mod.displayName, props.mod.description),
+);
 
 /** 长描述折叠：超过约 8 行（或换行很多）才出现「展开全文」 */
 const DESC_COLLAPSE_AT = 260;
@@ -342,7 +348,11 @@ async function onTranslateClick(): Promise<void> {
   // ② 没翻过 / 只翻过旧语言 → 走当前目标语言的请求；
   //    ensureTranslation 会先丢掉旧语言条目，所以点一次就会去翻新语言而不是切原文。
   if (!canTranslate.value) {
-    showToast(t("translate.notReady"), "error");
+    // 区分「确实没取到描述」与「取到了但没有可翻译内容」，不再统一说成「还没加载」
+    showToast(
+      isDescriptionLoaded(props.mod.description) ? t("translate.noContent") : t("translate.notReady"),
+      "error",
+    );
     return;
   }
   try {
@@ -371,7 +381,8 @@ function translationErrorText(error: unknown): string {
     case "quota":
       return t("translate.failQuota");
     case "not_ready":
-      return t("translate.notReady");
+      // 后端 MIN_DESC_CHARS 拦截：描述存在但内容过短，不是「还没加载」
+      return t("translate.tooShort");
     default:
       return t("translate.failGeneric", { msg: rawMessageOf(error) });
   }

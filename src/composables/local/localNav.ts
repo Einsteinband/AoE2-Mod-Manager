@@ -26,7 +26,7 @@ export interface LocalNavSnapshot {
   officialTagList: LocalNavTagOption[];
   inferredTagList: LocalNavTagOption[];
   sourceCounts: { all: number; local: number; subscribed: number; imported: number };
-  statusCounts: { enabled: number; disabled: number; unknown: number };
+  statusCounts: { enabled: number; disabled: number; unknown: number; hidden: number };
 }
 
 export interface LocalNavIntent {
@@ -45,7 +45,7 @@ const emptySnapshot = (): LocalNavSnapshot => ({
   officialTagList: [],
   inferredTagList: [],
   sourceCounts: { all: 0, local: 0, subscribed: 0, imported: 0 },
-  statusCounts: { enabled: 0, disabled: 0, unknown: 0 },
+  statusCounts: { enabled: 0, disabled: 0, unknown: 0, hidden: 0 },
 });
 
 const snapshot = reactive<LocalNavSnapshot>(emptySnapshot());

@@ -356,7 +356,7 @@ export interface PriorityOutcome {
   wrote: boolean;
 }
 
-export type StatusFilter = "all" | "enabled" | "disabled" | "unknown";
+export type StatusFilter = "all" | "enabled" | "disabled" | "unknown" | "hidden";
 export type SortKey = "name" | "updated" | "priority" | "folder" | "download" | "size";
 
 /** v0.4：GitHub 最新 Release 的检测结果（Rust 侧已比对好版本号） */

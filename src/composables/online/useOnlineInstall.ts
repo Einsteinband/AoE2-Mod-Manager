@@ -23,6 +23,7 @@ import {
   latestTaskOfMod,
   queuePositionOf,
   requestCancelTask,
+  requestResumeTask,
   taskOfMod,
 } from "../../online/downloadQueue";
 import { translateBackendMessage } from "../../format";
@@ -68,6 +69,9 @@ export function useOnlineInstall(deps: {
     const status = modTask.value?.status;
     return status === "downloading" || status === "installing";
   });
+
+  /** 已暂停：临时文件保留，主按钮用于继续下载 */
+  const paused = computed(() => modTask.value?.status === "paused");
 
   /** 排队中：按钮显示「已加入队列（第 N 位）」，点击可移出队列 */
   const queued = computed(() => modTask.value?.status === "queued");
@@ -123,7 +127,7 @@ export function useOnlineInstall(deps: {
   });
 
   const primaryAction = computed<"install" | "uninstall-local">(() =>
-    localEntry.value ? "uninstall-local" : "install",
+    paused.value ? "install" : localEntry.value ? "uninstall-local" : "install",
   );
 
   /** 主按钮文案：与 primaryAction 严格一一对应（排队 / 下载中只影响当前模组） */
@@ -136,6 +140,7 @@ export function useOnlineInstall(deps: {
     }
     if (modTask.value?.status === "installing") return t("online.installing");
     if (modTask.value?.status === "downloading") return t("online.downloading");
+    if (paused.value) return t("downloader.resume");
     return primaryAction.value === "uninstall-local"
       ? t("online.uninstallLocal")
       : t("online.installLocal");
@@ -198,8 +203,12 @@ export function useOnlineInstall(deps: {
     deps.showToast(t("downloader.addedToast", { title: mod.title }));
   }
 
-  /** 主按钮：加入队列（下载并安装为本地模组） */
+  /** 主按钮：加入队列（下载并安装为本地模组）；已暂停时回到续传入口 */
   function downloadAndInstall(): void {
+    if (paused.value && modTask.value) {
+      requestResumeTask(modTask.value.id);
+      return;
+    }
     pushToQueue("install");
   }
 
@@ -304,6 +313,7 @@ export function useOnlineInstall(deps: {
   return {
     progress,
     installing,
+    paused,
     queued,
     queuePos,
     cancelRequested,

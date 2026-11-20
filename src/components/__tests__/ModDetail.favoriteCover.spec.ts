@@ -40,6 +40,17 @@ vi.mock("../../online/downloadQueue", () => ({
 vi.mock("../../online/translation", () => ({
   activeTranslation: vi.fn(() => null),
   canTranslateText: vi.fn(() => true),
+  isDescriptionLoaded: vi.fn(
+    (text: string | null | undefined) => text !== null && text !== undefined,
+  ),
+  canTranslateDescription: vi.fn(
+    (text: string | null | undefined) => typeof text === "string" && text.trim().length > 0,
+  ),
+  hasTranslatableText: vi.fn(
+    (title: string | null | undefined, description?: string | null) =>
+      (title ?? "").trim().length > 0 ||
+      (typeof description === "string" && description.trim().length > 0),
+  ),
   currentTargetLanguageName: vi.fn(() => "中文"),
   ensureTranslation: vi.fn(),
   isQueued: vi.fn(() => false),

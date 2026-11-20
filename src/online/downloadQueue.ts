@@ -19,7 +19,15 @@
  *                            （install.rs 全无 cancel 逻辑），只能标「正在停止…」并等真实结果。
  */
 import { ref, watch } from "vue";
-import { cancelInstall, installMod, loadDownloadQueue, onDownloadProgress, saveDownloadQueue } from "./service";
+import {
+  cancelInstall,
+  clearResume,
+  installMod,
+  loadDownloadQueue,
+  onDownloadProgress,
+  pauseInstall,
+  saveDownloadQueue,
+} from "./service";
 import { messageOf } from "./errors";
 import { classifyNetworkFailure } from "./networkError";
 import { translate } from "../i18n";
@@ -27,6 +35,7 @@ import { sessionPhase, markUnauthenticated } from "../sessionState";
 import {
   isApiFailure,
   type DownloadProgress,
+  type InstallCommandResponse,
   type InstallOutcome,
 } from "./types";
 
@@ -56,6 +65,7 @@ export type TaskStatus =
   | "queued"
   | "downloading"
   | "installing"
+  | "paused"
   | "done"
   | "failed"
   | "cancelled";
@@ -112,6 +122,10 @@ export interface DownloadTask {
   wasSubscribed: boolean | null;
   /** 用户点了取消（安装中取消时只能等真实结果） */
   cancelRequested: boolean;
+  /** 用户点了暂停；暂停结果由 Rust 回执落为 paused */
+  pauseRequested: boolean;
+  /** 进程内续传凭据；重启后 Rust 登记已丢失，不持久化 */
+  resume: { expectedTotal: number } | null;
   /** 需要勾选「覆盖」才能继续 */
   needForce: boolean;
   message: TaskMessage | null;
@@ -219,7 +233,12 @@ async function flushPersist(): Promise<void> {
 }
 
 function isActive(task: DownloadTask): boolean {
-  return task.status === "queued" || task.status === "downloading" || task.status === "installing";
+  return (
+    task.status === "queued" ||
+    task.status === "downloading" ||
+    task.status === "installing" ||
+    task.status === "paused"
+  );
 }
 
 // ---------------- 查询（详情页 / 悬浮窗共用） ----------------
@@ -299,6 +318,8 @@ export function enqueueDownload(input: QueueTaskInput): EnqueueResult {
     wasSubscribed:
       input.wasSubscribed === true ? true : input.wasSubscribed === false ? false : null,
     cancelRequested: false,
+    pauseRequested: false,
+    resume: null,
     needForce: false,
     message: null,
     payload: {
@@ -368,6 +389,17 @@ export function requestCancelTask(taskId: string): void {
     trimHistory();
     return;
   }
+  if (task.status === "paused") {
+    task.status = "cancelled";
+    task.finishedAt = Date.now();
+    task.message = { key: "downloader.cancelled" };
+    task.resume = null;
+    task.pauseRequested = false;
+    touch();
+    trimHistory();
+    void clearResume(task.id).catch(() => undefined);
+    return;
+  }
   if (!isActive(task) || task.cancelRequested) return;
   // F3：下载中但已 90s 无进度 = 后端大概率卡死在 read，点取消直接前端放弃，
   // 不再只置 cancelRequested 然后干等。
@@ -381,6 +413,29 @@ export function requestCancelTask(taskId: string): void {
   if (task.status === "downloading") {
     void cancelInstall().catch(() => undefined);
   }
+}
+
+/** 暂停当前下载：只置按任务隔离的暂停标记，保留临时文件；回执落地前仍显示下载中 */
+export function requestPauseTask(taskId: string): void {
+  const task = downloadTasks.value.find((item) => item.id === taskId);
+  if (!task || task.status !== "downloading" || task.pauseRequested) return;
+  task.pauseRequested = true;
+  touch();
+  void pauseInstall(task.id).catch(() => undefined);
+}
+
+/** 从已保留的临时文件续传；Rust 侧按任务 id 读取进程内续传登记 */
+export function requestResumeTask(taskId: string): void {
+  const task = downloadTasks.value.find((item) => item.id === taskId);
+  if (!task || task.status !== "paused") return;
+  task.status = "queued";
+  task.pauseRequested = false;
+  task.cancelRequested = false;
+  task.error = null;
+  task.message = null;
+  task.lastProgressAt = Date.now();
+  touch();
+  void pump();
 }
 
 /** 移除一条已结束的任务（排队中的请用 requestCancelTask） */
@@ -527,11 +582,13 @@ async function runTask(task: DownloadTask): Promise<void> {
   // 这里 await 才落地，看到 task 已非 active 就直接 return，不重复通知 UI。
   let settledByUs = false;
   try {
-    const outcome = await Promise.race([
+    const response = await Promise.race<InstallCommandResponse>([
       installMod(
         task.modId,
         task.title,
         task.payload.force,
+        task.id,
+        task.resume !== null,
         task.payload.tagIds,
         task.payload.tagNames,
         task.payload.creator,
@@ -541,6 +598,22 @@ async function runTask(task: DownloadTask): Promise<void> {
       watchdogPromise,
     ]);
     if (!isActive(task)) return; // 被 forceAbandon 抢跑，丢弃后端结果
+    if (response.phase === "paused") {
+      const download = response.download;
+      task.status = "paused";
+      task.pauseRequested = false;
+      task.resume = { expectedTotal: download.total };
+      task.progress = {
+        modId: task.modId,
+        phase: "downloading",
+        received: download.bytes,
+        total: download.total,
+        percent: download.total > 0 ? Math.min(100, (download.bytes / download.total) * 100) : 0,
+      };
+      task.finishedAt = null;
+      return;
+    }
+    const outcome = response.outcome;
     task.outcome = outcome;
     task.localized = outcome.localized;
     task.status = "done";
@@ -549,6 +622,7 @@ async function runTask(task: DownloadTask): Promise<void> {
     settledByUs = true;
   } catch (e) {
     if (!isActive(task)) return; // 同上
+    task.resume = null;
     const kind = isApiFailure(e) ? e.kind : null;
     if (kind === "cancelled") {
       task.status = "cancelled";
@@ -602,8 +676,11 @@ async function runTask(task: DownloadTask): Promise<void> {
     settledByUs = true;
   } finally {
     if (watchdog !== undefined) window.clearTimeout(watchdog);
-    task.progress = null;
-    task.finishedAt = Date.now();
+    const paused = task.status === "paused";
+    if (!paused) {
+      task.progress = null;
+      task.finishedAt = Date.now();
+    }
     runningTaskIds.value = runningTaskIds.value.filter((id) => id !== task.id);
     touch();
     trimHistory();
@@ -641,7 +718,7 @@ function coerceTask(raw: Record<string, unknown>): DownloadTask | null {
   const modId = Number(raw.modId);
   if (!Number.isFinite(modId) || modId <= 0) return null;
   const status = raw.status as TaskStatus;
-  if (!["queued", "downloading", "installing", "done", "failed", "cancelled"].includes(status)) {
+  if (!["queued", "downloading", "installing", "paused", "done", "failed", "cancelled"].includes(status)) {
     return null;
   }
   const kind = raw.kind as TaskKind;
@@ -663,6 +740,8 @@ function coerceTask(raw: Record<string, unknown>): DownloadTask | null {
     localized: typeof raw.localized === "boolean" ? raw.localized : null,
     wasSubscribed: typeof raw.wasSubscribed === "boolean" ? raw.wasSubscribed : null,
     cancelRequested: false,
+    pauseRequested: false,
+    resume: null,
     needForce: raw.needForce === true,
     message:
       message && typeof message.key === "string"
@@ -697,7 +776,7 @@ async function restorePersisted(): Promise<void> {
     for (const item of raw) {
       const task = coerceTask(item as Record<string, unknown>);
       if (!task) continue;
-      if (task.status === "downloading" || task.status === "installing") {
+      if (task.status === "downloading" || task.status === "installing" || task.status === "paused") {
         // 进程被杀时它根本没跑完，磁盘状态未知：不自动重跑，如实标记为「中断」
         task.status = "failed";
         task.error = null;
@@ -753,7 +832,7 @@ export function downloadSummary(): { active: number; queued: number; running: nu
   let queued = 0;
   let running = 0;
   for (const task of downloadTasks.value) {
-    if (task.status === "queued") queued += 1;
+    if (task.status === "queued" || task.status === "paused") queued += 1;
     else if (task.status === "downloading" || task.status === "installing") running += 1;
   }
   return { active: queued + running, queued, running };

@@ -11,6 +11,7 @@ import { useI18n } from "vue-i18n";
 import { customNameOf, displayTitle } from "../../userData";
 import { TAG_RANK_BY_NAME } from "../../online/types";
 import { updateIds } from "../../modUpdates";
+import { countHiddenMods, isHiddenMod } from "../../hiddenMods";
 import type { ModEntry, SortKey, SourceFilter, StatusFilter } from "../../types";
 
 interface TagOption {
@@ -77,16 +78,19 @@ export function useLocalFilters(deps: {
   /** 左侧选中的官方/推断标签；null = 全部内容 */
   const activeTag = ref<string | null>(null);
 
+  /** 默认视图排除隐藏项；隐藏分类单独从全量扫描列表中取数。 */
+  const visibleMods = computed<ModEntry[]>(() => mods.value.filter((m) => !isHiddenMod(m.id)));
+
   const sourceCounts = computed(() => ({
-    all: mods.value.length,
-    local: mods.value.filter((m) => m.kind === "local" && m.source !== "imported").length,
-    subscribed: mods.value.filter((m) => m.kind === "subscribed").length,
-    imported: mods.value.filter((m) => m.source === "imported").length,
+    all: visibleMods.value.length,
+    local: visibleMods.value.filter((m) => m.kind === "local" && m.source !== "imported").length,
+    subscribed: visibleMods.value.filter((m) => m.kind === "subscribed").length,
+    imported: visibleMods.value.filter((m) => m.source === "imported").length,
   }));
 
   const statusCounts = computed(() => {
-    const counts = { enabled: 0, disabled: 0, unknown: 0 };
-    for (const m of mods.value) {
+    const counts = { enabled: 0, disabled: 0, unknown: 0, hidden: countHiddenMods(mods.value) };
+    for (const m of visibleMods.value) {
       if (m.enabled === true) counts.enabled += 1;
       else if (m.enabled === false) counts.disabled += 1;
       else counts.unknown += 1;
@@ -97,6 +101,11 @@ export function useLocalFilters(deps: {
   const filtered = computed<ModEntry[]>(() => {
     const q = search.value.trim().toLowerCase();
     return mods.value.filter((m) => {
+      if (status.value === "hidden") {
+        if (!isHiddenMod(m.id)) return false;
+      } else if (isHiddenMod(m.id)) {
+        return false;
+      }
       if (updatesOnly.value && !updateIds.value.has(m.id)) return false;
       if (source.value !== "all") {
         if (source.value === "imported") {
@@ -185,7 +194,7 @@ export function useLocalFilters(deps: {
    */
   const tagIndex = computed(() => {
     const map = new Map<string, { count: number; official: boolean }>();
-    for (const mod of mods.value) {
+    for (const mod of visibleMods.value) {
       const isOfficial = mod.categorySource === "official";
       for (const tag of mod.contentTags) {
         const current = map.get(tag) ?? { count: 0, official: false };
@@ -234,6 +243,7 @@ export function useLocalFilters(deps: {
     if (status.value === "enabled") return t("content.statusEnabled");
     if (status.value === "disabled") return t("content.statusDisabled");
     if (status.value === "unknown") return t("content.statusUnknown");
+    if (status.value === "hidden") return t("content.statusHidden");
     return t("content.statusAll");
   });
 

@@ -27,10 +27,11 @@ const slotMarkup = `
   </div>
   <div class="topbar-actions">
     <button class="launch-game-btn" type="button"><span class="btn-text">Launch</span></button>
-    <div class="view-switch">
-      <button class="view-btn" type="button"><span class="view-icon">▦</span><span class="view-text">Grid</span></button>
-      <button class="view-btn" type="button"><span class="view-icon">☰</span><span class="view-text">List</span></button>
-    </div>
+    <button class="fav-nav-root fav-topbar-btn" type="button">
+      <svg class="fav-star" viewBox="0 0 24 24"><path d="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z" fill="currentColor"/></svg>
+      <span class="fav-label">Favorites</span>
+      <span class="fav-count">3</span>
+    </button>
   </div>
 `;
 

@@ -83,6 +83,7 @@ function mountPanel(props: Record<string, unknown> = {}) {
       subscribeLabel: "Install",
       subscribeBusy: false,
       installing: false,
+      paused: false,
       queued: false,
       queuePos: null,
       cancelRequested: false,

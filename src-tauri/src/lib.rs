@@ -1,7 +1,8 @@
 use std::fs;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use tauri::{Emitter, Manager, Theme};
 use tauri_plugin_window_state::{AppHandleExt, WindowExt};
 
@@ -1775,6 +1776,13 @@ struct InstallOutcome {
     note: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(tag = "phase", rename_all = "camelCase")]
+enum InstallCommandResponse {
+    Completed { outcome: InstallOutcome },
+    Paused { download: download::DownloadOutcome },
+}
+
 /// 把最终形态**一次性**写进 mod-status.json：
 /// - localized = true  → 写 local//（Path 直接改成最终值，不产生 subscribed// 中间态）
 /// - localized = false → 写 subscribed//（转本地失败时的兜底，模组仍然可用）
@@ -1835,6 +1843,36 @@ fn write_final_status(
 
 static CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone)]
+struct TaskControl {
+    pause: Arc<AtomicBool>,
+}
+
+static TASK_CONTROLS: LazyLock<Mutex<HashMap<String, TaskControl>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone)]
+struct ResumeRecord {
+    work_dir: String,
+    zip_path: String,
+    expected_total: u64,
+}
+
+static RESUME_RECORDS: LazyLock<Mutex<HashMap<String, ResumeRecord>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[tauri::command]
+fn online_pause_install(task_id: String) {
+    if let Some(control) = TASK_CONTROLS.lock().ok().and_then(|map| map.get(&task_id).cloned()) {
+        control.pause.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tauri::command]
+fn online_clear_resume(task_id: String) {
+    if let Some(record) = RESUME_RECORDS.lock().ok().and_then(|mut map| map.remove(&task_id)) {
+        download::cleanup(&record.work_dir);
+    }
+}
+
 #[tauri::command]
 fn online_cancel_install() {
     CANCEL_FLAG.store(true, Ordering::SeqCst);
@@ -1845,6 +1883,8 @@ fn online_cancel_install() {
 #[tauri::command]
 async fn online_install(
     app: tauri::AppHandle,
+    task_id: String,
+    resume: bool,
     mod_id: i64,
     title: String,
     force: bool,
@@ -1856,10 +1896,44 @@ async fn online_install(
     description: Option<String>,
     // 官方缩略图地址；解压包里没缩略图时用它兜底
     thumbnail_url: Option<String>,
-) -> Result<InstallOutcome, ApiFailure> {
+) -> Result<InstallCommandResponse, ApiFailure> {
     let root = mod_root(&app)?;
     let client = client(&app)?;
     CANCEL_FLAG.store(false, Ordering::SeqCst);
+
+    let pause_flag = Arc::new(AtomicBool::new(false));
+    TASK_CONTROLS
+        .lock()
+        .map(|mut map| {
+            map.insert(
+                task_id.clone(),
+                TaskControl { pause: pause_flag.clone() },
+            )
+        })
+        .map_err(|e| ApiFailure::new("install", user_err("install.taskFailed", json!({ "error": e.to_string() })), None))?;
+    let remove_control = || {
+        if let Ok(mut map) = TASK_CONTROLS.lock() {
+            map.remove(&task_id);
+        }
+    };
+
+    let resume_context = if resume {
+        RESUME_RECORDS
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&task_id))
+            .map(|record| download::ResumeContext {
+                work_dir: std::path::PathBuf::from(record.work_dir),
+                zip_path: std::path::PathBuf::from(record.zip_path),
+                expected_total: record.expected_total,
+            })
+    } else {
+        None
+    };
+    if resume && resume_context.is_none() {
+        remove_control();
+        return Err(ApiFailure::new("invalid", user_err("download.resumeMissing", json!({})), None));
+    }
     // 归属判断只看软件自己的元数据：早先装过 = 更新，从未记录 = 外来目录
     let stored_meta = metadata::load_for_app(&app);
     let owned_before = stored_meta.mods.contains_key(&mod_id.to_string());
@@ -1883,11 +1957,32 @@ async fn online_install(
     let cookie_ok = client;
     let app_for_task = app.clone();
     let root_for_task = root.clone();
+    let task_id_for_resume = task_id.clone();
 
-    let result = tauri::async_runtime::spawn_blocking(move || -> Result<InstallOutcome, ApiFailure> {
+    let spawn_result = tauri::async_runtime::spawn_blocking(move || -> Result<InstallCommandResponse, ApiFailure> {
         let download_url = cookie_ok.download_url(mod_id)?;
 
-        let outcome = download::download_zip(&app_for_task, mod_id, &download_url, &CANCEL_FLAG)?;
+        let outcome = download::download_zip(
+            &app_for_task,
+            mod_id,
+            &download_url,
+            &CANCEL_FLAG,
+            Some(&pause_flag),
+            resume_context.as_ref(),
+        )?;
+        if outcome.status == "paused" {
+            if let Ok(mut map) = RESUME_RECORDS.lock() {
+                map.insert(
+                    task_id_for_resume.clone(),
+                    ResumeRecord {
+                        work_dir: outcome.work_dir.clone(),
+                        zip_path: outcome.zip_path.clone(),
+                        expected_total: outcome.total,
+                    },
+                );
+            }
+            return Ok(InstallCommandResponse::Paused { download: outcome });
+        }
         let staging_base = root_for_task
             .join(".aoe2mm-staging")
             .join(format!("{mod_id}-{}", scan::now_ms()));
@@ -2145,22 +2240,25 @@ async fn online_install(
         note_parts.push(status_note.clone());
         let note = note_parts.join("；");
 
-        Ok(InstallOutcome {
-            install: report,
-            downloaded_bytes: outcome.bytes,
-            assets,
-            localized,
-            final_dir,
-            final_path,
-            status_note,
-            status_backup_path,
-            note,
+        Ok(InstallCommandResponse::Completed {
+            outcome: InstallOutcome {
+                install: report,
+                downloaded_bytes: outcome.bytes,
+                assets,
+                localized,
+                final_dir,
+                final_path,
+                status_note,
+                status_backup_path,
+                note,
+            },
         })
     })
-    .await
-    .map_err(|e| ApiFailure::new("internal", user_err("install.taskFailed", json!({ "error": e.to_string() })), None))?;
+    .await;
+    let result = spawn_result.map_err(|e| ApiFailure::new("internal", user_err("install.taskFailed", json!({ "error": e.to_string() })), None));
 
-    result
+    remove_control();
+    result?
 }
 
 // ---------------- 卸载（只做本地清理，不向官方发任何请求） ----------------
@@ -3663,6 +3761,8 @@ pub fn run() {
             online_cover_sync,
             local_cover_refresh,
             online_install,
+            online_pause_install,
+            online_clear_resume,
             online_cancel_install,
             online_uninstall,
             delete_mod_files,

@@ -50,6 +50,8 @@ const labels = {
   browseSite: "Open webpage",
   deleteMod: "Uninstall",
   notRegisteredHint: "Not registered",
+  hide: "Hide",
+  unhide: "Unhide",
 };
 
 const baseState = {
@@ -59,6 +61,7 @@ const baseState = {
   translating: false,
   queued: false,
   showingOriginal: false,
+  hidden: false,
 };
 
 describe("buildLocalMenuItems", () => {
@@ -72,6 +75,7 @@ describe("buildLocalMenuItems", () => {
       "rename",
       "folder",
       "website",
+      "hide",
       "delete",
     ]);
     const toggle = items.find((i) => i.id === "toggle")!;
@@ -90,6 +94,27 @@ describe("buildLocalMenuItems", () => {
     expect(toggle.hint).toBe("Not registered");
   });
 
+  it("hide entry flips label and icon by hidden state", () => {
+    const hidden = buildLocalMenuItems(makeMod(), { ...baseState, hidden: true }, labels);
+    const hiddenItem = hidden.find((i) => i.id === "hide")!;
+    expect(hiddenItem.label).toBe("Unhide");
+    expect(hiddenItem.icon).toBe("👁");
+
+    const visible = buildLocalMenuItems(makeMod(), baseState, labels);
+    const visibleItem = visible.find((i) => i.id === "hide")!;
+    expect(visibleItem.label).toBe("Hide");
+    expect(visibleItem.icon).toBe("🚫");
+  });
+
+  it("omits hide entry when local-only labels are absent", () => {
+    const items = buildLocalMenuItems(makeMod(), baseState, {
+      ...labels,
+      hide: undefined,
+      unhide: undefined,
+    });
+    expect(items.map((i) => i.id)).not.toContain("hide");
+  });
+
   it("旧收藏幽灵条目的下载入口已移除：即使带 uninstalled 标记也按本地条目出菜单", () => {
     const stale = makeMod({
       uninstalled: true,
@@ -99,7 +124,7 @@ describe("buildLocalMenuItems", () => {
     });
     const items = buildLocalMenuItems(stale, baseState, labels);
     const ids = items.map((i) => i.id);
-    expect(ids).toEqual(["toggle", "favorite", "translate", "rename", "folder", "website", "delete"]);
+    expect(ids).toEqual(["toggle", "favorite", "translate", "rename", "folder", "website", "hide", "delete"]);
     expect(ids).not.toContain("install");
     // 无 mod-status 记录时启用项禁用并给出提示，而不是走下载安装
     expect(items.find((i) => i.id === "toggle")!.disabled).toBe(true);

@@ -850,15 +850,20 @@ summary:focus-visible {
   width: 36px;
   justify-content: center;
 }
-/* ViewSwitch 在 Launch 之后图标化；最终紧凑态保留该状态。 */
-.topbar.is-view-icon .view-switch .view-text,
-.topbar.is-compact .view-switch .view-text {
+/* 收藏按钮在 Launch 之后图标化；最终紧凑态保留该状态，只留星星。 */
+.topbar.is-view-icon .fav-label,
+.topbar.is-view-icon .fav-count,
+.topbar.is-compact .fav-label,
+.topbar.is-compact .fav-count {
   display: none;
 }
-.topbar.is-view-icon .view-switch .view-btn,
-.topbar.is-compact .view-switch .view-btn {
+.topbar.is-view-icon .fav-topbar-btn,
+.topbar.is-compact .fav-topbar-btn {
   padding: 0 8px;
+  width: 36px;
+  justify-content: center;
 }
+
 .topbar.is-compact .mod-toolbar .toolbar .btn-text {
   display: none;
 }

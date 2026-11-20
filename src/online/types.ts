@@ -394,6 +394,20 @@ export interface InstallOutcome {
   note: string;
 }
 
+/** Rust 侧保留的临时 ZIP 续传上下文；路径只由后端登记，前端不回传 */
+export interface PausedDownload {
+  zipPath: string;
+  bytes: number;
+  total: number;
+  workDir: string;
+  status: "paused" | "completed";
+}
+
+/** `online_install` 回执：completed 才进入既有安装收尾；paused 保留临时文件 */
+export type InstallCommandResponse =
+  | { phase: "completed"; outcome: InstallOutcome }
+  | { phase: "paused"; download: PausedDownload };
+
 /** 安装后补全的游戏资源文件结果 */
 export interface InstallAssets {
   /** 是否新写了 info.json（原本就有 = false，绝不覆盖） */

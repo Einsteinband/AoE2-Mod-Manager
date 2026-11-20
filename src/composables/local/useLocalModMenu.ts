@@ -14,6 +14,7 @@ export interface LocalMenuState {
   translating: boolean;
   queued: boolean;
   showingOriginal: boolean;
+  hidden: boolean;
 }
 
 export interface LocalMenuLabels {
@@ -31,6 +32,8 @@ export interface LocalMenuLabels {
   browseSite: string;
   deleteMod: string;
   notRegisteredHint: string;
+  hide?: string;
+  unhide?: string;
 }
 
 export function buildLocalMenuItems(
@@ -94,6 +97,14 @@ export function buildLocalMenuItems(
     label: labels.browseSite,
     disabled: id <= 0,
   });
+
+  if (labels.hide && labels.unhide) {
+    items.push({
+      id: "hide",
+      icon: state.hidden ? "👁" : "🚫",
+      label: state.hidden ? labels.unhide : labels.hide,
+    });
+  }
 
   // ⑤ 危险分组：卸载
   items.push({ id: "delete", danger: true, label: labels.deleteMod, dividerBefore: true });

@@ -11,6 +11,10 @@ const locales = { zh, en, es, de, ru };
 const REQUIRED_PATHS = [
   "menu.enable",
   "menu.disable",
+  "menu.hide",
+  "menu.unhide",
+  "menu.hiddenToast",
+  "menu.unhiddenToast",
   "menu.ariaLabel",
   "favorites.favorite",
   "favorites.favorited",

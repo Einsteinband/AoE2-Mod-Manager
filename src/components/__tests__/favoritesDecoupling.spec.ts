@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 /**
  * 概念隔离回归：
  *   顶部板块 = local | online（mode，仅页面导航；favorites 时用 mainSection 保留高亮）
- *   收藏状态 = all | installed | uninstalled（favoritesWorkspace.scope，仅数据能力，不再有侧栏 UI 切换）
+ *   收藏状态 = all | installed | uninstalled（favoritesWorkspace.scope；收藏页侧栏只承载 installed/uninstalled）
  * 两套状态不得互相写入。
  */
 
@@ -49,5 +49,46 @@ describe("顶部板块与收藏状态互不控制", () => {
     expect(favoritesNav).not.toContain("openScope");
     expect(favoritesNav).not.toContain("fav-nav-child");
     expect(favoritesNav).not.toContain("stateLocal");
+  });
+
+  it("进入收藏不会被「未保存排序」守卫弹回本地页：两处切页守卫都先放行 favorites", () => {
+    const appWatch = app.match(/watch\(mode,[\s\S]*?\n\}\);/)?.[0] ?? "";
+    expect(appWatch).toContain('next === "favorites"');
+    // 收藏分支在排序守卫之前 return，不能走到 mode.value = "local"
+    const favoritesBranch = appWatch.slice(0, appWatch.indexOf("sortBlocksRescan"));
+    expect(favoritesBranch).toContain('next === "favorites"');
+    expect(favoritesBranch).toContain("return;");
+
+    const startup = readFileSync(join("src", "composables", "useStartup.ts"), "utf8");
+    const startupWatch = startup.match(/watch\(mode,[\s\S]*?\n\s*\}\);/)?.[0] ?? "";
+    const startupFavBranch = startupWatch.slice(0, startupWatch.indexOf("sort.blocksRescan"));
+    expect(startupFavBranch).toContain('next === "favorites"');
+    expect(startupFavBranch).toContain("return;");
+  });
+
+  it("收藏入口统一在顶栏，视图切换统一在侧栏，两侧不重复渲染", () => {
+    const localSidebar = readFileSync(join("src", "components", "local", "LocalSidebar.vue"), "utf8");
+    const onlineSidebar = readFileSync(
+      join("src", "components", "online", "OnlineSidebar.vue"),
+      "utf8",
+    );
+    const onlineBrowser = readFileSync(join("src", "components", "OnlineBrowser.vue"), "utf8");
+    const localBrowser = readFileSync(join("src", "components", "local", "LocalBrowser.vue"), "utf8");
+
+    // 侧栏只承载视图切换；收藏导航由顶栏 FavoritesNav 统一处理
+    expect(localSidebar).toContain("<ViewSwitch");
+    expect(onlineSidebar).toContain("<ViewSwitch");
+    expect(localSidebar).not.toContain("<FavoritesNav");
+    expect(onlineSidebar).not.toContain("<FavoritesNav");
+    for (const file of [localSidebar, onlineSidebar]) {
+      expect(file).not.toContain("@open-favorites");
+    }
+    expect(onlineBrowser).not.toContain("@open-favorites");
+    expect(localBrowser).not.toContain("@open-favorites");
+    expect(app).not.toContain("<ViewSwitch");
+    expect((app.match(/<FavoritesNav/g) ?? []).length).toBe(1);
+    expect((app.match(/@open-favorites="openFavorites\(\$event\)"/g) ?? []).length).toBe(1);
+    // 收藏态顶部高亮保留进入前的主板块（local / online），不是强制 local
+    expect(app).toContain('mode.value === "favorites" ? lastMainSection.value : mode.value');
   });
 });

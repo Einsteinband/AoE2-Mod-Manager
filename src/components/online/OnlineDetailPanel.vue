@@ -54,6 +54,8 @@ const props = defineProps<{
   subscribeLabel: string;
   subscribeBusy: boolean;
   installing: boolean;
+  /** 下载已暂停，临时文件保留 */
+  paused: boolean;
   /** 排队中（尚未开始） */
   queued: boolean;
   /** 队列位次（1 起） */
@@ -416,7 +418,7 @@ watch(
           <span class="sr-only">{{ installing ? t("online.installing") : mod.updateAvailable ? t("online.updateLocal") : t("online.reinstallLocal") }}</span>
         </button>
         <button
-          v-if="installing"
+          v-if="installing || paused"
           type="button"
           class="dv-btn-ghost icon-btn"
           :disabled="cancelRequested"

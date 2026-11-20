@@ -1241,20 +1241,22 @@ pub async fn translate_mod_text(
     if title.is_empty() {
         return Err(ApiFailure::new("invalid", user_err("translate.noTitle", json!({})), None));
     }
-    // 硬拦截：描述为空/过短说明详情还没加载完，绝不能拿空文本去翻译并写缓存
-    // （否则 hash 被空描述占位，之后详情加载出来也永远不会再翻译）
-    if description.chars().count() < MIN_DESC_CHARS {
+    // 标题与描述**独立判断**：描述为空/过短只表示「这次不翻描述」，
+    // 绝不能拦住标题翻译（否则描述只有 "🙂" 的模组连标题都翻不出来）。
+    // 描述翻译的最小长度规则（MIN_DESC_CHARS）保持不变，只是它不再是一票否决。
+    let desc_chars = description.chars().count();
+    if desc_chars < MIN_DESC_CHARS && !description.is_empty() {
         log::warn!(
             target: "translate",
-            "拒绝翻译 modId={mod_id}：描述只有 {} 个字符（需要至少 {MIN_DESC_CHARS}）",
-            description.chars().count()
+            "跳过描述翻译 modId={mod_id}：描述只有 {desc_chars} 个字符（描述翻译至少 {MIN_DESC_CHARS}）→ 只翻标题"
         );
-        return Err(ApiFailure::new(
-            "not_ready",
-            user_err("translate.descriptionNotLoaded", json!({})),
-            None,
-        ));
     }
+    // 过短描述不参与翻译、也不进 hash：等详情真正带出长描述后会因 hash 变化重新翻译
+    let description = if desc_chars >= MIN_DESC_CHARS {
+        description
+    } else {
+        String::new()
+    };
 
     let (description, truncated) = truncate_chars(&description, MAX_TOTAL_CHARS);
     let hash = hash_of(&title, &description);

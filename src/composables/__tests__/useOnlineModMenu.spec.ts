@@ -179,7 +179,7 @@ describe("resolveMenuDescription（详情 / 右键菜单同一口径）", () => 
     ).toBe("");
   });
 
-  it("三处都没有可用描述 → 返回空串，菜单仍按「等待描述」置灰", () => {
+  it("描述完全缺失（空串/空白）时才回退空串；菜单置灰仅由「有无可翻译字段」决定", () => {
     const text = resolveMenuDescription({
       targetId: 11,
       listText: "  ",
@@ -188,13 +188,38 @@ describe("resolveMenuDescription（详情 / 右键菜单同一口径）", () => 
       selectedText: null,
     });
     expect(text).toBe("  ");
+    // 标题存在 → 真实调用方传 canText: true，翻译项可用（描述缺失不再是拦路条件）
+    const enabled = buildOnlineMenuItems(11, { ...baseState, canText: true }, labels).find(
+      (i) => i.id === "translate",
+    )!;
+    expect(enabled.disabled).toBe(false);
+    expect(enabled.hint).toBeUndefined();
+
+    // 标题与描述都没有（真实调用方才会传 false）→ 置灰并给出等待提示
+    const disabled = buildOnlineMenuItems(11, { ...baseState, canText: false }, labels).find(
+      (i) => i.id === "translate",
+    )!;
+    expect(disabled.disabled).toBe(true);
+    expect(disabled.hint).toBe("Waiting for the description…");
+  });
+
+  it("描述只有符号（🙂）也算有内容：菜单不再当成未加载", () => {
+    const text = resolveMenuDescription({
+      targetId: 7,
+      listText: "",
+      cached: null,
+      selectedId: 7,
+      selectedText: "🙂",
+    });
+    expect(text).toBe("🙂");
+
     const items = buildOnlineMenuItems(
-      11,
-      { ...baseState, canText: text.trim().length >= 5 },
+      Number(7),
+      { ...baseState, canText: true },
       labels,
     );
     const translate = items.find((i) => i.id === "translate")!;
-    expect(translate.disabled).toBe(true);
-    expect(translate.hint).toBe("Waiting for the description…");
+    expect(translate.disabled).toBe(false);
+    expect(translate.hint).toBeUndefined();
   });
 });

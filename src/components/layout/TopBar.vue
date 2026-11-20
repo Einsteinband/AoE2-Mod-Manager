@@ -46,8 +46,8 @@ const { t, locale } = useI18n();
  *   - expanded：品牌 / 标签 / 搜索 / 下拉 / 操作按钮保持完整文字；
  *   - brand-short：先缩短品牌文字与副标题；
  *   - brand-badge：品牌仅保留徽章；
- *   - launch-icon：Launch 先去文字图标化，ViewSwitch 仍保留文字；
- *   - view-icon：ViewSwitch 再去文字图标化；
+ *   - launch-icon：Launch 先去文字图标化，收藏按钮仍保留文字与计数；
+ *   - view-icon：收藏按钮再去文字，只保留星星；
  *   - compact：Rescan/Refresh 与下拉适度收窄。
  *
  * 阶段由顶栏全宽容器的真实可用宽度统一控制；不判断语言，也不设置语言 / 页面专用固定断点。
@@ -60,8 +60,8 @@ interface IntrinsicCache {
   tabs: number;
   settings: number;
   searchMin: number;
-  viewText: number;
-  viewIcon: number;
+  favText: number;
+  favIcon: number;
   toolbarExpanded: number;
   toolbarCompact: number;
   actionsExpanded: number;
@@ -131,11 +131,11 @@ function measureToolbar(
   });
 }
 
-/** ViewSwitch 图标态需求宽度：克隆后隐藏文字，只保留两枚图标。 */
-function measureViewSwitchIcons(viewSwitch: Element | null | undefined): number {
-  return cloneMeasure(viewSwitch, (clone) => {
-    clone.querySelectorAll(".view-text").forEach((text) => {
-      (text as HTMLElement).style.display = "none";
+/** 收藏按钮图标态需求宽度：克隆后隐藏文字与计数，只保留星星。 */
+function measureFavIcon(favButton: Element | null | undefined): number {
+  return cloneMeasure(favButton, (clone) => {
+    clone.querySelectorAll(".fav-label, .fav-count").forEach((node) => {
+      (node as HTMLElement).style.display = "none";
     });
   });
 }
@@ -179,13 +179,13 @@ function relayout(allowRecovery = false): void {
   const settings = el.querySelector(".settings-entry");
   const search = el.querySelector<HTMLElement>(".search-box");
   const launch = el.querySelector<HTMLElement>(".launch-game-btn");
-  const viewSwitch = el.querySelector(".view-switch");
+  const favButton = el.querySelector(".fav-nav-root");
 
   if (!intrinsicCache) {
     const settingsWidth = settings ? settings.getBoundingClientRect().width : 0;
     const searchMin = (search ? parseFloat(getComputedStyle(search).minWidth) : 0) || 96;
-    const viewTextWidth = cloneMeasure(viewSwitch);
-    const viewIconWidth = measureViewSwitchIcons(viewSwitch);
+    const favTextWidth = cloneMeasure(favButton);
+    const favIconWidth = measureFavIcon(favButton);
 
     intrinsicCache = {
       brandExpanded: cloneMeasure(brand),
@@ -194,13 +194,13 @@ function relayout(allowRecovery = false): void {
       tabs: cloneMeasure(tabs),
       settings: settingsWidth,
       searchMin,
-      viewText: viewTextWidth,
-      viewIcon: viewIconWidth,
+      favText: favTextWidth,
+      favIcon: favIconWidth,
       toolbarExpanded: measureToolbar(toolbar, 70, 120, false),
       toolbarCompact: measureToolbar(toolbar, 64, 96, true),
-      actionsExpanded: cloneMeasure(launch) + viewTextWidth,
-      actionsLaunchIcon: TOPBAR_LAYOUT_CONSTANTS.launchIconWidth + viewTextWidth,
-      actionsCompact: TOPBAR_LAYOUT_CONSTANTS.launchIconWidth + viewIconWidth,
+      actionsExpanded: cloneMeasure(launch) + favTextWidth,
+      actionsLaunchIcon: TOPBAR_LAYOUT_CONSTANTS.launchIconWidth + favTextWidth,
+      actionsCompact: TOPBAR_LAYOUT_CONSTANTS.launchIconWidth + favIconWidth,
     };
   }
 
@@ -336,11 +336,10 @@ onBeforeUnmount(() => {
         <span class="nav-full">{{ t("nav.online") }}</span>
         <span class="nav-short">{{ t("nav.onlineShort") }}</span>
       </button>
-      <!-- 收藏不是顶部页签：它由侧栏「收藏」一级入口进入，且不受这里的本地 / 在线状态控制。 -->
+      <!-- 收藏不是顶部页签：入口在右侧操作区，且不受这里的本地 / 在线状态控制。 -->
     </nav>
 
-    <!-- v2.0：搜索 / 排序切换——由父组件塞入 <ModToolbar>，两种模式同一位置。
-         网格/列表切换也在本插槽里（尾部、齿轮左侧），两种模式同一位置。 -->
+    <!-- v2.0：搜索 / 排序切换——由父组件塞入 <ModToolbar>；收藏入口也在本插槽尾部、齿轮左侧。 -->
     <slot />
 
     <button

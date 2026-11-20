@@ -11,6 +11,8 @@ import {
   queuePositionOf,
   removeTask,
   requestCancelTask,
+  requestPauseTask,
+  requestResumeTask,
   retryTask,
   stalledTick,
   type DownloadTask,
@@ -75,6 +77,8 @@ function statusText(task: DownloadTask): string {
       return t("downloader.downloading");
     case "installing":
       return t("downloader.installing");
+    case "paused":
+      return t("downloader.paused");
     case "done":
       return t("downloader.done");
     case "failed":
@@ -94,7 +98,7 @@ function percentOf(task: DownloadTask): number {
 }
 
 function showBar(task: DownloadTask): boolean {
-  return task.status === "downloading" || task.status === "installing";
+  return task.status === "downloading" || task.status === "installing" || task.status === "paused";
 }
 
 function noteText(task: DownloadTask): string {
@@ -103,6 +107,14 @@ function noteText(task: DownloadTask): string {
     // 启动时从磁盘恢复的「上次退出时中断」没有 error 文本，用消息 key 兜底
     if (task.message) return t(task.message.key, task.message.params ?? {});
     return "";
+  }
+  if (task.status === "paused") {
+    const progress = task.progress;
+    if (!progress) return t("downloader.pausedHint");
+    const received = (progress.received / 1024 / 1024).toFixed(1);
+    return progress.total > 0
+      ? `${received} MB / ${(progress.total / 1024 / 1024).toFixed(1)} MB · ${t("downloader.pausedHint")}`
+      : `${received} MB · ${t("downloader.pausedHint")}`;
   }
   if (task.status === "downloading" || task.status === "installing") {
     // F2：下载无响应时优先给「点取消放弃」的提示，而不是干巴巴的 MB 数。
@@ -124,14 +136,24 @@ function noteText(task: DownloadTask): string {
   return "";
 }
 
-function actionLabel(task: DownloadTask): string {
+function primaryLabel(task: DownloadTask): string {
   if (task.status === "queued") return t("downloader.leaveQueue");
-  if (task.status === "downloading" || task.status === "installing") return t("downloader.cancel");
+  if (task.status === "downloading") return task.pauseRequested ? t("downloader.stopping") : t("downloader.pause");
+  if (task.status === "paused") return t("downloader.resume");
+  if (task.status === "installing") return t("downloader.cancel");
   return t("downloader.remove");
 }
 
-function runAction(task: DownloadTask): void {
-  if (task.status === "queued" || task.status === "downloading" || task.status === "installing") {
+function onPrimary(task: DownloadTask): void {
+  if (task.status === "downloading") {
+    requestPauseTask(task.id);
+    return;
+  }
+  if (task.status === "paused") {
+    requestResumeTask(task.id);
+    return;
+  }
+  if (task.status === "queued" || task.status === "installing") {
     requestCancelTask(task.id);
     return;
   }
@@ -189,15 +211,49 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
                 {{ t("downloader.remove") }}
               </button>
             </template>
+            <template v-else-if="task.status === 'downloading'">
+              <button
+                type="button"
+                class="dlmgr-act"
+                :disabled="task.pauseRequested"
+                @click="onPrimary(task)"
+              >
+                {{ primaryLabel(task) }}
+              </button>
+              <button
+                type="button"
+                class="dlmgr-act danger"
+                :disabled="isStopping(task)"
+                @click="requestCancelTask(task.id)"
+              >
+                {{ t("downloader.cancel") }}
+              </button>
+            </template>
+            <template v-else-if="task.status === 'paused'">
+              <button
+                type="button"
+                class="dlmgr-act"
+                @click="onPrimary(task)"
+              >
+                {{ primaryLabel(task) }}
+              </button>
+              <button
+                type="button"
+                class="dlmgr-act danger"
+                @click="requestCancelTask(task.id)"
+              >
+                {{ t("downloader.cancel") }}
+              </button>
+            </template>
             <button
               v-else
               type="button"
               class="dlmgr-act"
-              :class="{ danger: task.status === 'downloading' || task.status === 'installing' }"
+              :class="{ danger: task.status === 'installing' }"
               :disabled="isStopping(task)"
-              @click="runAction(task)"
+              @click="onPrimary(task)"
             >
-              {{ isStopping(task) ? t("downloader.stopping") : actionLabel(task) }}
+              {{ isStopping(task) ? t("downloader.stopping") : primaryLabel(task) }}
             </button>
           </div>
         </div>

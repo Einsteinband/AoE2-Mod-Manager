@@ -13,8 +13,7 @@ import ViewSwitch from "./ViewSwitch.vue";
  *
  * v2.1 布局调优：
  *   - 搜索框不再吃掉整行，排序下拉与 #extra 里的按钮**紧贴搜索框右侧**；
- *   - 视图切换已改为独立的 <ViewSwitch>：本地页与在线页都把它放在各自列表抬头右端
- *     两个页面都将其放在顶栏右端，因此都传 show-view-switch=false（组件内该分支仅作兼底保留）。
+ *   - 视图切换已统一放到各页侧栏顶部；工具栏内的 <ViewSwitch> 分支仅作兼容保留，页面均传 false。
  */
 interface ToolbarOption {
   value: string;
@@ -73,7 +72,7 @@ const search = defineModel<string>("search", { default: "" });
 const sort = defineModel<string>("sort", { default: "" });
 /** 升降序 */
 const order = defineModel<"DESC" | "ASC">("order", { default: "DESC" });
-/** 视图模式（全局状态，两个页面共用；各页都在顶栏右端渲染切换控件） */
+/** 视图模式（全局状态；工具栏分支仅作兼容保留，实际控件在侧栏顶部） */
 const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
 
 const showClear = computed(() =>
@@ -169,8 +168,7 @@ function clearSearch() {
       <!-- 页面专属按钮：固定插在排序之后、视图切换之前，两个页面占位顺序一致 -->
       <slot name="extra" />
 
-      <!-- 视图切换：本地页传 show-view-switch=false（它已被移到顶栏右端 .topbar-actions，紧贴齿轮左侧），
-           在线页仍留在这里 -->
+      <!-- 视图切换兼容分支：实际页面均传 show-view-switch=false，控件位于侧栏顶部 -->
       <ViewSwitch v-if="showViewSwitch" v-model:view-mode="viewMode" />
     </div>
   </div>

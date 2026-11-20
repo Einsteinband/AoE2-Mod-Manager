@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive } from "vue";
 import { useI18n } from "vue-i18n";
-import FavoritesNav from "../favorites/FavoritesNav.vue";
+import ViewSwitch from "../common/ViewSwitch.vue";
 import { localizedTagName } from "../../online/types";
 import type { SourceFilter, StatusFilter } from "../../types";
 
@@ -45,30 +45,26 @@ interface TagOption {
   count: number;
 }
 
-withDefaults(
-  defineProps<{
-    /** 排序模式：侧栏整体置灰锁定（条件不能与全量排序共存） */
-    sortMode: boolean;
-    source: SourceFilter;
-    status: StatusFilter;
-    updatesOnly: boolean;
-    updatesAvailableCount: number;
-    activeTag: string | null;
-    officialTagList: TagOption[];
-    inferredTagList: TagOption[];
-    sourceCounts: { all: number; local: number; subscribed: number; imported: number };
-    statusCounts: { enabled: number; disabled: number; unknown: number };
-    /** 是否渲染侧栏最顶部的「收藏」入口；收藏工作区自己渲染该入口时传 false，避免出现“收藏 → 收藏” */
-    showFavorites?: boolean;
-  }>(),
-  { showFavorites: true },
-);
+const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
+
+defineProps<{
+  /** 排序模式：侧栏整体置灰锁定（条件不能与全量排序共存） */
+  sortMode: boolean;
+  source: SourceFilter;
+  status: StatusFilter;
+  updatesOnly: boolean;
+  updatesAvailableCount: number;
+  activeTag: string | null;
+  officialTagList: TagOption[];
+  inferredTagList: TagOption[];
+  sourceCounts: { all: number; local: number; subscribed: number; imported: number };
+  statusCounts: { enabled: number; disabled: number; unknown: number; hidden: number };
+}>();
 
 const emit = defineEmits<{
   (event: "pick-source", value: SourceFilter): void;
   (event: "pick-status", value: StatusFilter): void;
   (event: "pick-tag", value: string | null): void;
-  (event: "open-favorites", scope: "all" | "installed" | "uninstalled"): void;
   (event: "pick-updates-only"): void;
 }>();
 
@@ -76,13 +72,10 @@ const { t } = useI18n();
 </script>
 
 <template>
-  <!-- 最顶部：收藏一级入口（独立工作区，不属于本地 / 在线筛选）
-       收藏工作区自带高亮版入口，传入 show-favorites=false 时这里不重复渲染 -->
-  <FavoritesNav
-    v-if="showFavorites !== false"
-    :active="false"
-    @open-favorites="emit('open-favorites', $event)"
-  />
+  <!-- 侧栏顶部：网格 / 列表切换；收藏入口统一由顶栏右侧承载 -->
+  <div class="sidebar-top">
+    <ViewSwitch v-model:view-mode="viewMode" />
+  </div>
 
   <div v-if="sortMode" class="sort-lock-note">{{ t("sort.sidebarLocked") }}</div>
 
@@ -264,11 +257,26 @@ const { t } = useI18n();
         <span class="label">{{ t("sidebar.unknown") }}</span>
         <span class="count">{{ statusCounts.unknown }}</span>
       </button>
+      <button
+        type="button"
+        class="side-item"
+        :class="{ active: status === 'hidden' }"
+        @click="emit('pick-status', 'hidden')"
+      >
+        <span class="label">{{ t("content.statusHidden") }}</span>
+        <span class="count">{{ statusCounts.hidden }}</span>
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  margin: 0 0 12px;
+}
+
 .sort-lock-note {
   margin: 0 0 10px;
   padding: 7px 9px;

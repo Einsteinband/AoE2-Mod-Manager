@@ -2,10 +2,6 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 
-const emit = defineEmits<{
-  /** 侧栏「收藏」= 进入独立收藏工作区；可带收藏内部二级分类 */
-  (e: "open-favorites", scope: "all" | "installed" | "uninstalled"): void;
-}>();
 import OnlineModCard from "./OnlineModCard.vue";
 import PageShell from "./layout/PageShell.vue";
 import ModGrid from "./common/ModGrid.vue";
@@ -19,7 +15,8 @@ import { onIndexProgress } from "../online/service";
 import { openModWebpage } from "../online/service";
 import { activeTaskOfMod, enqueueDownload, onTaskSettled, type DownloadTask } from "../online/downloadQueue";
 import { fetchImages, onImagesReady, onImagesFailed, syncCoverToInstall, assetUrl, type FailedImage } from "../online/images";import {
-  canTranslateText,
+  hasTranslatableText,
+  isDescriptionLoaded,
   currentTargetLanguageName,
   ensureTranslation,
   hydrateTranslations,
@@ -79,12 +76,11 @@ import { buildCoverPlan, localCoverPaths } from "../online/modSource";
 /**
  * 视图偏好由 App.vue 顶层持有（全局唯一真源），本组件只用不写：
  * 在本地页调过的滑块 / 视图，切到在线页后依然生效；
- * 网格 / 列表切换本身已统一放在顶栏右端（设置齿轮左侧），不在本页面里。
+ * 网格 / 列表切换放在侧栏顶部，不在本页面里重复渲染。
  */
-withDefaults(defineProps<{ viewMode?: "grid" | "list"; cardSize?: number }>(), {
-  viewMode: "grid",
-  cardSize: 200,
-});
+const viewMode = defineModel<"grid" | "list">("viewMode", { default: "grid" });
+
+withDefaults(defineProps<{ cardSize?: number }>(), { cardSize: 200 });
 
 // ---------- 筛选状态由顶栏（App.vue）持有，这里通过 v-model 双向绑定 ----------
 const query = defineModel<string>("query", { required: true });
@@ -190,6 +186,7 @@ const {
   descText,
   canTranslate,
   waitingDetail,
+  noDescriptionText,
   /** 详情面板已加载的描述（右键菜单复用它，避免两处判断不一致） */
   descriptionText: selectedDetailText,
   selectedTranslated,
@@ -204,6 +201,7 @@ const {
 const {
   progress,
   installing,
+  paused,
   installError,
   installNote,
   needForce,
@@ -322,7 +320,8 @@ function translationErrorMessage(error: unknown): string {
     case "quota":
       return t("translate.failQuota");
     case "not_ready":
-      return t("translate.notReady");
+      // 后端 MIN_DESC_CHARS 拦截：描述存在但内容过短，不是「还没加载」
+      return t("translate.tooShort");
     default:
       return t("translate.failGeneric", { msg: messageOf(error) });
   }
@@ -350,7 +349,9 @@ const onlineMenuItems = computed<ContextMenuItem[]>(() => {
   const showing = id > 0 && isShowingOriginal(id);
   const translating = id > 0 && isTranslating(id);
   const translatingQueued = id > 0 && isQueued(id);
-  const canText = id > 0 && canTranslateText(menuDescriptionText(mod));
+  const desc = menuDescriptionText(mod);
+  // 标题与描述各自独立：标题存在就能翻译，描述为空 / 过短不参与这个判断
+  const canText = id > 0 && hasTranslatableText(mod.title, desc);
 
   return buildOnlineMenuItems(
     id,
@@ -379,7 +380,8 @@ const onlineMenuItems = computed<ContextMenuItem[]>(() => {
       translateTrigger: t("translate.trigger", { lang: currentTargetLanguageName() }),
       translateShowTranslated: t("translate.showTranslated", { lang: currentTargetLanguageName() }),
       translateShowOriginal: t("translate.showOriginal"),
-      waitingHint: t("translate.waitingContent"),
+      // 只有描述**确实没取到**时才说「等待加载」；已取到但没有可翻译内容要说「没有内容」
+      waitingHint: isDescriptionLoaded(desc) ? t("translate.noContent") : t("translate.waitingContent"),
       openFolder: t("detail.openFolder"),
       browseSite: t("detail.browseSite"),
       offlineHint: t("online.offlineBlocked"),
@@ -449,8 +451,11 @@ async function onMenuSelect(itemId: string): Promise<void> {
       }
       if (isTranslating(id) || isQueued(id)) return;
       const desc = menuDescriptionText(mod);
-      if (!canTranslateText(desc)) {
-        showToast(t("translate.notReady"), "error");
+      if (!hasTranslatableText(mod.title, desc)) {
+        showToast(
+          isDescriptionLoaded(desc) ? t("translate.noContent") : t("translate.notReady"),
+          "error",
+        );
         return;
       }
       try {
@@ -634,9 +639,14 @@ const translateDisabled = computed(
   () => translateBusy.value || translateQueued.value || (!selectedTranslated.value && !canTranslate.value),
 );
 const translateActive = computed(() => selectedTranslated.value && !showingOriginalText.value);
-const translateNote = computed(() => (waitingDetail.value && !selectedTranslated.value
-  ? t("translate.waitingContent")
-  : null));
+const translateNote = computed(() => {
+  if (selectedTranslated.value) return null;
+  // 只有详情仍在请求 / 缓存未命中才是「等待加载」
+  if (waitingDetail.value) return t("translate.waitingContent");
+  // 描述已取到但官方没给内容：不是加载问题
+  if (noDescriptionText.value) return t("translate.noContent");
+  return null;
+});
 
 /** 详情面板：封面（按来源分流后的首候选：本地来源只给本机文件） */
 const selectedThumb = computed(() => thumbFor(selected.value));
@@ -1007,6 +1017,7 @@ onUnmounted(() => {
     <!-- 左侧：分类筛选（复用本地 .side-group / .side-item） -->
     <template #sidebar>
       <OnlineSidebar
+        v-model:view-mode="viewMode"
         :only-subscribed="onlySubscribed"
         :active-tag="activeTag"
         :tags="tags"
@@ -1016,7 +1027,6 @@ onUnmounted(() => {
         :net-error="netError"
         :net-message="netMessage"
         @pick-subscribed="pickSubscribed"
-        @open-favorites="emit('open-favorites', $event)"
         @pick-tag="pickTag"
         @refresh-session="refreshSession"
       />
@@ -1251,6 +1261,7 @@ onUnmounted(() => {
         :subscribe-label="subscribeLabel"
         :subscribe-busy="subscribeBusy"
         :installing="installing"
+        :paused="paused"
         :progress="progress"
         :action-message="actionMessage"
         :install-error="installError"

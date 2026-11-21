@@ -143,6 +143,8 @@ const { t } = useI18n();
   display: flex;
   align-items: center;
   margin: 0 0 12px;
+  /* 视图切换的容器查询基准：按侧栏真实可用宽度决定收成图标，不依赖窗口宽度 */
+  container-type: inline-size;
 }
 
 /* 只补充本地界面没有的元素；布局全部复用 style.css 的本地类 */

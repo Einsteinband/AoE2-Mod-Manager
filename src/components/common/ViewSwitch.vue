@@ -10,6 +10,11 @@ import { useI18n } from "vue-i18n";
  *
  * 行为与旧图标按钮完全一致：只改全局 viewMode（App.vue 的 useViewPrefs），
  * 不重新渲染卡片、不触发任何请求。
+ *
+ * 响应式：侧栏变窄时收成纯图标。基准由各页 `.sidebar-top` 的
+ * `container-type: inline-size` 提供，按控件真实可用宽度判断，不读窗口宽度；
+ * 没有容器祖先的场景（如工具栏兼容分支）不受影响，仍显示图标 + 文字。
+ * 文字隐藏只是样式层，按钮的无障碍名称始终由 aria-label 提供。
  */
 const props = withDefaults(
   defineProps<{
@@ -35,6 +40,7 @@ function setView(next: "grid" | "list") {
       class="view-btn"
       :class="{ active: viewMode === 'grid' }"
       :title="t('toolbar.viewToGrid')"
+      :aria-label="t('viewSwitch.grid')"
       :aria-pressed="viewMode === 'grid'"
       @click="setView('grid')"
     >
@@ -46,6 +52,7 @@ function setView(next: "grid" | "list") {
       class="view-btn"
       :class="{ active: viewMode === 'list' }"
       :title="t('toolbar.viewToList')"
+      :aria-label="t('viewSwitch.list')"
       :aria-pressed="viewMode === 'list'"
       @click="setView('list')"
     >
@@ -107,5 +114,22 @@ function setView(next: "grid" | "list") {
 }
 .view-switch .view-btn:active {
   transform: none;
+}
+
+/* 侧栏可用宽度不足时收成纯图标（文字隐藏，tooltip / aria-label 仍保留）。
+   容器由三个页面的 `.sidebar-top` 声明 `container-type: inline-size` 提供，
+   判断依据是控件真实可用宽度，不读窗口宽度。
+   阈值 160px 对应 ≤1024px 窗口的 176px 侧栏（内容区 156px）与紧凑态 150px 侧栏（内容区 130px）；
+   190 / 216px 侧栏（内容区 170 / 196px）保持图标 + 文字。
+   俄 / 西 / 德最长标签在 156px 时已接近裁切，提前一档收图标可避免任何语言被截断。 */
+@container (max-width: 160px) {
+  .view-switch .view-btn {
+    /* 32×32 方形：图标居中，高度与两按钮之间的内缝保持不变 */
+    width: 32px;
+    padding: 0;
+  }
+  .view-switch .view-text {
+    display: none;
+  }
 }
 </style>

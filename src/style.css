@@ -1528,6 +1528,7 @@ html[data-installed-card-stripes="off"] .card-body.is-installed::after {
   border: 1px solid var(--line);
   border-radius: 3px;
   background: var(--bg-panel-deep);
+  cursor: pointer;
 }
 .no-cover-box {
   width: 100%;
@@ -1549,6 +1550,41 @@ html[data-installed-card-stripes="off"] .card-body.is-installed::after {
 /* 封面区域：相对定位容器，承载右下角重试按钮（不改动封面图本身与卡片装饰） */
 .cover-frame {
   position: relative;
+}
+
+.cover-hover {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  border-radius: 3px;
+  background: rgba(var(--scrim-rgb), 0.52);
+  color: var(--text-inverse);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease-out;
+}
+
+.cover-frame:hover .cover-hover,
+.cover-frame:focus-within .cover-hover {
+  opacity: 1;
+}
+
+.cover-hover svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.cover-hover span {
+  font-size: calc(11px * var(--global-scale));
+  letter-spacing: calc(0.3px * var(--ui-tracking));
+  text-shadow: 0 1px 2px rgba(var(--shadow-rgb), 0.8);
 }
 
 .cover-reload-btn {

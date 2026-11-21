@@ -15,6 +15,7 @@ import {
   statusLabel,
 } from "../format";
 import ConfirmDialog from "./ConfirmDialog.vue";
+import ModImagePreview from "./common/ModImagePreview.vue";
 import ModInfoFields from "./common/ModInfoFields.vue";
 import { modDetail, openModWebpage } from "../online/service";
 import { snapshotFromDetail } from "../favorites/model";
@@ -71,6 +72,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const imgFailed = ref(false);
+const previewOpen = ref(false);
 /** 封面恢复阶段：请求官方 Detail / 下载图片 / 写入目录 / 完成 / 失败 */
 type CoverStage = "idle" | "reloading" | "done" | "failed";
 const coverStage = ref<CoverStage>("idle");
@@ -571,6 +573,11 @@ function onCoverLoad(): void {
   coverStage.value = "done";
 }
 
+function openCoverPreview(): void {
+  if (!coverUrl.value) return;
+  previewOpen.value = true;
+}
+
 /** 封面加载失败：回到失败态，按钮保留可再次点击 */
 function onCoverError(): void {
   imgFailed.value = true;
@@ -646,6 +653,7 @@ watch(
     confirmOpen.value = false;
     deleteError.value = null;
     favError.value = null;
+    previewOpen.value = false;
     renameOpen.value = false;
     descError.value = null;
     // 只读查一次缓存（无网络）：命中就瞬间显示中文，未命中也只是让按钮可点
@@ -670,9 +678,23 @@ watch(
           class="detail-cover"
           :src="coverUrl"
           alt=""
+          role="button"
+          tabindex="0"
+          :aria-label="t('detail.imagePreviewOpen')"
+          :title="t('detail.imagePreviewOpen')"
           @load="onCoverLoad"
           @error="onCoverError"
+          @click="openCoverPreview"
+          @keydown.enter="openCoverPreview"
+          @keydown.space.prevent="openCoverPreview"
         />
+        <div v-if="coverUrl" class="cover-hover" aria-hidden="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5" />
+            <path d="m16.2 16.2 3.8 3.8" />
+          </svg>
+          <span>{{ t("detail.imagePreviewHover") }}</span>
+        </div>
         <div v-else class="no-cover-box">
           {{ t("detail.coverMissing") }}
           <template v-if="!onlineFavorite"><br />{{ t("detail.coverMissingDetail") }}</template>
@@ -990,6 +1012,12 @@ watch(
     :error="translateBackendMessage(deleteError)"
     @confirm="confirmDelete"
     @cancel="confirmOpen = false"
+  />
+
+  <ModImagePreview
+    v-if="previewOpen && coverUrl"
+    :url="coverUrl"
+    @close="previewOpen = false"
   />
 
   <!-- 收藏 / 备注成功后的轻提示（固定右下角，不参与三栏布局） -->

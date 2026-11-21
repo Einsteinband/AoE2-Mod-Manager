@@ -446,3 +446,25 @@ describe("ModDetail: 符号描述也能发起翻译", () => {
   });
 });
 
+// ============================================================
+// 封面大图预览
+// ============================================================
+describe("ModDetail: 封面大图预览", () => {
+  it("点击已加载封面后，预览层复用当前缓存 URL", async () => {
+    const wrapper = mountDetail(
+      makeMod({ coverUrl: "asset://localhost/cover.png", thumbnail: null }),
+    );
+
+    const cover = wrapper.find("img.detail-cover");
+    expect(cover.exists()).toBe(true);
+    const hover = wrapper.find(".cover-hover");
+    expect(hover.exists()).toBe(true);
+    expect(hover.text()).toBe("detail.imagePreviewHover");
+    await cover.trigger("click");
+
+    const preview = wrapper.find(".image-preview");
+    expect(preview.exists()).toBe(true);
+    expect(preview.find("img").attributes("src")).toBe("asset://localhost/cover.png");
+  });
+});
+

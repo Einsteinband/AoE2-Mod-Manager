@@ -636,6 +636,8 @@ defineExpose({ refresh, loading });
   display: flex;
   align-items: center;
   margin: 0 0 12px;
+  /* 视图切换的容器查询基准：按侧栏真实可用宽度决定收成图标，不依赖窗口宽度 */
+  container-type: inline-size;
 }
 .fav-head {
   padding: 8px var(--layout-page-pad-x, 18px) 2px;

@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { DownloadProgress, OnlineMod } from "../../online/types";
 import type { InstalledIndexEntry } from "../../types";
 import { sourceLabel } from "../../format";
+import ModImagePreview from "../common/ModImagePreview.vue";
 import ModInfoFields from "../common/ModInfoFields.vue";
 
 /**
@@ -108,6 +109,7 @@ const ratingMissing = computed(
 /** 在线封面重试阶段：获取地址 → 排队下载 → 完成 / 失败（无逐字节进度） */
 type CoverStage = "idle" | "fetching" | "downloading" | "done" | "failed";
 const coverStage = ref<CoverStage>("idle");
+const previewOpen = ref(false);
 /** 在线封面加载失败（失败态由本地 <img> @error 驱动，不发请求） */
 const thumbFailed = ref(false);
 /** 重试进行中：获取 / 下载阶段都禁止重复点击 */
@@ -142,6 +144,11 @@ function onThumbError(): void {
   thumbFailed.value = true;
   coverStage.value = "failed";
   showCoverToast(t("detail.coverLoadFailed"), "error");
+}
+
+function openCoverPreview(): void {
+  if (!props.thumb || thumbFailed.value) return;
+  previewOpen.value = true;
 }
 
 /** 上抛父组件走现有缩略图链路重试；面板只呈现加载态与按钮 */
@@ -226,6 +233,7 @@ watch(
     descExpanded.value = false;
     thumbFailed.value = false;
     coverStage.value = "idle";
+    previewOpen.value = false;
   },
 );
 </script>
@@ -249,9 +257,23 @@ watch(
           class="detail-cover"
           :src="thumb"
           alt=""
+          role="button"
+          tabindex="0"
+          :aria-label="t('detail.imagePreviewOpen')"
+          :title="t('detail.imagePreviewOpen')"
           @load="onThumbLoad"
           @error="onThumbError"
+          @click="openCoverPreview"
+          @keydown.enter="openCoverPreview"
+          @keydown.space.prevent="openCoverPreview"
         />
+        <div v-if="thumb && !thumbFailed" class="cover-hover" aria-hidden="true">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5" />
+            <path d="m16.2 16.2 3.8 3.8" />
+          </svg>
+          <span>{{ t("detail.imagePreviewHover") }}</span>
+        </div>
         <div v-else class="no-cover-box">
           {{ coverMode === "local" ? t("detail.coverMissing") : t("online.noThumbnail") }}
         </div>
@@ -512,6 +534,12 @@ watch(
       />
     </section>
   </div>
+
+  <ModImagePreview
+    v-if="previewOpen && thumb && !thumbFailed"
+    :url="thumb"
+    @close="previewOpen = false"
+  />
 
   <!-- 封面重试成功 / 失败轻提示（固定右下角，复用全局 .app-toast） -->
   <div v-if="coverToast" class="app-toast" :class="coverToast.kind">{{ coverToast.text }}</div>

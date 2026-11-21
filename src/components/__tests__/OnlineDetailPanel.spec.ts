@@ -273,3 +273,34 @@ describe("OnlineDetailPanel: 其他操作", () => {
     expect(wrapper.emitted("reveal-folder")).toBeTruthy();
   });
 });
+
+// ============================================================
+// 在线封面大图预览
+// ============================================================
+describe("OnlineDetailPanel: 封面大图预览", () => {
+  it("点击在线封面后，预览层复用当前 thumb URL", async () => {
+    const wrapper = mountPanel({ thumb: "asset://localhost/online-cover.png" });
+
+    const cover = wrapper.find("img.detail-cover");
+    expect(cover.exists()).toBe(true);
+    const hover = wrapper.find(".cover-hover");
+    expect(hover.exists()).toBe(true);
+    expect(hover.text()).toBe("detail.imagePreviewHover");
+    await cover.trigger("click");
+
+    const preview = wrapper.find(".image-preview");
+    expect(preview.exists()).toBe(true);
+    expect(preview.find("img").attributes("src")).toBe("asset://localhost/online-cover.png");
+  });
+
+  it("封面加载失败后不打开预览", async () => {
+    const wrapper = mountPanel({ thumb: "asset://localhost/bad-cover.png" });
+    const cover = wrapper.find("img.detail-cover");
+
+    await cover.trigger("error");
+    await cover.trigger("click");
+
+    expect(wrapper.find(".cover-hover").exists()).toBe(false);
+    expect(wrapper.find(".image-preview").exists()).toBe(false);
+  });
+});

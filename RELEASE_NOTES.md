@@ -1,3 +1,17 @@
+# v0.5.8 — 2026-11-21
+
+## v0.5.8 - What's New
+
+- **🖼 Cover Preview:** Click a cover in the mod details panel to view it full screen. Zoom with the mouse wheel, drag to move around, and press Esc or click outside the image to close.
+- **🔎 Grid / List Switch:** On narrow windows the grid / list switch now shows only its two icons, so the labels are no longer cut off. They come back as soon as there is room again.
+
+## v0.5.8 - 更新内容
+
+- **🖼 封面大图预览：** 在模组详情里点击封面即可全屏查看，滚轮缩放、拖动查看，按 Esc 或点击图片以外区域关闭。
+- **🔎 网格 / 列表切换：** 窗口变窄时，网格 / 列表切换只显示图标，标签不再被截断；窗口放大后文字自动回来。
+
+---
+
 # v0.5.7 — 2026-11-20
 
 ## v0.5.7 - What's New

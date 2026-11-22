@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import BackToTop from "./BackToTop.vue";
 
 /**
  * 公共卡片网格容器：本地模组页与在线模组页共用**同一套**排版与滚动骨架。
@@ -61,6 +62,9 @@ defineExpose({ scrollEl, gridEl });
     </div>
     <slot name="foot" />
   </div>
+  <!-- 「回到列表顶部」悬浮按钮：渲染在 .grid-scroll 之外（三栏骨架的 .content 里），
+       绝对定位、不参与卡片 Grid 排版，因此不改变列表宽高与卡片尺寸。 -->
+  <BackToTop :target="scrollEl" />
 </template>
 
 <style scoped>

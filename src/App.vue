@@ -447,6 +447,87 @@ function sameDecor(a: InstalledCardDecorPrefs, b: InstalledCardDecorPrefs): bool
 
 applyDecor(cachedDecor);
 
+// ---------------- 卡片侧边栏位置 + 「已启用状态侧边栏」（localStorage 持久化） ----------------
+/**
+ * 这两项与上面的「已安装卡片装饰」独立：
+ * 上面的开关落 Rust settings.json（不改 Rust 协议），这里只走 localStorage，
+ * 默认值与旧行为一致（身份条在左；新的已启用绿条开启、也在左）。
+ */
+type CardBarSide = "left" | "right";
+interface CardBarPrefs {
+  installedSide: CardBarSide;
+  enabledOn: boolean;
+  enabledSide: CardBarSide;
+  /** 卡片内「标题区 ↔ 信息区」之间的淡虚线（纯装饰，默认显示） */
+  dividerOn: boolean;
+  /** 模组列表底部中央的「回到列表顶部」悬浮按钮（默认显示） */
+  backToTopOn: boolean;
+}
+const CARD_BAR_KEY = "aoe2mm:cardBarPrefs";
+const CARD_BAR_DEFAULTS: CardBarPrefs = {
+  installedSide: "left",
+  enabledOn: true,
+  enabledSide: "left",
+  dividerOn: true,
+  backToTopOn: true,
+};
+
+function normalizeCardBarSide(value: unknown): CardBarSide {
+  return value === "right" ? "right" : "left";
+}
+
+function readCachedCardBars(): CardBarPrefs {
+  try {
+    const raw = window.localStorage.getItem(CARD_BAR_KEY);
+    if (!raw) return { ...CARD_BAR_DEFAULTS };
+    const parsed = JSON.parse(raw) as Partial<Record<keyof CardBarPrefs, unknown>> | null;
+    return {
+      installedSide: normalizeCardBarSide(parsed?.installedSide),
+      enabledOn: typeof parsed?.enabledOn === "boolean" ? parsed.enabledOn : true,
+      enabledSide: normalizeCardBarSide(parsed?.enabledSide),
+      dividerOn: typeof parsed?.dividerOn === "boolean" ? parsed.dividerOn : true,
+      backToTopOn: typeof parsed?.backToTopOn === "boolean" ? parsed.backToTopOn : true,
+    };
+  } catch {
+    return { ...CARD_BAR_DEFAULTS };
+  }
+}
+
+function applyCardBars(next: CardBarPrefs) {
+  const root = document.documentElement;
+  root.dataset.installedCardBarSide = next.installedSide;
+  root.dataset.enabledCardBar = next.enabledOn ? "on" : "off";
+  root.dataset.enabledCardBarSide = next.enabledSide;
+  root.dataset.cardDivider = next.dividerOn ? "on" : "off";
+  root.dataset.backToTop = next.backToTopOn ? "on" : "off";
+}
+
+const cachedCardBars = readCachedCardBars();
+const installedCardBarSide = ref<CardBarSide>(cachedCardBars.installedSide);
+const enabledCardBar = ref<boolean>(cachedCardBars.enabledOn);
+const enabledCardBarSide = ref<CardBarSide>(cachedCardBars.enabledSide);
+const cardDivider = ref<boolean>(cachedCardBars.dividerOn);
+const backToTopOn = ref<boolean>(cachedCardBars.backToTopOn);
+
+applyCardBars(cachedCardBars);
+
+watch(
+  [installedCardBarSide, enabledCardBar, enabledCardBarSide, cardDivider, backToTopOn],
+  () => {
+    const next: CardBarPrefs = {
+      installedSide: installedCardBarSide.value,
+      enabledOn: enabledCardBar.value,
+      enabledSide: enabledCardBarSide.value,
+      dividerOn: cardDivider.value,
+      backToTopOn: backToTopOn.value,
+    };
+    applyCardBars(next);
+    try {
+      window.localStorage.setItem(CARD_BAR_KEY, JSON.stringify(next));
+    } catch { /* 忽略 */ }
+  },
+);
+
 watch(
   [installedCardBg, installedCardBar, installedCardStripes],
   () => {
@@ -905,6 +986,11 @@ onBeforeUnmount(() => {
         v-model:latin-font="latinFont"
         v-model:installed-card-bg="installedCardBg"
         v-model:installed-card-bar="installedCardBar"
+        v-model:installed-card-bar-side="installedCardBarSide"
+        v-model:enabled-card-bar="enabledCardBar"
+        v-model:enabled-card-bar-side="enabledCardBarSide"
+        v-model:card-divider="cardDivider"
+    v-model:back-to-top="backToTopOn"
         v-model:installed-card-stripes="installedCardStripes"
         v-model:detail-button-mode="detailButtonMode"
         :root-path="localRef?.reportRoot ?? ''"

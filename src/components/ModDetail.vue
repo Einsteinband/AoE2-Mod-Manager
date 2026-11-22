@@ -1058,19 +1058,4 @@ watch(
   gap: 8px;
   flex-wrap: wrap;
 }
-
-/* 「刷新 Mod 信息」：与同排图标按钮同族的文字按钮，高度 / 圆角沿用 .dv-btn-ghost */
-.info-refresh-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 10px;
-  height: 30px;
-  white-space: nowrap;
-  font-size: calc(11.5px * var(--global-scale));
-}
-.info-refresh-glyph {
-  font-size: calc(13px * var(--global-scale));
-  line-height: 1;
-}
 </style>

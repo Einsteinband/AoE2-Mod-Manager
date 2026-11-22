@@ -18,6 +18,9 @@
   --bg-grad-bottom: #14100c;
   --bg-elevated-top: #554330;
   --bg-elevated-bottom: #3d2f22;
+  /* 「回到列表顶部」悬浮按钮的半透明表面（42% 不透明：能透出下方卡片内容） */
+  --back-to-top-bg: rgba(38, 30, 23, 0.42);
+  --back-to-top-bg-hover: rgba(38, 30, 23, 0.62);
 
   /* ---- 描边 ---- */
   --border-color: #33281c;
@@ -92,6 +95,8 @@
   /* 开关「关闭」态：滑块底 / 描边 / 图标 */
   --switch-off-border: #7a6449;
   --switch-off-text: #efe2cc;
+  /* v1.0：Apple 风格开关「关闭」态轨道（中性灰，深色主题偏暗） */
+  --switch-track-off: #3a3a3c;
   /* 卡片右上「可更新」红底角标 */
   --badge-danger-top: #b4453b;
   --badge-danger-bottom: #8f2f28;
@@ -190,6 +195,10 @@
   /* ③ 卡片列表层：只服务于卡片标题 / 元信息 */
   --card-font-size: 12px; /* 10 - 16px */
   --card-font-weight: 400; /* 400 常规 / 700 加粗（v3.3 新增） */
+  /* ③.b 卡片底部操作行定高：本地 / 在线卡片共用同一行高骨架。
+     取值来自三种启用控件中最高的一种（Apple 开关 20px，圆形按钮 18px）：
+     控件隐藏时该行仍占满此高度，卡片整体高度不随「显示开关」变化。 */
+  --card-action-row-height: 20px;
 
   /* 旧变量名：仅做兼容转发（v2.3 的消费方已全部改造，保留名避免外部样式失效） */
   --app-font-size: calc(14px * var(--global-scale));
@@ -238,6 +247,9 @@ html[data-theme="light"] {
   --bg-grad-bottom: #e9e2d3;
   --bg-elevated-top: #ded4c0;
   --bg-elevated-bottom: #cbbfa6;
+  /* 「回到列表顶部」悬浮按钮的半透明表面（42% 不透明：能透出下方卡片内容） */
+  --back-to-top-bg: rgba(251, 249, 243, 0.42);
+  --back-to-top-bg-hover: rgba(255, 253, 248, 0.66);
 
   /* ---- 描边 ---- */
   --border-color: #d6cbb6;
@@ -304,6 +316,8 @@ html[data-theme="light"] {
   --ok-glow-rgb: 88, 138, 60;
   --switch-off-border: #b8a789;
   --switch-off-text: #2c2a27;
+  /* v1.0：亮色主题下开关「关闭」轨道用 iOS 浅灰，白滑块仍可辨 */
+  --switch-track-off: #8e8e93;
   --badge-danger-top: #b04434;
   --badge-danger-bottom: #8e2f22;
   --badge-tool-rgb: 248, 242, 228;
@@ -1235,18 +1249,22 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 备注名副标题占用行高，列表模式下不显示 */
-.card-grid.list-mode .card-sub {
-  display: none;
-}
-/* 中间靠右：作者（灰色）；WorkshopID 隐藏，给标题留宽度 */
-.card-grid.list-mode .card-meta:not(.status-row) {
+/* 备注名已改为「替换原名」、不再渲染副标题行（卡片骨架不允许可选行撑高），
+   因此这里不再需要隐藏副标题；标题在列表模式仍是单行截断。 */
+/* 中间靠右：作者（灰色）+ 底部操作行（启用控件 / ⚙️ / 安装时间）；WorkshopID 隐藏，给标题留宽度。
+   v2.6：只对「具名行」生效 —— `.meta-info`（ID/作者）与 `.meta-top`（操作行）。
+   旧写法 `.card-meta:not(.status-row) > span:first-child` 按 DOM 顺序取第一个 span，
+   会把 meta-top 里的启用/禁用控件、数据模组的 ⚙️、在线卡片的状态徽章一起吃掉；
+   现在改为按语义 class 定位，ID 用 `.card-id` 单独隐藏，不再依赖 :first-child / DOM 顺序。 */
+.card-grid.list-mode .card-meta.meta-info,
+.card-grid.list-mode .card-meta.meta-top {
   order: 2;
   flex: 0 0 auto;
   justify-content: flex-end;
   gap: 10px;
 }
-.card-grid.list-mode .card-meta:not(.status-row) > span:first-child {
+/* 列表模式只隐藏 WorkshopID 本身；其余行内元素（控件 / 徽章 / 时间）一律保留 */
+.card-grid.list-mode .card-meta.meta-info .card-id {
   display: none;
 }
 /* 多带一层 .card-body 提升优先级，稳压 ModCard.vue scoped 里的 max-width: 96px */
@@ -1310,6 +1328,13 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* 分隔线（.card-divider）以此为定位基准；本身不产生布局，不影响其它卡片样式 */
+  position: relative;
+  /* 网格行高取该行最高卡片，其余卡片会被 `align-items: stretch` 纵向拉高（默认值）。
+     信息区必须跟着长高（flex-grow: 1）才能一直铺到卡片底边；否则卡片自身的
+     浅色渐变底会从信息区下方露出一段 ~17px 的横条（浅色主题下就是一条“白条”）。
+     列表模式是横排布局，另有 `.card-grid.list-mode .card-body` 覆盖 flex 值。 */
+  flex: 1 1 auto;
   min-height: 0;
   /* v2.3：flex 子项默认 min-width:auto 会让长标题把卡片横向撞开（放大字号后尤其明显），
      这里拔掉它，标题只能在容器内部换行 / 省略 */
@@ -1360,6 +1385,49 @@ html[data-installed-card-bar="off"] .card-body.is-installed::before {
 html[data-installed-card-stripes="off"] .card-body.is-installed::after {
   display: none;
 }
+
+/* ---------- v1.1：已启用状态侧边栏（柔和绿竖条） ----------
+   与原有本地身份条同宿主（.card-body）、同宽 3px、同上下范围、同一套圆角裁切；
+   两条位置各自独立：同侧时并排（中间 3px 间距），异侧时分别贴各自边缘。
+   只在「本地且已启用」的卡片上由 ModCard 渲染，未启用不渲染、不占位。 */
+.card-body.is-installed > .card-enabled-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--ok);
+  pointer-events: none;
+  z-index: 0;
+}
+/* 关闭「已启用状态侧边栏」时整条隐藏，原有身份条自动回到边缘 */
+html[data-enabled-card-bar="off"] .card-body.is-installed > .card-enabled-bar {
+  display: none;
+}
+/* 原有身份条：可选右侧（与左侧镜像） */
+html[data-installed-card-bar-side="right"] .card-body.is-installed::before {
+  left: auto;
+  right: 0;
+}
+/* 绿条默认贴左 / 可选贴右 */
+html[data-enabled-card-bar-side="left"] .card-body.is-installed > .card-enabled-bar {
+  left: 0;
+  right: auto;
+}
+html[data-enabled-card-bar-side="right"] .card-body.is-installed > .card-enabled-bar {
+  right: 0;
+  left: auto;
+}
+/* 同侧并排：原有条贴边（0），绿条内移 6px = 3px 宽 + 3px 间距 */
+html[data-installed-card-bar="on"][data-installed-card-bar-side="left"][data-enabled-card-bar-side="left"]
+  .card-body.is-installed > .card-enabled-bar {
+  left: 6px;
+  right: auto;
+}
+html[data-installed-card-bar="on"][data-installed-card-bar-side="right"][data-enabled-card-bar-side="right"]
+  .card-body.is-installed > .card-enabled-bar {
+  right: 6px;
+  left: auto;
+}
 .card-title {
   /* v2.4：卡片标题只读卡片层字号（--card-font-size），与界面缩放 / 正文完全解耦；
      高度用 em 表达，两行标题同比变高，既不裁字也不溢出边框 */
@@ -1381,6 +1449,42 @@ html[data-installed-card-stripes="off"] .card-body.is-installed::after {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+/* ---------- v2.6：卡片分隔线（标题区 ↔ 信息区）----------
+   纯装饰：绝对定位、不进入 flex 布局，因此不改变卡片高度，也不影响信息区填充与同行底边对齐。
+   纵向位置 = 上内边距 9px + 标题区高度（2.88em × --card-font-size）+ 半个行间距 3px，
+   跟随「卡片字号」设置同比缩放；横向与正文同内缩 10px，避开左侧身份条 / 已启用状态绿条。
+   `.mod-card` 前缀的用途：这条规则要压过 `.card-body.is-installed > *`（分隔线同样命中那条
+   规则，会被设成 relative），用选择器权重解决，不引入 !important。
+   显隐由设置项写成 html[data-card-divider="on|off"]，默认显示；列表模式（横排紧凑行）不画。 */
+.mod-card .card-body > .card-divider {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: calc(9px + var(--card-font-size) * 2.88 + 3px);
+  height: 1px;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--text-dim) 0 4px,
+    transparent 4px 9px
+  );
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 0;
+}
+html[data-card-divider="off"] .mod-card .card-body > .card-divider {
+  display: none;
+}
+.card-grid.list-mode .card-divider {
+  display: none;
+}
+
+/* ---------- 「回到列表顶部」按钮的开关 ----------
+   按钮本身的行为写在 BackToTop.vue（滚动阈值 + 平滑回顶），这里只负责设置项关掉时
+   立即隐藏：数据集由 App.vue 的 applyCardBars 写成 html[data-back-to-top="on|off"]，
+   默认 on。用 display:none 而不是给组件加监听，避免为纯展示偏好再加一层响应式依赖。 */
+html[data-back-to-top="off"] .back-to-top {
+  display: none;
+}
 .card-meta {
   display: flex;
   align-items: center;
@@ -1401,6 +1505,17 @@ html[data-installed-card-stripes="off"] .card-body.is-installed::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- v1.2：卡片底部操作行（BaseModCard 的 #meta-top 槽）----------
+   这一行承载「启用/禁用控件 + 安装时间」（本地）或「状态徽章 + 安装数」（在线）。
+   关键约束：行高由 --card-action-row-height 固定，控件显示、切换圆形 / Apple 开关、
+   或整个控件隐藏三种情况都占满同一高度 —— 卡片整体高度因此不随开关设置变化，
+   本地与在线卡片（同一份底座 + 同一行高）也就天然等高。
+   只钉高度，不改对齐方式：本地卡片的安装时间在组件 scoped 里用 margin-left:auto
+   锚定行末（与 space-between 等价），所以控件隐藏时它不会左移。 */
+.card-meta.meta-top {
+  min-height: var(--card-action-row-height);
 }
 .card-meta .extra-meta {
   color: var(--text-dim);
@@ -2761,17 +2876,8 @@ body.sort-dragging * {
   word-break: break-all;
 }
 
-/* 卡片标题下的原英文标题 */
-.card-sub {
-  margin-top: -2px;
-  /* v2.4：备注名副标题归属于卡片层 */
-  font-size: calc(var(--card-font-size) * 0.833);
-  line-height: 1.3;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 卡片标题下的原英文标题：已废弃（备注名改为替换原名，卡片不再渲染副标题行）。
+   详情页的原名回显仍走 .detail-title-orig，不受影响。 */
 
 /* 卡片缩略图左下角收藏角标：避开左上来源、右上可更新/序号、右下“无封面” */
 .fav-badge {
@@ -2884,6 +2990,20 @@ body.sort-dragging * {
 .dv-btn-ghost:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+/* 「刷新 Mod 信息」：本地 / 收藏 / 在线三处详情共用同一份（文字 + ⟳ 图标，尺寸对齐同排图标按钮） */
+.info-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  height: 30px;
+  white-space: nowrap;
+  font-size: calc(11.5px * var(--global-scale));
+}
+.info-refresh-glyph {
+  font-size: calc(13px * var(--global-scale));
+  line-height: 1;
 }
 /* 危险操作：整行与按钮统一红色系，点击后由 ConfirmDialog 二次确认 */
 .dv-action-danger {

@@ -191,6 +191,38 @@ export function useOnlineDetail(deps: {
     }
   }
 
+  /**
+   * 「刷新 Mod 信息」：跳过本地缓存与 3 秒冷却，强制重取官方 Detail
+   * （`online_detail` 命中即写回详情缓存，与本地 / 收藏详情用的是同一条后端链路）。
+   *
+   * 约束：只动信息不动封面；失败只提示，绝不清空当前已显示的详情；
+   * 响应回来前用户已切到别的模组 → 直接丢弃，不覆盖新模组的内容。
+   */
+  const infoRefreshing = ref(false);
+
+  async function refreshDetail(): Promise<void> {
+    const mod = selected.value;
+    if (!mod || infoRefreshing.value) return;
+    const id = mod.modId;
+    infoRefreshing.value = true;
+    try {
+      const value = await modDetail(id);
+      // 记下这次真实请求时间，后续 loadDetail 的冷却判断不会重复打请求
+      lastDetailMs.set(id, Date.now());
+      if (selection.selectedId.value !== id) return;
+      detail.value = value;
+      detailErrorRaw.value = null;
+      detailUncached.value = false;
+      deps.showToast(t("detail.infoRefreshed"), "ok");
+    } catch (e) {
+      // 失败保留已显示内容，只给提示；网络类失败顺带点亮全局断网标志
+      if (isNetworkFailure(e)) noteRequestFailure(e);
+      deps.showToast(translateBackendMessage(rawMessageOf(e)), "error");
+    } finally {
+      infoRefreshing.value = false;
+    }
+  }
+
   // ---------------- 字段格式化（服务端字段名不统一，多个候选 key 依次取） ----------------
 
   function pickDetailText(keys: string[]): string | null {
@@ -419,6 +451,10 @@ export function useOnlineDetail(deps: {
     loadDetail,
     isPending,
     resetForSwitch,
+    /** 刷新按钮的进行中状态（与详情请求的 loading 分离，互不影响） */
+    infoRefreshing,
+    /** 跳过缓存强制重取官方详情（「刷新 Mod 信息」） */
+    refreshDetail,
   };
 }
 

@@ -126,8 +126,18 @@ const cardFontWeight = defineModel<number>("cardFontWeight", { default: 400 });
 const latinFont = defineModel<boolean>("latinFont", { default: true });
 /** 已安装卡片：强调色信息区背景开关（主界面 App.vue 持有真值并落盘） */
 const installedCardBg = defineModel<boolean>("installedCardBg", { default: true });
-/** 已安装卡片：左侧主题色标识条开关 */
+/** 已安装卡片：右侧/左侧标识条开关 */
 const installedCardBar = defineModel<boolean>("installedCardBar", { default: true });
+/** 已安装卡片：标识条位置（left / right）；真值由 App.vue 持有并经 localStorage 持久化 */
+const installedCardBarSide = defineModel<string>("installedCardBarSide", { default: "left" });
+/** 已启用状态侧边栏：显示开关（默认开启） */
+const enabledCardBar = defineModel<boolean>("enabledCardBar", { default: true });
+/** 已启用状态侧边栏：位置（left / right） */
+const enabledCardBarSide = defineModel<string>("enabledCardBarSide", { default: "left" });
+/** 卡片内标题区与信息区之间的淡虚线（纯装饰，默认显示） */
+const cardDivider = defineModel<boolean>("cardDivider", { default: true });
+/** 模组列表底部中央的「回到列表顶部」悬浮按钮（默认显示） */
+const backToTop = defineModel<boolean>("backToTop", { default: true });
 /** 已安装卡片：右下角斜线装饰开关 */
 const installedCardStripes = defineModel<boolean>("installedCardStripes", { default: true });
 /** 详情页辅助按钮显示模式："icon"（默认）| "text"；真值由 App.vue 持有并经 localStorage 持久化 */
@@ -224,6 +234,11 @@ provide("appearanceSettings", {
   latinFont,
   installedCardBg,
   installedCardBar,
+  installedCardBarSide,
+  enabledCardBar,
+  enabledCardBarSide,
+  cardDivider,
+  backToTop,
   installedCardStripes,
   detailButtonMode,
   uiFontWeight,

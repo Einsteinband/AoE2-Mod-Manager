@@ -76,6 +76,8 @@ const props = defineProps<{
   detailError: string | null;
   /** 断网且本地无详情缓存：显示友好提示，不显示任何 DNS / 传输层报错 */
   detailUncached: boolean;
+  /** 「刷新 Mod 信息」进行中：面板只呈现按钮状态，请求由父页面组合层发起 */
+  infoRefreshing: boolean;
 }>();
 
 /** 覆盖确认勾选 / 需要覆盖时的提示开关（v-model 双向绑定，父组件持有真源） */
@@ -84,13 +86,14 @@ const forceOverwrite = defineModel<boolean>("forceOverwrite", { default: false }
 
 const emit = defineEmits<{
   (event: "refresh-cover"): void;
+  /** 刷新官方元数据（标题 / 描述 / 版本 / 时间 / 评分等），与本地 / 收藏详情同一个入口语义 */
+  (event: "refresh-info"): void;
   (event: "translate"): void;
   (event: "toggle-favorite"): void;
   (event: "rename"): void;
   (event: "install"): void;
   (event: "leave-queue"): void;
   (event: "uninstall"): void;
-  (event: "reinstall"): void;
   (event: "stop-install"): void;
   (event: "open-webpage"): void;
   (event: "reveal-folder"): void;
@@ -428,18 +431,6 @@ watch(
           <span class="sr-only">{{ revealingFolder ? t("detail.opening") : t("detail.openFolder") }}</span>
         </button>
         <button
-          v-if="localEntry"
-          type="button"
-          class="dv-btn-ghost icon-btn"
-          :disabled="subscribeBusy"
-          :title="mod.updateAvailable ? t('online.updateLocal') : t('online.reinstallLocal')"
-          :aria-label="mod.updateAvailable ? t('online.updateLocal') : t('online.reinstallLocal')"
-          @click="emit('reinstall')"
-        >
-          <span aria-hidden="true">🔄</span>
-          <span class="sr-only">{{ installing ? t("online.installing") : mod.updateAvailable ? t("online.updateLocal") : t("online.reinstallLocal") }}</span>
-        </button>
-        <button
           v-if="installing || paused"
           type="button"
           class="dv-btn-ghost icon-btn"
@@ -472,6 +463,20 @@ watch(
         >
           <span aria-hidden="true">📝</span>
           <span class="sr-only">{{ t("favorites.rename") }}</span>
+        </button>
+      </div>
+      <!-- 刷新官方元数据：与本地 / 收藏详情同一个入口（只动信息，不动封面） -->
+      <div class="dv-action-row">
+        <button
+          type="button"
+          class="dv-btn-ghost info-refresh-btn"
+          :disabled="infoRefreshing"
+          :title="t('detail.refreshInfoTitle')"
+          :aria-label="infoRefreshing ? t('detail.refreshingInfo') : t('detail.refreshInfo')"
+          @click="emit('refresh-info')"
+        >
+          <span class="info-refresh-glyph" aria-hidden="true">⟳</span>
+          <span>{{ infoRefreshing ? t("detail.refreshingInfo") : t("detail.refreshInfo") }}</span>
         </button>
       </div>
       <div v-if="favError" class="online-error">{{ favError }}</div>

@@ -108,8 +108,7 @@ describe("OnlineModCard 本机安装标签", () => {
   });
 });
 
-function makeLocalMod(overrides: Partial<ModEntry> = {}): ModEntry {
-  return {
+function makeLocalMod(overrides: Partial<ModEntry> = {}): ModEntry {  return {
     id: "local/test_mod_12345",
     folderName: "test_mod_12345",
     path: "C:/AoE2DE/mods/local/test_mod_12345",
@@ -157,5 +156,30 @@ describe("ModCard 本地卡片", () => {
   it("不渲染在线模组的已安装徽章", () => {
     const wrapper = mount(ModCard, { props: { mod: makeLocalMod(), active: false } });
     expect(wrapper.find(".badge.installed").exists()).toBe(false);
+  });
+});
+
+describe("OnlineModCard 名称显示：备注名替换官方标题", () => {
+  it("有备注名时只显示备注名，官方标题退到 tooltip，且没有副标题行", async () => {
+    const userData = await import("../../userData");
+    vi.mocked(userData.customNameOf).mockReturnValue("我的骑士 Mod");
+    vi.mocked(userData.displayTitle).mockReturnValue("我的骑士 Mod");
+    try {
+      const wrapper = mountOnline(makeOnlineMod());
+      const title = wrapper.find(".card-title");
+      expect(title.text()).toBe("我的骑士 Mod");
+      expect(title.attributes("title")).toBe("Test Online Mod");
+      expect(wrapper.find(".card-sub").exists()).toBe(false);
+    } finally {
+      vi.mocked(userData.customNameOf).mockReturnValue(null);
+      vi.mocked(userData.displayTitle).mockImplementation((_id, t) => t);
+    }
+  });
+
+  it("没有备注名时显示官方标题，tooltip 也是官方标题", () => {
+    const wrapper = mountOnline(makeOnlineMod());
+    const title = wrapper.find(".card-title");
+    expect(title.text()).toBe("Test Online Mod");
+    expect(title.attributes("title")).toBe("Test Online Mod");
   });
 });

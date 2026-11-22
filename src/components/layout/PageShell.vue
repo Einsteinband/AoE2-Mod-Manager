@@ -98,11 +98,14 @@ withDefaults(
   scrollbar-gutter: stable;
 }
 
-/* 中栏：纵向 flex（抬头 + 滚动区），自身不滚动 */
+/* 中栏：纵向 flex（抬头 + 滚动区），自身不滚动。
+   position: relative 是「回到列表顶部」悬浮按钮的定位基准：按钮绝对定位在 .content 内，
+   因此天然水平居中于模组列表区域、随列表宽度变化同步，且不参与三栏排版。 */
 .content {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 /* 右栏：纵向 flex（抬头 + 详情正文），自身不滚动 */

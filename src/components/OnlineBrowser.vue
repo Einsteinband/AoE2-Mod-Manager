@@ -174,6 +174,7 @@ const {
   detailLoading,
   detailError,
   detailUncached,
+  infoRefreshing,
   detailTags,
   headerTitle,
   titleSub,
@@ -216,7 +217,6 @@ const {
   subscribeLabel,
   subscribeBusy,
   downloadAndInstall,
-  doInstall,
   stopInstall,
   askDeleteLocal,
   confirmDeleteLocal,
@@ -785,6 +785,11 @@ function selectMod(mod: OnlineMod): void {
   void detail.loadDetail(mod);
 }
 
+/** 详情面板「刷新 Mod 信息」：强制重取当前选中模组的官方详情（不动封面与列表） */
+function onRefreshInfo(): void {
+  void detail.refreshDetail();
+}
+
 /** 收藏视图的空态 / 搜索清空等：切回官方列表的通用动作 */
 function clearLocalQuery(): void {
   localSearch.localQuery.value = "";
@@ -1272,16 +1277,17 @@ onUnmounted(() => {
         :detail-loading="detailLoading"
         :detail-error="detailError"
         :detail-uncached="detailUncached"
+        :info-refreshing="infoRefreshing"
         v-model:need-force="needForce"
         v-model:force-overwrite="forceOverwrite"
         @refresh-cover="refreshSelectedCover"
+        @refresh-info="onRefreshInfo"
         @translate="onTranslateClick"
         @toggle-favorite="toggleFavorite"
         @rename="openRename"
         @install="downloadAndInstall"
         @leave-queue="stopInstall"
         @uninstall="askDeleteLocal"
-        @reinstall="doInstall"
         @stop-install="stopInstall"
         @open-webpage="openWebpage"
         @reveal-folder="openLocalFolder"

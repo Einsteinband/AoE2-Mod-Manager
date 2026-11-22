@@ -4,15 +4,24 @@ import { useI18n } from "vue-i18n";
 import { initials } from "../../format";
 
 /**
- * 模组卡片底座组件：统一渲染封面、标题、副标题、ID、作者等共有结构。
+ * 模组卡片底座组件：统一渲染封面、标题、ID、作者等共有结构。
  * 本地卡片和在线卡片通过 slot 传入各自专属的角标和状态按钮。
+ *
+ * 卡片骨架（各区域高度规则，禁止由可选内容撑高整卡）：
+ *   .card-thumb  —— 16:9 封面（宽度由网格列决定，高度等比）
+ *   .card-title  —— 固定两行高（2.88em），一行标题也占满两行，超两行省略号截断
+ *   .card-divider —— 标题区与信息区之间的淡虚线（绝对定位，不参与布局、不改卡高）
+ *   .card-meta.meta-top —— 底部操作行，`min-height: var(--card-action-row-height)`
+ *   .card-meta.meta-info —— ID / 作者信息行（ID 带 `.card-id`，列表模式下只隐藏它）
+ *   .card-body  —— `flex: 1 1 auto`，填充 Grid 行拉伸留下的剩余高度
+ * 名称只占一行标题：有自定义备注名时直接用它替换原名，不再额外渲染原名副标题行。
  */
 const props = withDefaults(
   defineProps<{
-    /** 主标题 */
+    /** 主标题（已由调用方算好优先级：备注名 > 译文 > 原名） */
     title: string;
-    /** 副标题（备注名时显示） */
-    sub?: string | null;
+    /** 标题悬停提示：有备注名时传原名，否则留空沿用标题本身 */
+    titleHint?: string | null;
     /** 封面图 URL，null 时显示占位 */
     coverUrl?: string | null;
     /** 占位图上显示的首字母缩写（不传则自动从标题生成） */
@@ -31,7 +40,7 @@ const props = withDefaults(
     active?: boolean;
   }>(),
   {
-    sub: null,
+    titleHint: null,
     coverUrl: null,
     fallbackText: "",
     favorited: false,
@@ -75,14 +84,23 @@ const displayId = computed(() => {
       <slot name="badges" />
     </div>
     <div class="card-body" :class="{ 'is-installed': installed }">
-      <div class="card-title" :title="title">{{ title }}</div>
-      <div v-if="sub" class="card-sub" :title="sub">📝 {{ sub }}</div>
-      <!-- 第一行 meta：状态开关、徽章等（由外部传入） -->
+      <!-- 信息区边缘条 slot：本地身份条之外的附加竖条（已启用状态侧边栏等） -->
+      <slot name="body-bar" />
+      <div class="card-title" :title="titleHint || title">{{ title }}</div>
+      <!-- 分隔线：标题区与信息区之间的一条淡虚线（纯装饰，绝对定位、不参与布局，
+           因此不改变卡片高度；显隐由设置项 html[data-card-divider] 驱动） -->
+      <span class="card-divider" aria-hidden="true"></span>
+      <!-- 底部操作行：只要调用方提供了 meta-top 槽这一行就恒定存在（哪怕内容为空），
+           行高由 style.css 的 --card-action-row-height 固定。本地卡片的启用控件、
+           在线卡片的状态徽章都只是行内元素，不能反过来决定这一行的高度。 -->
       <div v-if="$slots['meta-top']" class="card-meta meta-top">
         <slot name="meta-top" />
       </div>
-      <div class="card-meta">
-        <span>{{ displayId }}</span>
+      <!-- ID / 作者信息行：具名 class `meta-info`，列表模式按语义隐藏 ID（`.card-id`），
+           不再靠 `> span:first-child` 之类的 DOM 顺序判断，避免误伤 meta-top 里的
+           启用控件 / ⚙️ / 状态徽章。 -->
+      <div class="card-meta meta-info">
+        <span class="card-id">{{ displayId }}</span>
         <span v-if="author" class="author">{{ author }}</span>
         <span v-else class="author missing">{{ t("card.authorMissing") }}</span>
         <span v-if="extraMeta" class="extra-meta">{{ extraMeta }}</span>

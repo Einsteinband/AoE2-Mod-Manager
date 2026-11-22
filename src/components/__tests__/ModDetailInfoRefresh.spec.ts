@@ -235,6 +235,20 @@ describe("ModDetail: 刷新 Mod 信息", () => {
     const wrapper = mountDetail(makeMod({ workshopId: null }));
     expect(wrapper.find(".info-refresh-btn").exists()).toBe(false);
   });
+
+  it("收藏页的「已卸载」在线条目（uninstalled）同样有可用刷新入口", async () => {
+    mocks.modDetail.mockResolvedValue({ creatorName: "OfficialAuthor", modVersion: "3.1" });
+
+    const wrapper = mountDetail(makeMod({ uninstalled: true }));
+    const button = wrapper.find(".info-refresh-btn");
+    expect(button.exists()).toBe(true);
+
+    await button.trigger("click");
+    await flushPromises();
+
+    expect(mocks.modDetail).toHaveBeenCalledWith(12345);
+    expect(mocks.rememberOfficialMeta).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("ModDetail: 更多信息的数据优先级", () => {

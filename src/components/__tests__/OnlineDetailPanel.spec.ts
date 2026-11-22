@@ -97,6 +97,7 @@ function mountPanel(props: Record<string, unknown> = {}) {
       detailLoading: false,
       detailError: null,
       detailUncached: false,
+      infoRefreshing: false,
       ...props,
     },
   });
@@ -191,14 +192,13 @@ describe("OnlineDetailPanel: 安装与更新事件", () => {
     expect(wrapper.emitted("stop-install")).toBeTruthy();
   });
 
-  it("localEntry 存在时显示重装按钮，点击发出 reinstall", async () => {
+  it("localEntry 存在时也不再显示「重新安装到本地」按钮（入口已隐藏）", () => {
     const wrapper = mountPanel({ localEntry: mockLocalEntry });
-    const reinstallBtn = wrapper.findAll("button.dv-btn-ghost").find(b =>
-      b.text().includes("online.reinstallLocal") || b.text().includes("online.updateLocal")
-    );
-    expect(reinstallBtn).toBeTruthy();
-    await reinstallBtn!.trigger("click");
-    expect(wrapper.emitted("reinstall")).toBeTruthy();
+    const glyphs = wrapper.findAll("button.dv-btn-ghost").map((b) => b.text());
+    expect(glyphs.some((text) => text.includes("online.reinstallLocal"))).toBe(false);
+    expect(glyphs.some((text) => text.includes("online.updateLocal"))).toBe(false);
+    expect(wrapper.text()).not.toContain("🔄");
+    expect(wrapper.emitted("reinstall")).toBeUndefined();
   });
 });
 
@@ -271,6 +271,40 @@ describe("OnlineDetailPanel: 其他操作", () => {
     expect(folderBtn).toBeTruthy();
     await folderBtn!.trigger("click");
     expect(wrapper.emitted("reveal-folder")).toBeTruthy();
+  });
+});
+
+// ============================================================
+// 刷新 Mod 信息：与本地 / 收藏详情同一入口
+// ============================================================
+describe("OnlineDetailPanel: 刷新 Mod 信息", () => {
+  it("渲染与本地详情同款的刷新按钮（同一 icon / 文案 / tooltip），点击发出 refresh-info", async () => {
+    const wrapper = mountPanel();
+    const btn = wrapper.find("button.info-refresh-btn");
+    expect(btn.exists()).toBe(true);
+    expect(btn.classes()).toContain("dv-btn-ghost");
+    expect(btn.find(".info-refresh-glyph").text()).toBe("⟳");
+    expect(btn.text()).toContain("detail.refreshInfo");
+    expect(btn.attributes("title")).toBe("detail.refreshInfoTitle");
+    expect(btn.attributes("aria-label")).toBe("detail.refreshInfo");
+
+    await btn.trigger("click");
+    expect(wrapper.emitted("refresh-info")).toHaveLength(1);
+  });
+
+  it("刷新中按钮 disabled 且文案 / aria-label 切换为 refreshingInfo", () => {
+    const wrapper = mountPanel({ infoRefreshing: true });
+    const btn = wrapper.find("button.info-refresh-btn");
+    expect(btn.attributes("disabled")).toBeDefined();
+    expect(btn.text()).toContain("detail.refreshingInfo");
+    expect(btn.attributes("aria-label")).toBe("detail.refreshingInfo");
+  });
+
+  it("刷新按钮位于辅助操作区之后，不额外新增操作栏标题", () => {
+    const wrapper = mountPanel();
+    const rows = wrapper.findAll(".dv-action-row");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].find("button.info-refresh-btn").exists()).toBe(true);
   });
 });
 

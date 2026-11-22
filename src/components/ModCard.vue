@@ -7,6 +7,7 @@ import { sourceHint, sourceLabel, translateBackendMessage, formatDateTime } from
 import { customNameOf, displayTitle, isFavorite } from "../userData";
 import { translatedTitleOf } from "../online/translation";
 import BaseModCard from "./base/BaseModCard.vue";
+import { cardTogglePrefs } from "../composables/local/cardTogglePrefs";
 
 const props = defineProps<{
   mod: ModEntry;
@@ -87,6 +88,13 @@ const toggleTitle = computed(() => {
   return props.mod.enabled ? t("card.toggleDisable") : t("card.toggleEnable");
 });
 
+/** 同一个控件、同一套业务逻辑：只按设置切换外观类名（圆形按钮 / Apple 开关） */
+const toggleControlClass = computed(() => [
+  cardTogglePrefs.style === "switch" ? "card-switch" : "card-toggle",
+  statusClass.value,
+  { busy: toggling.value },
+]);
+
 function errorMessage(e: unknown): string {
   if (typeof e === "string") return translateBackendMessage(e);
   if (e instanceof Error) return translateBackendMessage(e.message);
@@ -146,15 +154,15 @@ function onMenuKeydown(menuEvent: KeyboardEvent): void {
   }
 }
 
-// v0.5：有备注名时主标题用备注名，副标题小字回显原英文标题
+// v0.5：有备注名时主标题直接用备注名（原名不再作为副标题叠加，避免名称重复与额外行高）
 // v0.2.4：没备注名时，已翻译的模组直接显示中文标题（跟详情页的「显示原文/中文」开关联动）
 const custom = computed(() => customNameOf(props.mod.workshopId));
 const translated = computed(() => translatedTitleOf(props.mod.workshopId));
 const title = computed(() =>
   displayTitle(props.mod.workshopId, translated.value ?? props.mod.displayName),
 );
-/** 副标题只服务于备注名（📝）；译文不再叠英文原名 */
-const sub = computed(() => (custom.value ? props.mod.displayName : null));
+/** 有备注名时把原名挂在标题 tooltip 上（卡片正文只显示一个名称，原名数据不丢） */
+const titleHint = computed(() => (custom.value ? props.mod.displayName : null));
 const favorited = computed(() => isFavorite(props.mod.workshopId));
 
 /** 安装时间：只有 metadata 记录了真实安装时间才显示；旧模组为 null 时不伪造 */
@@ -168,7 +176,7 @@ const installedAtText = computed(() => {
 <template>
   <BaseModCard
     :title="title"
-    :sub="sub"
+    :title-hint="titleHint"
     :cover-url="coverUrl"
     :fallback-text="mod.displayName.slice(0, 2)"
     :favorited="favorited"
@@ -181,6 +189,11 @@ const installedAtText = computed(() => {
     @contextmenu="onContextMenu"
     @keydown="onMenuKeydown"
   >
+    <!-- 卡片信息区左侧/右侧边缘条：已启用状态侧边栏（仅本地已启用模组；位置由设置项驱动） -->
+    <template #body-bar>
+      <span v-if="installed && mod.enabled === true" class="card-enabled-bar"></span>
+    </template>
+
     <!-- 角标 slot：排序序号、可更新红标、来源角标等 -->
     <template #badges>
       <span v-if="order !== undefined" class="order-badge" :title="`#${order}`">{{ order }}</span>
@@ -214,28 +227,32 @@ const installedAtText = computed(() => {
       </div>
     </template>
 
-    <!-- 第一行 meta：启用/禁用开关 + 数据模组标记 -->
+    <!-- 底部操作行：#meta-top 槽本身始终保留（行高由 style.css 的
+         --card-action-row-height 固定），只让「启用/禁用控件」这一个元素按设置显隐。
+         因此隐藏控件只少一个按钮，不会拿走整行高度，卡片高度与安装时间位置都不变。 -->
     <template #meta-top>
       <span v-if="mod.isDataMod" class="data-mark" :title="t('card.dataModBadgeHint')">⚙️</span>
       <span
-        v-if="!uninstalled"
-        class="card-toggle"
-        :class="[statusClass, { busy: toggling }]"
+        v-if="!uninstalled && cardTogglePrefs.show"
+        :class="toggleControlClass"
         role="switch"
         :aria-checked="mod.enabled === true"
         :aria-busy="toggling"
         :title="toggleTitle"
         @click="toggleEnabled"
       >
-        <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">
-          <path d="M2.5 6.4 4.8 8.6 9.5 3.4" />
-        </svg>
-        <svg v-else-if="statusClass === 'off'" viewBox="0 0 12 12" aria-hidden="true">
-          <path d="M3.2 6h5.6" />
-        </svg>
-        <svg v-else viewBox="0 0 12 12" aria-hidden="true">
-          <circle cx="6" cy="6" r="3.9" />
-        </svg>
+        <template v-if="cardTogglePrefs.style === 'circle'">
+          <svg v-if="statusClass === 'on'" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M2.6 6.3 5 8.7 9.4 3.6" />
+          </svg>
+          <svg v-else-if="statusClass === 'off'" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3.2 6h5.6" />
+          </svg>
+          <svg v-else viewBox="0 0 12 12" aria-hidden="true">
+            <circle cx="6" cy="6" r="3.2" />
+          </svg>
+        </template>
+        <span v-else class="card-switch-knob" aria-hidden="true"></span>
       </span>
       <button
         v-if="hasUpdate && selectable"
@@ -252,7 +269,7 @@ const installedAtText = computed(() => {
 </template>
 
 <style scoped>
-/* v0.9：卡片右下角快捷开关（沿用原有状态配色：绿勾 / 灰杠 / 虚线未知） */
+/* v0.9：卡片启用/禁用圆形按钮（默认样式，恢复原有设计：绿勾 / 灰杠 / 虚线未知） */
 .card-toggle {
   width: 18px;
   height: 18px;
@@ -311,6 +328,57 @@ const installedAtText = computed(() => {
   opacity: 0.5;
   cursor: progress;
   transform: none;
+}
+
+/* v1.0：Apple 风格开关（可选的第二种样式，由设置页「按钮样式」切换） */
+.card-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-block;
+  border: 1px solid transparent;
+  cursor: pointer;
+  background: var(--switch-track-off);
+  transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.card-switch-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.card-switch:hover {
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.16);
+}
+.card-switch.on {
+  background: var(--ok);
+  border-color: rgba(var(--ok-rgb), 0.85);
+}
+.card-switch.on .card-switch-knob {
+  transform: translateX(16px);
+}
+.card-switch.off {
+  border-color: rgba(255, 255, 255, 0.06);
+}
+.card-switch.unknown {
+  background: var(--panel-lo);
+  border-color: var(--border-strong);
+  border-style: dashed;
+}
+.card-switch.unknown .card-switch-knob {
+  background: var(--parch-dim);
+  box-shadow: none;
+}
+.card-switch.busy {
+  opacity: 0.55;
+  cursor: progress;
 }
 
 /* v0.4：右上角「可更新」角标。排序模式的序号在左上，两者互不遮挡 */
@@ -430,8 +498,16 @@ const installedAtText = computed(() => {
   white-space: nowrap;
 }
 
+/* 安装时间：锚定在底部操作行的行末。
+   与 .card-meta 的 space-between 效果等价（有控件时两者位置完全一致），
+   但控件隐藏后这一行只剩它自己，auto margin 保证它不会被挤到左侧而「左移」。
+   行高由 style.css 的 --card-action-row-height 固定，与控件显示与否无关。 */
 .card-installed-time {
-  color: var(--text-dim);
+  margin-left: auto;
+  /* 安装时间与同一卡片里的 #ID / 作者行同级：都用 --muted（二级信息）。
+     原来用 --text-dim，暗色主题下与深色卡片底只有约 2.2:1 对比度（看不清），
+     换成 --muted 后暗色约 3.6:1、浅色约 4.2:1，且与在线卡片的「安装数」同色。 */
+  color: var(--muted);
   font-size: calc(var(--card-font-size) * 0.82);
   line-height: 1.5;
   white-space: nowrap;
@@ -441,3 +517,4 @@ const installedAtText = computed(() => {
   cursor: progress;
 }
 </style>
+

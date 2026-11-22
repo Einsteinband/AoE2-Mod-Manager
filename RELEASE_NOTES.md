@@ -1,3 +1,23 @@
+# v0.5.9 — 2026-11-23
+
+## v0.5.9 - What's New
+
+- **⬆️ Back to Top:** When you scroll a long mod list, a small semi-transparent arrow appears at the bottom center of the list. Click it to glide smoothly back to the top; it hides itself once you are there. On by default, and can be switched off in Settings → Appearance.
+- **🃏 Tidy Cards:** Titles now take a fixed two lines and the action row keeps a fixed height, so cards line up cleanly. A saved custom name replaces the original title on the card, and the real name stays in the tooltip.
+- **➖ Card Divider:** A faint dashed line separates the title from the info rows, so taller cards no longer look half-empty. Decorative only, it never changes card height; on by default and switchable in Settings → Appearance.
+- **🐞 List View Fix:** In list view, the enable / disable controls, the data-mod mark and status badges are no longer hidden by mistake.
+- **🌗 Brighter Install Date:** The "installed on" line is easier to read, especially in the dark theme.
+
+## v0.5.9 - 更新内容
+
+- **⬆️ 回到列表顶部：** 长列表向下滚动后，列表底部中央会出现一个半透明的小箭头；点击平滑回到顶部，到顶后自动隐藏。默认开启，可在「设置 → 外观」里关掉。
+- **🃏 卡片排布更整齐：** 标题固定占两行、底部操作行固定高度，卡片对得齐；有备注名时卡片只显示备注名，原名称保留在悬停提示里。
+- **➖ 卡片分隔线：** 标题与信息行之间加了一条很淡的虚线，被拉高的卡片不再显得空；纯装饰、不改变卡片高度，默认开启，可在「设置 → 外观」里关掉。
+- **🐞 列表视图修复：** 列表模式下不再误隐藏启用 / 禁用控件、数据模组标记和状态徽章。
+- **🌗 安装时间更清楚：** 「安装于」这一行提亮，暗色主题下更容易看清。
+
+---
+
 # v0.5.8 — 2026-11-21
 
 ## v0.5.8 - What's New

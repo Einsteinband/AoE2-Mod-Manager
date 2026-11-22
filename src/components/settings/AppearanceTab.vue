@@ -8,6 +8,7 @@ import { computed, inject } from "vue";
 import { useI18n } from "vue-i18n";
 import type { UiFontFamily } from "../../api";
 import { ACCENT_THEMES } from "../../config/accentThemes";
+import { cardTogglePrefs, setCardTogglePrefs, type CardToggleStyle } from "../../composables/local/cardTogglePrefs";
 
 const { t } = useI18n();
 
@@ -19,6 +20,11 @@ interface AppearanceSettings {
   latinFont: { value: boolean };
   installedCardBg: { value: boolean };
   installedCardBar: { value: boolean };
+  installedCardBarSide: { value: string };
+  enabledCardBar: { value: boolean };
+  enabledCardBarSide: { value: string };
+  cardDivider: { value: boolean };
+  backToTop: { value: boolean };
   installedCardStripes: { value: boolean };
   detailButtonMode: { value: string };
   uiFontWeight: { value: number };
@@ -90,6 +96,28 @@ const installedCardBar = computed({
   get: () => settings.installedCardBar.value,
   set: (val: boolean) => { settings.installedCardBar.value = val; },
 });
+const installedCardBarSide = computed({
+  get: () => settings.installedCardBarSide.value,
+  set: (val: string) => { settings.installedCardBarSide.value = val; },
+});
+const enabledCardBar = computed({
+  get: () => settings.enabledCardBar.value,
+  set: (val: boolean) => { settings.enabledCardBar.value = val; },
+});
+const enabledCardBarSide = computed({
+  get: () => settings.enabledCardBarSide.value,
+  set: (val: string) => { settings.enabledCardBarSide.value = val; },
+});
+/** 卡片分隔线：标题区与信息区之间的淡虚线（纯装饰，默认显示） */
+const cardDivider = computed({
+  get: () => settings.cardDivider.value,
+  set: (val: boolean) => { settings.cardDivider.value = val; },
+});
+/** 回到列表顶部按钮：列表底部中央的悬浮件（默认显示） */
+const backToTop = computed({
+  get: () => settings.backToTop.value,
+  set: (val: boolean) => { settings.backToTop.value = val; },
+});
 const installedCardStripes = computed({
   get: () => settings.installedCardStripes.value,
   set: (val: boolean) => { settings.installedCardStripes.value = val; },
@@ -98,6 +126,16 @@ const detailButtonMode = computed({
   get: () => settings.detailButtonMode.value,
   set: (val: string) => { settings.detailButtonMode.value = val; },
 });
+
+/** 卡片启用/禁用按钮：显示开关与样式都读写同一个全局单例（立即生效 + 自动落盘） */
+const cardToggleShow = computed({
+  get: () => cardTogglePrefs.show,
+  set: (val: boolean) => setCardTogglePrefs({ show: val }),
+});
+const cardToggleStyle = computed(() => cardTogglePrefs.style);
+function setCardToggleStyle(style: CardToggleStyle) {
+  setCardTogglePrefs({ style });
+}
 
 const DETAIL_BTN_MODE_OPTIONS = computed(() => [
   { value: "icon", label: t("settingsUi.detailBtnModeIcon") },
@@ -260,13 +298,25 @@ const {
     <div class="settings-row">
       <div class="row-label">
         <span class="row-title">{{ t("settingsUi.installedCardBarTitle") }}</span>
+        <span class="row-note">{{ t("settingsUi.installedCardBarNote") }}</span>
       </div>
-      <input
-        v-model="installedCardBar"
-        type="checkbox"
-        class="installed-card-decor-check"
-        :aria-label="t('settingsUi.installedCardBarTitle')"
-      />
+      <div class="card-bar-controls">
+        <input
+          v-model="installedCardBar"
+          type="checkbox"
+          class="installed-card-decor-check"
+          :aria-label="t('settingsUi.installedCardBarTitle')"
+        />
+        <select
+          v-model="installedCardBarSide"
+          class="settings-select card-bar-side-select"
+          :disabled="!installedCardBar"
+          :aria-label="t('settingsUi.cardBarSideTitle')"
+        >
+          <option value="left">{{ t("settingsUi.cardBarSideLeft") }}</option>
+          <option value="right">{{ t("settingsUi.cardBarSideRight") }}</option>
+        </select>
+      </div>
     </div>
 
     <div class="settings-row">
@@ -278,6 +328,120 @@ const {
         type="checkbox"
         class="installed-card-decor-check"
         :aria-label="t('settingsUi.installedCardStripesTitle')"
+      />
+    </div>
+
+    <div class="settings-sep"></div>
+
+    <!-- 已启用状态侧边栏：与上面的「已安装卡片样式」互相独立 -->
+    <h3 class="settings-group-title">{{ t("settingsUi.enabledCardBarTitle") }}</h3>
+    <p class="row-note card-bar-group-note">{{ t("settingsUi.enabledCardBarNote") }}</p>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.enabledCardBarShowTitle") }}</span>
+      </div>
+      <input
+        v-model="enabledCardBar"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.enabledCardBarShowTitle')"
+      />
+    </div>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.cardBarSideTitle") }}</span>
+      </div>
+      <select
+        v-model="enabledCardBarSide"
+        class="settings-select card-bar-side-select"
+        :disabled="!enabledCardBar"
+        :aria-label="t('settingsUi.cardBarSideTitle')"
+      >
+        <option value="left">{{ t("settingsUi.cardBarSideLeft") }}</option>
+        <option value="right">{{ t("settingsUi.cardBarSideRight") }}</option>
+      </select>
+    </div>
+
+    <div class="settings-sep"></div>
+
+    <!-- 启用/禁用按钮：显示开关 + 左右切换式样式选择（只影响展示，不动业务逻辑） -->
+    <h3 class="settings-group-title">{{ t("settingsUi.cardToggleGroupTitle") }}</h3>
+    <p class="row-note card-bar-group-note">{{ t("settingsUi.cardToggleGroupNote") }}</p>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.cardToggleShowTitle") }}</span>
+      </div>
+      <input
+        v-model="cardToggleShow"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.cardToggleShowTitle')"
+      />
+    </div>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.cardToggleStyleTitle") }}</span>
+        <span class="row-note">{{ t("settingsUi.cardToggleStyleNote") }}</span>
+      </div>
+      <div class="card-toggle-seg" role="group" :aria-label="t('settingsUi.cardToggleStyleTitle')">
+        <button
+          type="button"
+          class="card-toggle-seg-btn"
+          :class="{ 'is-active': cardToggleStyle === 'circle' }"
+          :aria-pressed="cardToggleStyle === 'circle'"
+          @click="setCardToggleStyle('circle')"
+        >
+          {{ t("settingsUi.cardToggleStyleCircle") }}
+        </button>
+        <button
+          type="button"
+          class="card-toggle-seg-btn"
+          :class="{ 'is-active': cardToggleStyle === 'switch' }"
+          :aria-pressed="cardToggleStyle === 'switch'"
+          @click="setCardToggleStyle('switch')"
+        >
+          {{ t("settingsUi.cardToggleStyleSwitch") }}
+        </button>
+      </div>
+    </div>
+
+    <div class="settings-sep"></div>
+
+    <!-- 回到列表顶部按钮：列表底部中央的悬浮件（默认显示） -->
+    <h3 class="settings-group-title">{{ t("settingsUi.backToTopGroupTitle") }}</h3>
+    <p class="row-note card-bar-group-note">{{ t("settingsUi.backToTopGroupNote") }}</p>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.backToTopShowTitle") }}</span>
+      </div>
+      <input
+        v-model="backToTop"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.backToTopShowTitle')"
+      />
+    </div>
+
+    <div class="settings-sep"></div>
+
+    <!-- 卡片分隔线：标题区与信息区之间的淡虚线（纯装饰，默认显示） -->
+    <h3 class="settings-group-title">{{ t("settingsUi.cardDividerGroupTitle") }}</h3>
+    <p class="row-note card-bar-group-note">{{ t("settingsUi.cardDividerGroupNote") }}</p>
+
+    <div class="settings-row">
+      <div class="row-label">
+        <span class="row-title">{{ t("settingsUi.cardDividerShowTitle") }}</span>
+      </div>
+      <input
+        v-model="cardDivider"
+        type="checkbox"
+        class="installed-card-decor-check"
+        :aria-label="t('settingsUi.cardDividerShowTitle')"
       />
     </div>
 
@@ -592,6 +756,53 @@ const {
   width: 18px;
   height: 18px;
   cursor: pointer;
+}
+
+/* v1.1：卡片侧边栏两组设置 —— 开关 + 位置下拉并排，关闭开关时位置控件禁用 */
+.card-bar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-bar-side-select {
+  min-width: 92px;
+}
+.card-bar-side-select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.card-bar-group-note {
+  margin: -6px 0 0;
+}
+
+/* v1.2：卡片启用/禁用按钮 —— 显示开关 + 左右切换式样式选择（双选项一律用分段控件） */
+.card-toggle-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-lo);
+}
+.card-toggle-seg-btn {
+  padding: 5px 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--parch-dim);
+  font-size: calc(12px * var(--global-scale));
+  letter-spacing: calc(0.4px * var(--ui-tracking));
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.card-toggle-seg-btn:hover {
+  color: var(--parch);
+  border-color: var(--line-soft);
+}
+.card-toggle-seg-btn.is-active {
+  background: rgba(var(--accent-rgb), 0.16);
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--gold-bright);
 }
 
 /* 强调色色块选择器：四列网格，窄窗降两列；色块、勾选与标签统一 */

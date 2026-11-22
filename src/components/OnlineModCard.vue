@@ -61,14 +61,14 @@ function onImageError() {
   failed.value = true;
 }
 
-// v0.5：备注名优先做主标题，副标题小字回显官方标题
+// v0.5：备注名优先做主标题（原名不再作为副标题叠加）
 // v0.2.4：没备注名时，手动翻译过的模组优先显示中文标题（未翻译就原样显示，绝不自动请求）
 const custom = computed(() => customNameOf(props.mod.modId));
 const translated = computed(() => translatedTitleOf(props.mod.modId));
 /** 标题优先级：备注名 > 中文译文 > 官方原标题 */
 const title = computed(() => displayTitle(props.mod.modId, translated.value ?? props.mod.title));
-/** 副标题只服务于备注名（📝）；译文不再叠英文原名 */
-const sub = computed(() => (custom.value ? props.mod.title : null));
+/** 有备注名时把官方原名挂在标题 tooltip 上（卡片正文只显示一个名称） */
+const titleHint = computed(() => (custom.value ? props.mod.title : null));
 const favorited = computed(() => isFavorite(props.mod.modId));
 
 function formatCount(n: number | null): string {
@@ -95,7 +95,7 @@ function onMenuKeydown(menuEvent: KeyboardEvent): void {
 <template>
   <BaseModCard
     :title="title"
-    :sub="sub"
+    :title-hint="titleHint"
     :cover-url="src"
     :fallback-text="mod.title.slice(0, 2)"
     :favorited="favorited"

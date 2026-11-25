@@ -19,10 +19,15 @@ vi.mock("vue-i18n", async (importOriginal) => {
   };
 });
 
+const manualActiveMock = vi.hoisted(() => ({ value: false }));
+
 vi.mock("../sessionState", () => ({
+  authState: ref("unknown"),
   ensureSession: vi.fn(async () => true),
   lastCheckedMs: ref(0),
-  logoutAndClearSession: vi.fn(async () => undefined),
+  logout: vi.fn(async () => undefined),
+  manualActive: manualActiveMock,
+  startLogin: vi.fn(),
   probeNetwork: vi.fn(async () => true),
   requestManualRefresh: vi.fn(),
   sessionError: ref(null),
@@ -35,6 +40,7 @@ vi.mock("../sessionState", () => ({
 
 vi.mock("../../online/networkError", () => ({
   isNetworkError: ref(false),
+  isNetworkFailure: vi.fn(() => false),
   networkFailureKind: ref("other"),
   noteRequestFailure: vi.fn(),
 }));
@@ -45,6 +51,7 @@ vi.mock("../../format", () => ({
 
 vi.mock("../../api", () => ({
   openExternalUrl: vi.fn(async () => undefined),
+  openLogsDir: vi.fn(async () => ""),
 }));
 
 vi.mock("../../online/service", () => ({
@@ -55,6 +62,23 @@ vi.mock("../../online/service", () => ({
   indexSync: vi.fn(),
   indexPause: vi.fn(),
   onIndexProgress: vi.fn(async () => () => undefined),
+  uiLog: vi.fn(async () => undefined),
+  networkDiagnosis: vi.fn(async () => ({
+    proxy: {
+      enabled: false,
+      source: "direct",
+      proxyUrl: null,
+      pacDetected: false,
+      hasExplicitServer: false,
+      webviewFollowsSystem: true,
+      webviewArgs: null,
+      envProxyDetected: false,
+      pathMismatch: false,
+    },
+    website: { reachable: true, status: 200, latencyMs: 1, category: "ok", errorKind: null },
+    api: { reachable: true, status: 200, latencyMs: 1, category: "ok", errorKind: null },
+    note: null,
+  })),
 }));
 
 import StatusBar from "../StatusBar.vue";
@@ -63,7 +87,11 @@ import {
   startIndexStatusWatch,
   stopIndexStatusWatch,
 } from "../../online/indexStatusStore";
-import { indexPause, indexStatus as fetchIndexStatus, indexSync } from "../../online/service";
+import { indexPause, indexStatus as fetchIndexStatus, indexSync, networkDiagnosis, getNetworkSettings } from "../../online/service";
+import { isNetworkError } from "../../online/networkError";
+import { resetDiagnosis, runNetworkDiagnosis } from "../../online/networkDiagnosis";
+import { proxySource, resetProxySource } from "../../online/proxySourceStore";
+import type { NetworkDiagnosisOutcome, NetworkSettingsView } from "../../online/types";
 
 function status(overrides: Partial<IndexStatus> = {}): IndexStatus {
   return {
@@ -91,6 +119,39 @@ function status(overrides: Partial<IndexStatus> = {}): IndexStatus {
     lastSyncComplete: false,
     lastSyncOk: false,
     ...overrides,
+  };
+}
+
+function outcome(source: string): NetworkDiagnosisOutcome {
+  return {
+    proxy: {
+      enabled: source !== "direct",
+      source,
+      proxyUrl: null,
+      pacDetected: false,
+      hasExplicitServer: false,
+      webviewFollowsSystem: true,
+      webviewArgs: null,
+      envProxyDetected: source === "env",
+      pathMismatch: false,
+    },
+    website: { reachable: true, status: 200, latencyMs: 1, category: "ok", errorKind: null },
+    api: { reachable: true, status: 200, latencyMs: 1, category: "ok", errorKind: null },
+    note: null,
+  };
+}
+
+function settingsView(source: string): NetworkSettingsView {
+  return {
+    auto: true,
+    proxyUrl: null,
+    rememberLogin: true,
+    source,
+    effectiveProxy: null,
+    note: null,
+    webviewArgs: null,
+    dataDir: null,
+    error: null,
   };
 }
 
@@ -125,6 +186,12 @@ function mountBar(warningCount = 0) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  isNetworkError.value = false;
+  manualActiveMock.value = false;
+  resetDiagnosis();
+  resetProxySource();
+  vi.mocked(getNetworkSettings).mockReset();
+  vi.mocked(getNetworkSettings).mockResolvedValue(settingsView("direct"));
   indexBar.status = null;
   indexBar.failure = "";
   indexBar.needLogin = false;
@@ -226,7 +293,7 @@ describe("StatusBar 索引状态区", () => {
     expect(wrapper.find(".sb-index-retry").exists()).toBe(true);
   });
 
-  it("索引状态位于右侧状态区，且代理胶囊仍是最右一项", async () => {
+  it("索引状态位于右侧状态区，代理胶囊排在索引之后、占据最右侧", async () => {
     indexBar.status = status({ syncing: true, phase: "syncing", indexed: 120, totalCount: 200 });
     const wrapper = mountBar();
     await flushPromises();
@@ -236,9 +303,112 @@ describe("StatusBar 索引状态区", () => {
     expect(index.exists()).toBe(true);
     // 必须挂在 .sb-right 里，而不是夹在账号状态与中间提示之间
     expect(right.find(".sb-index").exists()).toBe(true);
+    // 代理胶囊恢复为右侧独立状态位，且在索引块之后（最右一项）
+    const pill = right.find(".sb-pill");
+    expect(pill.exists()).toBe(true);
     const cells = right.element.children;
     expect((cells[cells.length - 1] as HTMLElement).className).toContain("sb-pill");
-    expect(right.html().indexOf("sb-index")).toBeLessThan(right.html().indexOf("sb-pill"));
+  });
+
+  it("代理胶囊按诊断回传来源渲染：manual / system / env / direct 都显示为事实标签，直连不表述为故障", async () => {
+    const cases: Array<[string, string]> = [
+      ["manual", "statusbar.proxyManual"],
+      ["system", "statusbar.proxySystem"],
+      ["env", "statusbar.proxyEnv"],
+      ["direct", "statusbar.proxyDirect"],
+    ];
+    for (const [source, sourceKey] of cases) {
+      vi.mocked(networkDiagnosis).mockResolvedValueOnce(outcome(source));
+      vi.mocked(getNetworkSettings).mockResolvedValueOnce(settingsView(source));
+      const wrapper = mountBar();
+      await flushPromises();
+      const pill = wrapper.find(".sb-right .sb-pill");
+      expect(pill.exists()).toBe(true);
+      expect(pill.text()).toContain("statusbar.proxyLabel");
+      expect(pill.text()).toContain(sourceKey);
+    }
+  });
+
+  it("诊断命令失败但设置读取成功：胶囊仍显示链路事实，不被诊断结果清空", async () => {
+    vi.mocked(networkDiagnosis).mockRejectedValueOnce(new Error("diagnosis boom"));
+    vi.mocked(getNetworkSettings).mockResolvedValueOnce(settingsView("system"));
+    const wrapper = mountBar();
+    await flushPromises();
+    const pill = wrapper.find(".sb-right .sb-pill");
+    expect(pill.exists()).toBe(true);
+    expect(pill.text()).toContain("statusbar.proxySystem");
+  });
+
+  it("启动时诊断尚未回包：来源仍可经 getNetworkSettings 独立读到", async () => {
+    let resolveDiagnosis: (value: NetworkDiagnosisOutcome) => void = () => undefined;
+    const pending = new Promise<NetworkDiagnosisOutcome>((res) => {
+      resolveDiagnosis = res;
+    });
+    vi.mocked(networkDiagnosis).mockReturnValueOnce(pending);
+    vi.mocked(getNetworkSettings).mockResolvedValueOnce(settingsView("env"));
+    const wrapper = mountBar();
+    await flushPromises();
+    const pill = () => wrapper.find(".sb-right .sb-pill");
+    expect(pill().exists()).toBe(true);
+    expect(pill().text()).toContain("statusbar.proxyEnv");
+
+    // 诊断稍后回包：回包来源与兜底一致，胶囊保留
+    resolveDiagnosis(outcome("env"));
+    await flushPromises();
+    expect(pill().exists()).toBe(true);
+  });
+
+  it("诊断成功后最新 proxy_info 覆盖启动兜底来源", async () => {
+    vi.mocked(getNetworkSettings).mockResolvedValueOnce(settingsView("system"));
+    vi.mocked(networkDiagnosis).mockResolvedValueOnce(outcome("manual"));
+    const wrapper = mountBar();
+    await flushPromises();
+    const pill = wrapper.find(".sb-right .sb-pill");
+    expect(pill.exists()).toBe(true);
+    expect(pill.text()).toContain("statusbar.proxyManual");
+  });
+
+  it("官网 / API 探针失败但代理事实获取成功：胶囊仍正常显示", async () => {
+    vi.mocked(getNetworkSettings).mockResolvedValueOnce(settingsView("env"));
+    vi.mocked(networkDiagnosis).mockResolvedValueOnce({
+      ...outcome("env"),
+      website: { reachable: false, status: null, latencyMs: 1, category: "network", errorKind: "timeout" },
+      api: { reachable: false, status: null, latencyMs: 1, category: "network", errorKind: "timeout" },
+    });
+    const wrapper = mountBar();
+    await flushPromises();
+    const pill = wrapper.find(".sb-right .sb-pill");
+    expect(pill.exists()).toBe(true);
+    expect(pill.text()).toContain("statusbar.proxyEnv");
+  });
+
+  it("来源读取失败且诊断无回包：不显示胶囊，也不编造直连状态", async () => {
+    vi.mocked(networkDiagnosis).mockRejectedValueOnce(new Error("diagnosis boom"));
+    vi.mocked(getNetworkSettings).mockRejectedValueOnce(new Error("settings boom"));
+    const wrapper = mountBar();
+    await flushPromises();
+    expect(wrapper.find(".sb-right .sb-pill").exists()).toBe(false);
+    expect(proxySource.value).toBeNull();
+  });
+
+  it("诊断结果二次更新、登录窗开关（manualActive 切换）都不会使代理胶囊消失", async () => {
+    vi.mocked(networkDiagnosis).mockResolvedValueOnce(outcome("system"));
+    const wrapper = mountBar();
+    await flushPromises();
+    const pill = () => wrapper.find(".sb-right .sb-pill");
+    expect(pill().exists()).toBe(true);
+    expect(pill().text()).toContain("statusbar.proxySystem");
+
+    // 登录窗口打开：manualActive 置真；期间诊断再跑一轮，胶囊仍在
+    manualActiveMock.value = true;
+    vi.mocked(networkDiagnosis).mockResolvedValueOnce(outcome("env"));
+    await runNetworkDiagnosis("poll");
+    expect(pill().exists()).toBe(true);
+    expect(pill().text()).toContain("statusbar.proxyEnv");
+
+    // 登录窗口关闭：manualActive 复位，胶囊保留
+    manualActiveMock.value = false;
+    expect(pill().exists()).toBe(true);
   });
 
   it("底栏不再显示在线 Mod 总数", async () => {
@@ -303,5 +473,109 @@ describe("StatusBar 索引状态区", () => {
     await flushPromises();
     expect(vi.mocked(indexPause)).toHaveBeenCalledWith(false);
     stopIndexStatusWatch();
+  });
+
+  it("已有有效诊断结论时，旧粘滞断网标志不覆盖诊断结果（不误报断网）", async () => {
+    isNetworkError.value = true;
+    const wrapper = mountBar();
+    await flushPromises();
+    const state = wrapper.find(".sb-state");
+    expect(state.exists()).toBe(true);
+    expect(state.text()).not.toContain("statusbar.networkDown");
+    expect(state.text()).not.toContain("statusbar.timeoutDown");
+    expect(state.text()).not.toContain("statusbar.proxyDown");
+    expect(state.text()).not.toContain("statusbar.tlsDown");
+  });
+
+  it("诊断命令失败、无有效结论时，旧粘滞标志作为兜底证据显示断网", async () => {
+    vi.mocked(networkDiagnosis).mockRejectedValueOnce(new Error("diagnosis boom"));
+    isNetworkError.value = true;
+    const wrapper = mountBar();
+    await flushPromises();
+    expect(wrapper.find(".sb-state").text()).toContain("statusbar.networkDown");
+  });
+
+  it("诊断结论为故障类时，状态文字进入 error 态且不亮 online（不被粘滞标志门控）", async () => {
+    vi.mocked(networkDiagnosis).mockResolvedValueOnce({
+      proxy: {
+        enabled: false,
+        source: "direct",
+        proxyUrl: null,
+        pacDetected: false,
+        hasExplicitServer: false,
+        webviewFollowsSystem: true,
+        webviewArgs: null,
+        envProxyDetected: false,
+        pathMismatch: false,
+      },
+      website: { reachable: false, status: null, latencyMs: 1, category: "network", errorKind: "timeout" },
+      api: { reachable: false, status: null, latencyMs: 1, category: "network", errorKind: "timeout" },
+      note: null,
+    });
+    const wrapper = mountBar();
+    await flushPromises();
+    const state = wrapper.find(".sb-state");
+    expect(state.classes()).toContain("error");
+    expect(state.classes()).not.toContain("online");
+  });
+});
+
+describe("账号菜单开合：仅账号按钮切换", () => {
+  it("点击账号按钮打开菜单，再次点击收起", async () => {
+    const wrapper = mountBar();
+    await flushPromises();
+    const account = wrapper.find(".sb-account");
+    await account.trigger("click");
+    expect(wrapper.find(".sb-menu").exists()).toBe(true);
+    await account.trigger("click");
+    expect(wrapper.find(".sb-menu").exists()).toBe(false);
+  });
+
+  it("菜单头部关闭按钮：有无障碍名称，点击后收起菜单", async () => {
+    const wrapper = mountBar();
+    await flushPromises();
+    await wrapper.find(".sb-account").trigger("click");
+    const close = wrapper.find(".sb-menu-close");
+    expect(close.exists()).toBe(true);
+    expect(close.attributes("aria-label")).toBe("common.close");
+    await close.trigger("click");
+    expect(wrapper.find(".sb-menu").exists()).toBe(false);
+  });
+
+  it("菜单内点击操作项（校验连接）后菜单保持打开，不会自动收起", async () => {
+    const wrapper = mountBar();
+    await flushPromises();
+    await wrapper.find(".sb-account").trigger("click");
+    const actions = wrapper.findAll(".sb-menu-actions");
+    const recheckBtn = actions[1].find("button");
+    await recheckBtn.trigger("click");
+    await flushPromises();
+    expect(wrapper.find(".sb-menu").exists()).toBe(true);
+  });
+
+  it("点击菜单外区域与按 Esc 都不收起菜单", async () => {
+    const wrapper = mountBar();
+    await flushPromises();
+    await wrapper.find(".sb-account").trigger("click");
+    expect(wrapper.find(".sb-menu").exists()).toBe(true);
+
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.find(".sb-menu").exists()).toBe(true);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(wrapper.find(".sb-menu").exists()).toBe(true);
+  });
+});
+
+describe("账号菜单：诊断摘要块不再展示", () => {
+  it("菜单内不渲染最近诊断摘要行与日志文件夹入口", async () => {
+    const wrapper = mountBar();
+    await flushPromises();
+    await wrapper.find(".sb-account").trigger("click");
+    expect(wrapper.find(".sb-menu-diag").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("statusbar.diagDetailTitle");
+    expect(wrapper.text()).not.toContain("statusbar.diagOpenLogs");
   });
 });

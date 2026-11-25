@@ -150,10 +150,35 @@ fn pick_proxy_server(raw: &str) -> Option<String> {
     preferred.or(fallback)
 }
 
+/// 系统代理注册表原始事实（诊断用）：只回传是否启用 / PAC / 明确服务器。
+/// 代理地址本身已经过 `normalize_manual` 校验，不含 `user:pass`；日志只记存在性，不回传敏感参数。
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemProxyInfo {
+    /// 注册表 `ProxyEnable != 0`：系统代理开关是否打开
+    pub enabled: bool,
+    /// `AutoConfigURL`：自动代理配置（PAC）地址；可能为空
+    pub pac_url: Option<String>,
+    /// `ProxyServer` 解析出的明确代理服务器；可能为空
+    pub server_url: Option<String>,
+}
+
 #[cfg(windows)]
-struct SystemProxyProbe {
-    proxy_url: Option<String>,
-    note: Option<String>,
+fn read_system_probe() -> SystemProxyInfo {
+    let enabled = read_reg_u32("ProxyEnable").unwrap_or(0) != 0;
+    let server = read_reg_string("ProxyServer").as_deref().and_then(pick_proxy_server);
+    let pac_url = read_reg_string("AutoConfigURL");
+    SystemProxyInfo { enabled, pac_url, server_url: server }
+}
+
+#[cfg(not(windows))]
+fn read_system_probe() -> SystemProxyInfo {
+    SystemProxyInfo::default()
+}
+
+/// 供诊断命令读取系统代理原始事实（只读注册表，不修改系统配置）。
+pub fn system_probe() -> SystemProxyInfo {
+    read_system_probe()
 }
 
 #[cfg(windows)]
@@ -222,19 +247,24 @@ fn read_reg_string(name: &str) -> Option<String> {
     }
 }
 
+/// `resolve()` 内部使用：系统代理能否落到一个可用于 ureq 的代理地址上。
+#[cfg(windows)]
+struct SystemProxyProbe {
+    proxy_url: Option<String>,
+    note: Option<String>,
+}
+
 #[cfg(windows)]
 fn probe_system_proxy() -> SystemProxyProbe {
-    let enabled = read_reg_u32("ProxyEnable").unwrap_or(0) != 0;
-    let server = read_reg_string("ProxyServer");
-    let auto_config = read_reg_string("AutoConfigURL");
+    let info = read_system_probe();
 
-    if enabled {
-        if let Some(proxy) = server.as_deref().and_then(pick_proxy_server) {
+    if info.enabled {
+        if let Some(proxy) = info.server_url.clone() {
             return SystemProxyProbe { proxy_url: Some(proxy), note: None };
         }
     }
 
-    let note = match (enabled, auto_config) {
+    let note = match (info.enabled, info.pac_url) {
         (_, Some(url)) => Some(user_err("net.proxyPac", json!({ "url": url }))),
         (true, None) => Some(user_err("net.proxyEmptyServer", json!({}))),
         _ => None,
@@ -273,6 +303,11 @@ fn env_proxy() -> Option<String> {
         }
     }
     None
+}
+
+/// 只读探测：环境变量代理是否存在（诊断事实用，不实际构造代理对象）。
+pub fn detect_env_proxy() -> bool {
+    env_proxy().is_some()
 }
 
 /// 把设置解析成"最终使用哪个代理"。优先级：手动 > 系统注册表 > 环境变量 > 直连。

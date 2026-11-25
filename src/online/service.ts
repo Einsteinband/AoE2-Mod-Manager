@@ -12,6 +12,7 @@ import type {
   InstallCommandResponse,
   TitleJobStatus,
   ModTag,
+  NetworkDiagnosisOutcome,
   NetworkSettingsView,
   SessionStatus,
   TranslateSettingsView,
@@ -49,9 +50,13 @@ export function uiLog(level: "info" | "warn" | "error", message: string): Promis
 }
 
 /** 打开登录窗口（v3.3 起只保留微软 / Xbox 一条入口）
- *  窗口标题由前端按当前界面语言传入：原生窗口标题不在 Vue 模板里，只能这样接入 i18n。 */
-export function openLogin(): Promise<void> {
-  return invoke<void>("online_open_login", { title: translate("online.loginWindowTitle") });
+ *  窗口标题由前端按当前界面语言传入：原生窗口标题不在 Vue 模板里，只能这样接入 i18n。
+ *  `purge`：开窗前是否清理旧 AoE Cookie。已登录态只是重显窗口时传 false，不得清掉有效凭证。 */
+export function openLogin(purge = true): Promise<void> {
+  return invoke<void>("online_open_login", {
+    title: translate("online.loginWindowTitle"),
+    purge,
+  });
 }
 
 /** 后台静默登录：隐藏窗口走一遍 SSO，用于启动时自动恢复会话（不清缓存） */
@@ -74,6 +79,11 @@ export function setNetworkSettings(params: {
     proxyUrl: params.proxyUrl,
     rememberLogin: params.rememberLogin,
   });
+}
+
+/** 网络 / 代理诊断：只读探测官网与 API 两条链路，结果与登录态正交 */
+export function networkDiagnosis(): Promise<NetworkDiagnosisOutcome> {
+  return invoke<NetworkDiagnosisOutcome>("online_network_diagnosis");
 }
 
 /** 退出登录：只在用户点击时清空 WebView2 数据目录与加密会话缓存 */

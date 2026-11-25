@@ -109,7 +109,7 @@ const list = useOnlineList({
   hydrateList,
   syncImages: thumbs.syncImages,
   // 401：交给登录层统一处理（清会话 + 尝试静默重登）
-  onUnauthorized: (message) => sessionCtl.reportUnauthorized(message),
+  onUnauthorized: (error, message) => sessionCtl.reportUnauthorized(error, message),
   // 网络被搓断（代理节点抖动 / TLS 被中断）：弹一条轻提示，别让用户只看到转圈
   onNetworkInterrupted: () => showToast(t("online.networkInterrupted"), "error"),
   // 本地搜索与官方列表互斥：切官方分类 / 来源 / 收藏时清空本地搜索框
@@ -544,6 +544,7 @@ const {
   session,
   sessionError,
   waitingLogin,
+  loginFlowState,
   probing,
   probeResult,
   netClearing,
@@ -557,6 +558,7 @@ const {
   runProbe,
   startLogin,
   stopWaiting,
+  closeLoginWindow,
   loadTags,
   dispose: disposeSession,
 } = sessionCtl;
@@ -603,8 +605,23 @@ const selected = selection.selected;
 /** 本机安装索引的读取错误（详情面板「本地状态」行下方显示） */
 const localIndexError = installed.localIndexError;
 
-/** 网络状态指示（底栏与在线页同源） */
-const phase = sessionPhase;
+/** 手动登录已成功并保留窗口：身份态不变，只提供关闭入口 */
+const loginSucceeded = computed(() => waitingLogin.value && loginFlowState.value === "success");
+/** 登录阶段文案（与 Controller 的 flowState 同源，不另起状态系统） */
+const loginStageText = computed(() => {
+  switch (loginFlowState.value) {
+    case "openingWindow":
+      return t("statusbar.loginOpening");
+    case "waitingBrowser":
+      return t("statusbar.loginWaitingBrowser");
+    case "checking":
+      return t("statusbar.loginVerifying");
+    case "success":
+      return t("statusbar.loginSuccess");
+    default:
+      return "";
+  }
+});
 
 // ---------------- 派生视图 ----------------
 
@@ -979,10 +996,9 @@ async function boot(): Promise<void> {
     return;
   }
 
-  // ④ 离线：分类字典用内置兜底，并后台静默尝试一次 SSO（隐藏窗口，不阻塞）
+  // ④ 离线：分类字典用内置兜底；静默 SSO 由 Controller 按策略统一发起，本页不另起流程
   await loadTags();
   setStatusMessageKey("statusbar.offlineHint");
-  void sessionCtl.silentReauth(t("online.reasonNoSession"));
 }
 
 onMounted(() => {
@@ -1094,13 +1110,14 @@ onUnmounted(() => {
         <div v-if="!localMode && !items.length && !session?.loggedIn" class="state-panel">
           <h2>{{ t("online.sessionConnectTitle") }}</h2>
           <p>{{ t("online.sessionConnectBody") }}</p>
-          <p v-if="phase === 'checking'" class="online-silent">
-            <span class="spinner"></span>{{ t("statusbar.checking") }}
+          <p v-if="loginStageText" class="online-silent">
+            <span v-if="!loginSucceeded" class="spinner"></span>{{ loginStageText }}
           </p>
           <p v-else-if="silentAuth" class="online-silent">
             <span class="spinner"></span>{{ silentAuthNote }}
           </p>
           <p v-else-if="silentAuthNote" class="online-silent note">{{ silentAuthNote }}</p>
+          <p v-if="loginSucceeded" class="online-silent note">{{ t("statusbar.loginSuccessHint") }}</p>
           <!-- v3.3：登录途径只剩微软 / Xbox 一条（Steam 与 PSN 入口已移除）。 -->
           <div class="login-target-single">
             <span class="lt-label">{{ t("online.loginMicrosoftLabel") }}</span>
@@ -1111,11 +1128,16 @@ onUnmounted(() => {
             <button type="button" class="lt-link" @click="openAccountCenter">{{ t("online.loginAccountCenter") }}</button>
           </p>
           <div class="login-actions">
-            <button type="button" :disabled="waitingLogin" @click="startLogin()">
-              {{ waitingLogin ? t("online.waitingLogin") : t("online.openLogin") }}
+            <button v-if="loginSucceeded" type="button" class="primary" @click="closeLoginWindow">
+              {{ t("statusbar.loginCloseWindow") }}
             </button>
-            <button v-if="waitingLogin" type="button" @click="stopWaiting">{{ t("online.cancel") }}</button>
-            <button type="button" :disabled="probing" @click="runProbe">
+            <template v-else>
+              <button type="button" :disabled="waitingLogin" @click="startLogin()">
+                {{ waitingLogin ? t("online.waitingLogin") : t("online.openLogin") }}
+              </button>
+              <button v-if="waitingLogin" type="button" @click="stopWaiting">{{ t("online.cancel") }}</button>
+            </template>
+            <button type="button" :disabled="probing || waitingLogin" @click="runProbe">
               {{ probing ? t("online.probing") : t("online.probe") }}
             </button>
             <button type="button" @click="refreshSession">{{ t("online.recheck") }}</button>

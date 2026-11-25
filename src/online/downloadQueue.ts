@@ -30,8 +30,9 @@ import {
 } from "./service";
 import { messageOf } from "./errors";
 import { classifyNetworkFailure } from "./networkError";
+import { classifyAuthError } from "./sessionVerdict";
 import { translate } from "../i18n";
-import { sessionPhase, markUnauthenticated } from "../sessionState";
+import { sessionPhase, handleAuthFailure } from "../sessionState";
 import {
   isApiFailure,
   type DownloadProgress,
@@ -627,10 +628,10 @@ async function runTask(task: DownloadTask): Promise<void> {
     if (kind === "cancelled") {
       task.status = "cancelled";
       task.message = { key: "online.downloadCancelled" };
-    } else if (kind === "unauthenticated") {
+    } else if (classifyAuthError(e) === "unauthenticated") {
       // v0.4.9：下载时才发现 401（登录态过期），必须立刻把底栏打回离线，
       // 不能只弹个安装失败。messageOf 会走 aoe2mm:err 协议查 i18n。
-      markUnauthenticated(messageOf(e));
+      handleAuthFailure(e, messageOf(e));
       task.status = "failed";
       task.error = messageOf(e);
       task.needForce = false;

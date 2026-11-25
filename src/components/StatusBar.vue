@@ -9,16 +9,28 @@
  * 所有登录态都来自 src/sessionState.ts（与在线页共用同一个探测 Promise），
  * 这里绝不做自己的阻塞式检查。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { getNetworkSettings, openLogin } from "../online/service";
 import { isNetworkError, networkFailureKind, noteRequestFailure } from "../online/networkError";
+import {
+  resolveDiagnosisLabelKey,
+  diagnosisPayload,
+  diagnosisPrimaryError,
+  diagnosisRunning,
+  diagnosisVerdict,
+  runNetworkDiagnosis,
+} from "../online/networkDiagnosis";
+import { proxySource, refreshProxySource } from "../online/proxySourceStore";
 import { openExternalUrl } from "../api";
 import { translateBackendMessage } from "../format";
 import {
+  authState,
+  closeLoginAfterSuccess,
   ensureSession,
+  flowState,
   lastCheckedMs,
-  logoutAndClearSession,
+  logout,
+  manualActive,
   probeNetwork,
   requestManualRefresh,
   sessionError,
@@ -26,6 +38,7 @@ import {
   sessionPhase,
   setStatusMessage,
   setStatusMessageKey,
+  startLogin,
   statusMessage,
 } from "../sessionState";
 import { deriveIndexBar, indexBar, retryIndexSync } from "../online/indexStatusStore";
@@ -45,12 +58,7 @@ const emit = defineEmits<{
 }>();
 const { t } = useI18n();
 
-const root = ref<HTMLElement | null>(null);
 const menuOpen = ref(false);
-const loggingIn = ref(false);
-const proxySourceKey = ref<string | null>(null);
-/** 代理来源原始值（manual / system / env / direct）：决定断网提示该怪网络还是怪代理 */
-const proxySource = ref<string | null>(null);
 /** 校验连接进行中（防连点） */
 const networkProbing = ref(false);
 /** 最近一次探测结果；并发调用时复用它，避免连点第二次误报「不通」 */
@@ -58,33 +66,42 @@ const lastProbeOk = ref<boolean | null>(null);
 /** 退出登录进行中 / 上一次失败原因（失败必须如实显示，不能假装成功） */
 const loggingOut = ref(false);
 const logoutError = ref<string | null>(null);
-/**
- * 代理胶囊：只存「来源的 i18n key」，渲染时才拼文案。
- * 之前是一枚 ref("") 快照，切换语言后仍停在旧语言（英文界面出现「代理：直连」），
- * 改成 computed 后随 locale 重新求值。
- */
-const proxyText = computed(() =>
-  proxySourceKey.value ? t("statusbar.proxyLabel", { src: t(proxySourceKey.value) }) : "",
-);
-/** 登录轮询的节拍与次数：2.5s × 24 ≈ 60s，超时就把 🟡 放回 ⚪ */
-const POLL_INTERVAL_MS = 2500;
-const POLL_TRIES = 24;
 
+/** 手动登录是否已成功并保留窗口：此阶段不再转圈，提供「关闭登录窗口」入口 */
+const loginSucceeded = computed(() => manualActive.value && flowState.value === "success");
+const loginButtonLabel = computed(() => {
+  if (!manualActive.value) return t("statusbar.loginOpen");
+  switch (flowState.value) {
+    case "openingWindow":
+      return t("statusbar.loginOpening");
+    case "waitingBrowser":
+      return t("statusbar.loginWaitingBrowser");
+    case "checking":
+      return t("statusbar.loginVerifying");
+    case "success":
+      return t("statusbar.loginSuccess");
+    default:
+      return t("statusbar.loginWait");
+  }
+});
+
+async function onCloseLoginWindow(): Promise<void> {
+  await closeLoginAfterSuccess();
+}
 const dot = computed(() => {
   // 网络层失败优先于登录态：Cookie 还在但网断了，不能继续显示绿灯
-  if (isNetworkError.value) return "🔴";
-  if (sessionPhase.value === "online") return "🟢";
+  if (stickyActive.value || diagnosisFailed.value) return "🔴";
+  if (authState.value === "authenticated") return "🟢";
+  if (authState.value === "expired" || authState.value === "serverError") return "🔴";
   if (sessionPhase.value === "checking") return "🟡";
   return "⚪";
 });
 
-/** 当前是否真的配了代理（direct = 没配） */
-const usingProxy = computed(
-  () =>
-    proxySource.value === "manual" ||
-    proxySource.value === "system" ||
-    proxySource.value === "env",
-);
+/** 当前是否真的配了代理（direct = 没配）；链路事实来自独立来源单例，与探针健康结论解耦 */
+const usingProxy = computed(() => {
+  const source = proxySource.value;
+  return source === "manual" || source === "system" || source === "env";
+});
 
 /**
  * 断网提示分级（v0.4.7）：以前一律说「网络已断开」，但三种情况该修的东西完全不同。
@@ -110,41 +127,138 @@ const networkDownHint = computed(() => {
   return t("statusbar.networkDownHint");
 });
 
-const accountText = computed(() => {
-  // 已登录：网络错误优先显示网络提示
-  if (sessionPhase.value === "online") {
-    if (isNetworkError.value) return networkDownLabel.value;
-    return t("statusbar.onlineShort");
+/** 诊断分类结果（粗结论 + 细分类别），供标签 / 悬停 / 菜单消费 */
+const diagnosisClassified = computed(() => ({
+  verdict: diagnosisVerdict.value,
+  primaryError: diagnosisPrimaryError.value,
+}));
+
+/** 是否已拿到一轮有效诊断结论（null = 尚未诊断 / 命令失败，此时旧粘滞标志才可兜底） */
+const diagnosisHasResult = computed(() => diagnosisPayload.value !== null);
+
+/** 诊断结论 → 底栏主标签 key；无有效回包（命令失败 / 尚未诊断）时返回 null，交给旧标志兜底 */
+const diagnosisLabelKey = computed(() =>
+  diagnosisHasResult.value ? resolveDiagnosisLabelKey(diagnosisClassified.value) : null,
+);
+
+/** 诊断是否为故障类结论（失败集合：不含 unauthenticated，认证问题走身份态表达） */
+const diagnosisFailed = computed(() => {
+  const v = diagnosisVerdict.value;
+  return (
+    v === "networkUnavailable" ||
+    v === "proxySuspected" ||
+    v === "proxyFailed" ||
+    v === "officialServerError" ||
+    v === "websiteUnreachable" ||
+    v === "apiUnreachable" ||
+    v === "pathMismatch"
+  );
+});
+
+/**
+ * 旧粘滞断网标志：只作为「尚无有效诊断结论」时的辅助证据。
+ * 一旦本轮诊断已有结论，粘滞标志不得覆盖诊断判断（避免上一次请求失败的旧状态误报）。
+ */
+const stickyActive = computed(() => isNetworkError.value && !diagnosisHasResult.value);
+
+/** 代理来源 → i18n key（manual / system / env / direct） */
+function proxySourceKey(source: string): string {
+  switch (source) {
+    case "manual":
+      return "statusbar.proxyManual";
+    case "system":
+      return "statusbar.proxySystem";
+    case "env":
+      return "statusbar.proxyEnv";
+    default:
+      return "statusbar.proxyDirect";
   }
-  if (sessionPhase.value === "checking") return t("statusbar.checkingShort");
+}
+
+/** 代理来源 → 悬停补充文案 */
+function proxySourceLabel(source: string): string {
+  return t("statusbar.proxyLabel", { src: t(proxySourceKey(source)) });
+}
+
+/**
+ * 右下角代理胶囊：来源事实来自独立单例 `proxySourceStore`，与诊断回包解耦。
+ * 启动先经 `getNetworkSettings()` 兜底读取；诊断成功用最新 proxy_info 覆盖；
+ * 诊断失败 / 探针不可达不清空已取得的事实。direct 也作为事实展示，不把「直连」表述为代理故障。
+ */
+const proxyText = computed(() => {
+  const source = proxySource.value;
+  if (!source) return "";
+  return proxySourceLabel(source);
+});
+
+const accountText = computed(() => {
+  // 检测中：显示检查中，不继续展示过期诊断结果
+  if (diagnosisRunning.value || sessionPhase.value === "checking") return t("statusbar.checkingShort");
+  // 诊断分层结论优先：官网 / API / 代理 / 分叉各自给出可操作提示
+  if (diagnosisLabelKey.value) return t(diagnosisLabelKey.value);
+  // 旧粘滞断网标志仅在没有有效诊断结论时兜底（真实请求成功才会清零）
+  if (stickyActive.value) return networkDownLabel.value;
+  switch (authState.value) {
+    case "authenticated":
+      return t("statusbar.onlineShort");
+    case "expired":
+      return t("statusbar.expiredShort");
+    case "serverError":
+      return t("statusbar.serverError");
+    case "networkUnreachable":
+      return networkDownLabel.value || t("statusbar.networkDown");
+    default:
+      break;
+  }
   // 未登录：不管网络通不通，只显示"离线 · 未登录"，不再提网络问题（误导用户）
   return t("statusbar.offlineNotLoggedIn");
 });
 
-/** 悬停显示来源 + Cookie 数（按需求不抓 Xbox 名字，避免官网改版失效） */
+/** 悬停：只放补充详情（来源 / Cookie / 代理事实 / 探针状态），不重复主状态文案 */
 const accountTitle = computed(() => {
-  if (isNetworkError.value) return networkDownHint.value || t("statusbar.networkDownTitle");
   const info = sessionInfo.value;
-  if (sessionPhase.value !== "online" || !info) return t("statusbar.loginHint");
-  return t("statusbar.source", {
-    src: info.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview"),
-    n: info.cookieCount,
-  });
+  const probe = diagnosisPayload.value;
+  const supplements: string[] = [];
+  if (authState.value === "authenticated" && info) {
+    supplements.push(
+      t("statusbar.source", {
+        src: info.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview"),
+        n: info.cookieCount,
+      }),
+    );
+  }
+  if (probe) {
+    supplements.push(proxySourceLabel(probe.proxy.source));
+    if (probe.proxy.pathMismatch) supplements.push(t("statusbar.diagPathMismatch"));
+    supplements.push(
+      t("statusbar.diagProbeTitle", {
+        website: probe.website.reachable ? String(probe.website.status ?? 200) : t("statusbar.diagProbeFailedWord"),
+        api: probe.api.reachable ? String(probe.api.status ?? 200) : t("statusbar.diagProbeFailedWord"),
+      }),
+    );
+  }
+  if (authState.value === "expired") supplements.push(t("statusbar.sessionExpired"));
+  if (authState.value === "serverError") supplements.push(t("statusbar.serverErrorHint"));
+  if (supplements.length > 0) return supplements.join(" · ");
+  return t("statusbar.loginHint");
 });
 
 /** 二级菜单里的账号行（原来在线页侧栏那段已迁到这里，全应用只留这一处） */
 const sessionLine = computed(() => {
   const info = sessionInfo.value;
-  if (sessionPhase.value !== "online" || !info) return t("statusbar.offline");
-  return t("statusbar.sessionLine", {
-    src: info.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview"),
-    n: info.cookieCount,
-  });
+  if (authState.value === "authenticated" && info) {
+    return t("statusbar.sessionLine", {
+      src: info.cookieSource === "cache" ? t("online.cookieCache") : t("online.cookieWebview"),
+      n: info.cookieCount,
+    });
+  }
+  if (authState.value === "expired") return t("statusbar.sessionExpired");
+  return t("statusbar.offline");
 });
 
 const middleText = computed(() => {
-  // 断网时这条信息比“已从缓存加载 / 数据已刷新”更重要
-  if (isNetworkError.value) return networkDownHint.value || t("statusbar.networkDownHint");
+  // 断网时这条信息比“已从缓存加载 / 数据已刷新”更重要；仅在无有效诊断结论时由旧标志兜底
+  if (stickyActive.value) return networkDownHint.value || t("statusbar.networkDownHint");
   if (statusMessage.value) return statusMessage.value;
   if (sessionPhase.value === "checking") return t("statusbar.checking");
   const ms = lastCheckedMs.value;
@@ -218,15 +332,10 @@ async function retryIndex(): Promise<void> {
   await retryIndexSync();
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 /** 帝国时代官网账号中心：微软 / Xbox 登录与 Steam 绑定的唯一入口（见 Rust open_external 白名单） */
 const ACCOUNT_CENTER_URL = "https://auth.ageofempires.com/";
 
 async function openAccountCenter(): Promise<void> {
-  menuOpen.value = false;
   try {
     await openExternalUrl(ACCOUNT_CENTER_URL);
   } catch (e) {
@@ -234,27 +343,12 @@ async function openAccountCenter(): Promise<void> {
   }
 }
 
-/** 代理链路只读一次：底栏不轮询网络设置（保存后由设置弹窗自己提示） */
-async function loadProxy() {
-  try {
-    const view = await getNetworkSettings();
-    proxySource.value = view.source;
-    proxySourceKey.value =
-      view.source === "manual"
-        ? "statusbar.proxyManual"
-        : view.source === "system"
-          ? "statusbar.proxySystem"
-          : view.source === "env"
-            ? "statusbar.proxyEnv"
-            : "statusbar.proxyDirect";
-  } catch {
-    proxySource.value = null;
-    proxySourceKey.value = null;
-  }
-}
-
 async function toggleMenu() {
   menuOpen.value = !menuOpen.value;
+}
+
+function closeMenu() {
+  menuOpen.value = false;
 }
 
 /** 测网请求的超时上限：超过这个时间还没回包，按超时处理并点亮断网标志 */
@@ -273,9 +367,6 @@ const PROBE_TIMEOUT_MS = 12000;
 async function probeNetworkNow(): Promise<boolean> {
   if (networkProbing.value) return lastProbeOk.value === true;
   networkProbing.value = true;
-  // 代理链路可能在挂载后变化（例如用户中途才打开 Clash）：
-  // 测网前刷新一次来源，否则分级会拿旧的「直连」去解释新的失败
-  await loadProxy();
   try {
     let timer: number | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -298,6 +389,8 @@ async function probeNetworkNow(): Promise<boolean> {
     return false;
   } finally {
     networkProbing.value = false;
+    // 测网结束后顺手跑一次独立诊断：区分官网/API/代理/路径分叉，不改动会话状态
+    void runNetworkDiagnosis("manual");
   }
 }
 
@@ -312,7 +405,6 @@ async function probeNetworkNow(): Promise<boolean> {
  * 用户点了没反应，反而会以为是按钮坏了。
  */
 async function recheck(): Promise<void> {
-  menuOpen.value = false;
   logoutError.value = null;
   const loggedIn = await ensureSession(true);
   const reachable = await probeNetworkNow();
@@ -339,8 +431,7 @@ async function doLogout(): Promise<void> {
   loggingOut.value = true;
   logoutError.value = null;
   try {
-    await logoutAndClearSession();
-    menuOpen.value = false;
+    await logout();
     setStatusMessageKey("statusbar.logoutDone");
   } catch (e) {
     const raw = e instanceof Error ? e.message : String(e);
@@ -353,71 +444,42 @@ async function doLogout(): Promise<void> {
   }
 }
 
+/** 点击登录：只发意图，流程 / 轮询 / 窗口全部由 SessionController 接管；菜单保持打开 */
+function onStartLogin(): void {
+  startLogin("manual");
+}
+
 /**
- * 打开登录窗口并轮询等待完成。
- * 成功后 ensureSession 会 bump epoch，在线页收到信号自己刷新，这里不做任何 reload。
+ * 弹层开合只由「账号与网络」按钮的 toggleMenu 控制：
+ * 菜单内操作（开窗登录 / 校验 / 退出 / 关窗 / 账号中心）后保持打开；
+ * 点击菜单外区域与 Esc 均不关闭弹层。
  */
-async function startLogin() {
-  if (loggingIn.value) return;
-  loggingIn.value = true;
-  menuOpen.value = false;
-  setStatusMessageKey("statusbar.loginWait");
-  try {
-    await openLogin();
-  } catch (e) {
-    setStatusMessage(translateBackendMessage(typeof e === "string" ? e : t("statusbar.loginFailed")));
-    loggingIn.value = false;
-    return;
-  }
-  for (let tick = 0; tick < POLL_TRIES; tick += 1) {
-    await sleep(POLL_INTERVAL_MS);
-    const ok = await ensureSession(true);
-    if (ok) {
-      setStatusMessageKey("statusbar.loginDone");
-      loggingIn.value = false;
-      return;
-    }
-  }
-  setStatusMessageKey("statusbar.loginTimeout");
-  loggingIn.value = false;
-}
-
-/** 点空白处 / Esc 关闭弹层 */
-function onDocumentClick(event: MouseEvent) {
-  if (!menuOpen.value) return;
-  const el = root.value;
-  if (el && event.target instanceof Node && el.contains(event.target)) return;
-  menuOpen.value = false;
-}
-
-function onKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") menuOpen.value = false;
-}
 
 onMounted(() => {
-  window.addEventListener("click", onDocumentClick, true);
-  window.addEventListener("keydown", onKeydown);
-  void loadProxy();
-});
-
-onBeforeUnmount(() => {
-  window.removeEventListener("click", onDocumentClick, true);
-  window.removeEventListener("keydown", onKeydown);
+  // 启动先独立读取链路来源事实，不等官网 / API 探针回包；诊断成功后由最新 proxy_info 覆盖
+  void refreshProxySource();
+  void runNetworkDiagnosis("startup");
 });
 </script>
 
 <template>
-  <footer ref="root" class="statusbar">
+  <footer class="statusbar">
     <button
       type="button"
       class="sb-account"
-      :class="[sessionPhase, { 'network-error': isNetworkError }]"
+      :class="[
+        sessionPhase,
+        {
+          'network-error':
+            stickyActive || diagnosisFailed || authState === 'expired' || authState === 'serverError',
+        },
+      ]"
       :title="accountTitle"
       @click="toggleMenu"
     >
       <span class="sb-dot">{{ dot }}</span>
       <span class="sb-label">{{ t("statusbar.accountMenu") }}</span>
-      <span v-if="loggingIn || networkProbing || loggingOut" class="spinner sb-spin"></span>
+      <span v-if="(manualActive && !loginSucceeded) || networkProbing || loggingOut" class="spinner sb-spin"></span>
     </button>
 
     <!--
@@ -427,12 +489,23 @@ onBeforeUnmount(() => {
     -->
     <span
       class="sb-state"
-      :class="{ error: isNetworkError, online: sessionPhase === 'online' && !isNetworkError }"
+      :class="{
+        error: stickyActive || diagnosisFailed || authState === 'expired' || authState === 'serverError',
+        online: authState === 'authenticated' && !stickyActive && !diagnosisFailed,
+      }"
       :title="accountTitle"
     >{{ accountText }}</span>
 
     <div v-if="menuOpen" class="sb-menu">
-      <div class="sb-menu-title">{{ t("statusbar.accountMenu") }}</div>
+      <div class="sb-menu-head">
+        <div class="sb-menu-title">{{ t("statusbar.accountMenu") }}</div>
+        <button
+          type="button"
+          class="sb-menu-close"
+          :aria-label="t('common.close')"
+          @click="closeMenu"
+        >✕</button>
+      </div>
       <!-- 账号信息：原来在线页左侧栏底部那段已迁到这里，全应用只保留这一处 -->
       <div class="sb-menu-session" :title="accountTitle">{{ sessionLine }}</div>
       <div class="sb-menu-platform">
@@ -444,10 +517,14 @@ onBeforeUnmount(() => {
         <button type="button" class="sb-menu-link" @click="openAccountCenter">{{ t("online.loginAccountCenter") }}</button>
       </p>
       <div class="sb-menu-actions">
-        <button type="button" :disabled="loggingIn || loggingOut" @click="startLogin">
-          {{ loggingIn ? t("statusbar.loginWait") : t("statusbar.loginOpen") }}
+        <button v-if="loginSucceeded" type="button" class="primary" @click="onCloseLoginWindow">
+          {{ t("statusbar.loginCloseWindow") }}
+        </button>
+        <button v-else type="button" :disabled="manualActive || loggingOut" @click="onStartLogin">
+          {{ loginButtonLabel }}
         </button>
       </div>
+      <p v-if="loginSucceeded" class="sb-menu-note">{{ t("statusbar.loginSuccessHint") }}</p>
       <!-- 校验连接 + 退出登录：二级菜单里的操作项 -->
       <div class="sb-menu-actions">
         <button type="button" :disabled="networkProbing" :title="t('statusbar.checkHint')" @click="recheck">
@@ -492,8 +569,9 @@ onBeforeUnmount(() => {
           {{ indexBar.retrying ? t("statusbar.indexRetrying") : t("statusbar.indexRetry") }}
         </button>
       </span>
-      <!-- 代理链路 -->
+      <!-- 代理来源胶囊：只表达当前链路事实（手动 / 系统 / 环境变量 / 直连），不附带故障判定 -->
       <span v-if="proxyText" class="sb-pill">{{ proxyText }}</span>
+
     </span>
   </footer>
 </template>
@@ -657,31 +735,28 @@ onBeforeUnmount(() => {
   outline-color: var(--text-soft);
 }
 
+/* 代理来源胶囊：中性事实标签，窄窗口只省略不换行、不撑破底栏 */
+.sb-pill {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40vw;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--parch-dim);
+  font-size: calc(10px * var(--global-scale));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sb-right {
   flex: 0 1 auto;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-}
-.sb-pill {
-  padding: 2px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--bg-panel);
-  color: var(--muted);
-  font-size: calc(10px * var(--global-scale));
-  white-space: nowrap;
-  /* 英文比中文长（Proxy: direct / Environment proxy）：窄窗口下只省略，不换行不撑破底栏 */
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 40vw;
-}
-.sb-pill.sb-mode {
-  border-color: var(--gold-dim);
-  color: var(--gold-dim);
 }
 
 /* 右侧统计组（原顶部 rootbar）：紧凑横排，只留本地数与显示数 */
@@ -724,12 +799,32 @@ onBeforeUnmount(() => {
   box-shadow: 0 14px 32px rgba(var(--shadow-rgb), 0.62);
   animation: sb-menu-in 0.14s ease-out;
 }
+.sb-menu-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
 .sb-menu-title {
   padding: 2px 2px 8px;
   color: var(--gold-bright);
   font-size: calc(11.5px * var(--global-scale));
   letter-spacing: calc(1.2px * var(--ui-tracking));
   text-transform: uppercase;
+}
+/* 菜单关闭按钮：中性 ghost，不抢标题视觉（辅助信息区不用 accent / gold 强调） */
+.sb-menu-close {
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: calc(11px * var(--global-scale));
+  line-height: 1;
+  cursor: pointer;
+}
+.sb-menu-close:hover {
+  color: var(--parch);
+  background: var(--bg-hover);
 }
 /* 二级菜单顶部的账号行：已登录 · 来源 · Cookie 数（原在线页左侧栏那段） */
 .sb-menu-session {

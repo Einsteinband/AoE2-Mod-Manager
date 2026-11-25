@@ -39,7 +39,7 @@ beforeEach(() => {
   localStorage.clear();
   onlineModCount.value = null;
   onlineModCountDay.value = "";
-  sessionPhase.value = "online";
+  (sessionPhase as unknown as { value: string }).value = "online";
   vi.mocked(findMods).mockReset();
   vi.mocked(findMods).mockResolvedValue({
     totalCount: 51234,
@@ -96,7 +96,7 @@ describe("在线模组总数每日检测", () => {
 
   it("未登录 / 校验中不消耗当天检测机会，只沿用缓存", async () => {
     cache({ count: 48000, day: "2026-11-21" });
-    sessionPhase.value = "offline";
+    (sessionPhase as unknown as { value: string }).value = "offline";
     const value = await refreshOnlineModCountIfDue(day(2026, 11, 22));
     expect(value).toBe(48000);
     expect(vi.mocked(findMods)).not.toHaveBeenCalled();

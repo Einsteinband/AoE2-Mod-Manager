@@ -364,6 +364,66 @@ export interface NetworkSettingsView {
   dataDir: string | null;
   error: string | null;
 }
+/** 单个连通性探针结果（Rust 诊断命令回传） */
+export interface DiagnosisProbeOutcome {
+  reachable: boolean;
+  status: number | null;
+  latencyMs: number;
+  /** ok | unauthenticated | server | network */
+  category: string;
+  errorKind: string | null;
+}
+
+/** 系统 / 手动代理事实（只读，不含凭证） */
+export interface DiagnosisProxyOutcome {
+  enabled: boolean;
+  /** manual | system | env | direct */
+  source: string;
+  proxyUrl: string | null;
+  pacDetected: boolean;
+  hasExplicitServer: boolean;
+  webviewFollowsSystem: boolean;
+  webviewArgs: string | null;
+  /** 环境变量代理是否存在（只读事实） */
+  envProxyDetected: boolean;
+  /** Rust API 链路与 WebView2 链路是否存在潜在分叉 */
+  pathMismatch: boolean;
+}
+
+
+/** 诊断触发原因（仅用于日志与通知，不参与状态判定） */
+export type DiagnosisTrigger = "startup" | "manual" | "event" | "poll" | "login" | "settings" | "recovery";
+
+/** 探针传输错误细分（保留底层类别，禁止压成笼统 network） */
+export type ProbeErrorKind = "dns" | "timeout" | "refused" | "tls" | "other" | null;
+
+/** 一轮诊断的持久化记录（最近 N 轮供详情入口查看；不含 Cookie / 凭证） */
+export interface DiagnosisRound {
+  id: string;
+  generation: number;
+  trigger: DiagnosisTrigger;
+  startedAtMs: number;
+  finishedAtMs: number | null;
+  authState: string;
+  flowState: string;
+  proxySource: string;
+  verdict: string;
+  primaryError: ProbeErrorKind;
+  labelKey: string | null;
+  payload: NetworkDiagnosisOutcome | null;
+  notified: boolean;
+  stale: boolean;
+  replaced: boolean;
+  durationMs: number | null;
+}
+/** 网络 / 代理诊断结果：与登录态正交，不塞进 SessionAuthState */
+export interface NetworkDiagnosisOutcome {
+  proxy: DiagnosisProxyOutcome;
+  website: DiagnosisProbeOutcome;
+  api: DiagnosisProbeOutcome;
+  note: string | null;
+}
+
 
 export interface InstallReport {
   targetDir: string;

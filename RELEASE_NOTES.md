@@ -1,3 +1,19 @@
+# v0.6.0 — 2026-11-25
+
+## v0.6.0 - What's New
+
+- **🔐 Login & Logout:** The login, logout, and silent re-authentication flows are now unified. Stale callbacks from a cancelled or replaced sign-in are discarded, a temporarily unreachable network no longer reads as a logged-out session, and you can sign in again immediately after signing out.
+- **🌐 Proxy & Connection Detection:** The account and proxy status checks have been reworked. The proxy indicator reads its source independently instead of waiting for a full network diagnosis, so a slow first probe or a failed diagnosis no longer hides the known proxy state; expired or failed sessions are classified and handled consistently.
+- **🐞 Hidden Mod Details:** The details panel no longer keeps showing a hidden local mod. A hidden, removed, or no-longer-valid selection falls back to the empty state; after a rescan the first visible mod is selected instead of a hidden one, and switching pages or restarting the app cannot bring a hidden mod back into the details panel.
+
+## v0.6.0 - 更新内容
+
+- **🔐 登录与退出：** 登录、退出和静默重登流程已统一。被取消或被替代的旧登录回调会被丢弃；临时断网不再被误判为已退出；退出后可以立即重新登录。
+- **🌐 代理与连接检测：** 账号与代理状态检测经过重做。代理标识独立读取来源，不再等待完整网络诊断，首轮探针较慢或诊断失败时已知的代理状态不会消失；失效或失败的会话统一分类处理。
+- **🐞 隐藏模组详情：** 详情面板不再残留已隐藏本地模组的信息。选中项被隐藏、移除或失效后进入空态；重扫后默认选中第一条可见模组而非隐藏项；切换页面或重启程序都不会把隐藏模组带回详情面板。
+
+---
+
 # v0.5.9 — 2026-11-23
 
 ## v0.5.9 - What's New

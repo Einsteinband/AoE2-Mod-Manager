@@ -20,6 +20,28 @@ pub const LOGIN_URL: &str = "https://auth.ageofempires.com/";
 pub const HOME_URL: &str = "https://www.ageofempires.com/mods/";
 /// 判断“是否已登录”时以 API 目标域为准（避免把 www 域上的 WordPress 会话 Cookie 误当成登录态）
 pub const API_COOKIE_URL: &str = "https://api.ageofempires.com/";
+/// 账号窗口被关闭 / 销毁时广播给前端 SessionController 的事件
+pub const ACCOUNT_WINDOW_CLOSED_EVENT: &str = "online://account-window-closed";
+/// 会话凭证被真正清除（退出登录）时广播：前端据此复位身份态。
+/// 与 `online_index::CANCEL_EVENT` 彻底分离：后者只表示索引同步中止，不承担登出语义。
+pub const SESSION_INVALIDATED_EVENT: &str = "online://session-invalidated";
+
+/// 日志 URL 脱敏：剥掉 query 与 fragment（OAuth `code` / `state` / `nonce` 只出现在这里）。
+/// 日志只保留 scheme://host/path，绝不打印敏感参数。
+fn redact_url(raw: &str) -> String {
+    match Url::parse(raw) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("<host>");
+            let port = match u.port() {
+                Some(p) => format!(":{p}"),
+                None => String::new(),
+            };
+            let path = u.path();
+            format!("{}://{}{}{}[redacted]", u.scheme(), host, port, path)
+        }
+        Err(_) => "[redacted-url]".to_string(),
+    }
+}
 /// WebView2 用户数据目录名。固定放在 LocalAppData，不随 exe 位置变化，
 /// 这样 dev / release / 换构建目录都不会丢会话。
 const WEBVIEW_DIR: &str = "webview2";
@@ -55,6 +77,14 @@ pub fn note_programmatic_hide(reason: &str) {
     log::info!(target: "account-window", "程序主动隐藏/销毁窗口：{reason}");
 }
 
+/// 清空程序侧关闭原因。原因只对「紧接着发生的这一次」窗口关闭有效，
+/// 消费一次后必须清空，避免上一轮退出登录的旧原因污染下一次普通关窗的归类。
+pub fn clear_programmatic_reason() {
+    if let Ok(mut slot) = LAST_PROGRAMMATIC_REASON.lock() {
+        slot.clear();
+    }
+}
+
 fn last_programmatic_reason() -> String {
     LAST_PROGRAMMATIC_REASON
         .lock()
@@ -73,8 +103,8 @@ fn describe_cookies(cookies: &[cookie::Cookie<'static>]) -> String {
         .join(", ")
 }
 
-/// 全量 Cookie 的元数据快照：只打印 name/domain/path/是否会话 Cookie，**绝不打印值**。
-/// 用来区分“抓取太早”与“会话 Cookie 根本不落盘”这两个病因。
+/// 全量 Cookie 的元数据快照：只打印 name/domain/path/secure/httpOnly/sameSite/是否会话 Cookie，
+/// **绝不打印 value**。用来区分“抓取太早”与“会话 Cookie 根本不落盘”这两个病因。
 fn describe_full(cookies: &[cookie::Cookie<'static>]) -> String {
     if cookies.is_empty() {
         return "(无)".to_string();
@@ -82,12 +112,21 @@ fn describe_full(cookies: &[cookie::Cookie<'static>]) -> String {
     cookies
         .iter()
         .map(|c| {
+            let secure = if c.secure().unwrap_or(false) { "secure" } else { "insecure" };
+            let http_only = if c.http_only().unwrap_or(false) { "httpOnly" } else { "jsVisible" };
+            let same_site = c
+                .same_site()
+                .map(|s| format!("sameSite={:?}", s))
+                .unwrap_or_else(|| "sameSite=default".to_string());
             format!(
-                "{}[domain={},path={},{}]",
+                "{}[domain={},path={},{},{},{},{}]",
                 c.name(),
                 c.domain().unwrap_or("<host-only>"),
                 c.path().unwrap_or("/"),
-                if is_session_cookie(c) { "session" } else { "persistent" }
+                if is_session_cookie(c) { "session" } else { "persistent" },
+                secure,
+                http_only,
+                same_site
             )
         })
         .collect::<Vec<_>>()
@@ -120,26 +159,44 @@ pub fn log_all_cookies_once(webview: &WebviewWindow) {
     }
 }
 
-/// 给账号窗口挂上关闭/销毁事件日志
-fn attach_window_logging(window: &WebviewWindow) {
+/// 给账号窗口挂上关闭/销毁事件日志，并把窗口关闭广播给前端 SessionController。
+/// 前端据此结束当前登录尝试（waitingBrowser → cancelled/idle），不再靠固定轮询猜测窗口状态。
+fn attach_window_logging(window: &WebviewWindow, app: &AppHandle) {
     let handle = window.clone();
+    let app_clone = app.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::CloseRequested { .. } => {
             let url = handle
                 .url()
-                .map(|u| u.to_string())
+                .map(|u| redact_url(u.as_str()))
                 .unwrap_or_else(|e| format!("<读取 URL 失败：{e}>"));
             let reason = last_programmatic_reason();
+            // 原因已被本次关闭事件消费，立即清空：旧 logout 原因不能污染下一次关窗归类
+            clear_programmatic_reason();
+            let user_closed = reason.is_empty();
             log::warn!(
                 target: "account-window",
                 "窗口被请求关闭（CloseRequested）：label={} url={} 最近一次程序侧原因={}",
                 handle.label(),
                 url,
-                if reason.is_empty() { "（无，可能是用户点了关闭按钮）" } else { reason.as_str() }
+                if user_closed { "（无，可能是用户点了关闭按钮）" } else { reason.as_str() }
             );
+            let emit_reason = if user_closed { "user" } else { "programmatic" };
+            if let Err(e) = app_clone.emit(
+                ACCOUNT_WINDOW_CLOSED_EVENT,
+                json!({ "reason": emit_reason }),
+            ) {
+                log::debug!(target: "account-window", "窗口关闭事件发送失败：{e}");
+            }
         }
         WindowEvent::Destroyed => {
             log::warn!(target: "account-window", "窗口已销毁（Destroyed）：label={}", handle.label());
+            if let Err(e) = app_clone.emit(
+                ACCOUNT_WINDOW_CLOSED_EVENT,
+                json!({ "reason": "destroyed" }),
+            ) {
+                log::debug!(target: "account-window", "窗口销毁事件发送失败：{e}");
+            }
         }
         _ => {}
     });
@@ -180,11 +237,14 @@ pub fn ensure_account_window(
     url: &str,
     visible: bool,
     title: Option<&str>,
+    reason: &str,
 ) -> Result<WebviewWindow, String> {
+    // 新一轮开窗：清掉上一轮退出/隐藏残留的程序侧原因，避免普通关窗被误记为主动 logout
+    clear_programmatic_reason();
     if let Some(existing) = app.get_webview_window(ACCOUNT_WINDOW) {
         log::info!(
             target: "account-window",
-            "复用已有窗口 label={} visible={} 请求地址={}",
+            "复用已有窗口 label={} reason={reason} visible={} 请求地址={}",
             existing.label(),
             visible,
             url
@@ -209,7 +269,7 @@ pub fn ensure_account_window(
 
     log::info!(
         target: "account-window",
-        "创建账号窗口 url={} visible={} 数据目录={} 代理={:?}",
+        "创建账号窗口 reason={reason} url={} visible={} 数据目录={} 代理={:?}",
         url,
         visible,
         data_dir.display(),
@@ -227,11 +287,12 @@ pub fn ensure_account_window(
         .data_directory(data_dir)
         .on_navigation(|target| {
             // 只记录不拦截：硬白名单会打断 Xbox Live / Steam 授权的中间跳转
-            let text = target.as_str();
-            if text.contains("/signin-steam") || text.contains("/Home/CompleteLogin") {
-                log::info!(target: "account-window", "授权回跳（凭据已提交）：{text}");
+            let raw = target.as_str();
+            let safe = redact_url(raw);
+            if raw.contains("/signin-steam") || raw.contains("/Home/CompleteLogin") {
+                log::info!(target: "account-window", "授权回跳（凭据已提交）：{safe}");
             } else {
-                log::info!(target: "account-window", "页面导航：{text}");
+                log::info!(target: "account-window", "页面导航：{safe}");
             }
             true
         });
@@ -259,7 +320,7 @@ pub fn ensure_account_window(
         user_err("session.loginWindowFailed", json!({ "error": e.to_string() }))
     })?;
 
-    attach_window_logging(&window);
+    attach_window_logging(&window, app);
     log::info!(target: "account-window", "账号窗口创建成功 label={}", window.label());
     Ok(window)
 }
@@ -526,15 +587,25 @@ fn log_skip_persist_once() {
 /// 退出登录时置位，登录成功后复位。
 static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
 
-/// 退出登录时调用：置位取消标记 + 广播事件，让前端立刻停止在线请求。
+/// 置位取消标记并广播「索引同步中止」事件。
+/// 仅中止索引同步流程，**不承担登出语义**：登录前清 Cookie（purge）也会调用本函数，
+/// 此时不能让前端复位身份态。真正的会话失效由 `invalidate_cached_session` 发独立事件。
 pub fn cancel_sync(app: &AppHandle) {
     SYNC_CANCELLED.store(true, Ordering::SeqCst);
     log::warn!(
         target: "index",
-        "会话已结束：索引同步取消标记已置位，本轮同步会在下一页之前中断"
+        "索引同步取消标记已置位，本轮同步会在下一页之前中断（不表示登出）"
     );
-    if let Err(e) = app.emit(crate::online_index::CANCEL_EVENT, "logout") {
-        log::debug!(target: "index", "索引中断事件发送失败：{e}");
+    if let Err(e) = app.emit(crate::online_index::CANCEL_EVENT, "index-aborted") {
+        log::debug!(target: "index", "索引中止事件发送失败：{e}");
+    }
+}
+
+/// 真正清除会话凭证后广播：前端 SessionController 据此复位身份态。
+/// 与索引中止事件分开，避免 purge（登录前清 Cookie）被误判成退出登录。
+fn broadcast_session_invalidated(app: &AppHandle) {
+    if let Err(e) = app.emit(SESSION_INVALIDATED_EVENT, "invalidated") {
+        log::debug!(target: "session", "会话失效事件发送失败：{e}");
     }
 }
 
@@ -553,7 +624,7 @@ pub fn clear_sync_cancel() {
 pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
     let settings: Settings = settings::load_for_app(app);
     log_remember_login_once(settings.remember_login);
-    let window = ensure_account_window(app, HOME_URL, false, None)?;
+    let window = ensure_account_window(app, HOME_URL, false, None, "session-probe")?;
     let header = collect_cookie_header(&window)?;
 
     if !header.is_empty() && has_real_credential(&header) {
@@ -613,14 +684,22 @@ pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
         clear_sync_cancel();
         // 登录成功后的第一次探测：把全量 Cookie 快照打一次（全进程仅一次）
         log_all_cookies_once(&window);
-        log::info!(target: "account", "取到 Cookie 头，长度={} 字节（内容不打印）", header.len());
+        log::info!(target: "account", "credential-candidate：取到 WebView2 Cookie 头，长度={} 字节（内容不打印；仍非 authenticated，待 API 探针背书）", header.len());
         return Ok(SessionProbe { header, source: SessionSource::Webview });
     }
 
     // 诊断（v3.2，只记录不改判定）：有 Cookie 却没有被认作真凭证时，把名字清单打全。
     // 「登录成功却仍显示未登录」时，这一行能直接回答缺的是 wordpress_logged_in
     // 还是 PHPSESSID，不用再靠猜。
+    // 分层语义：cookie-present（header 非空）≠ credential-candidate（含真凭证）≠
+    // credential-restored（从加密缓存恢复）≠ session-validated（API 探针 200）≠ authenticated。
+    // 这里只回答「本机有没有候选凭证」，是否真登录必须由前端 /Installed 探针背书。
     if !header.is_empty() {
+        log::info!(
+            target: "account",
+            "cookie-present：WebView2 有 {} 段 Cookie，但未识别到真凭证（credential-candidate 不成立）",
+            header.split(';').count()
+        );
         log_cookie_names_diagnostic(&header);
     }
 
@@ -629,7 +708,7 @@ pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
             if let Some(cached) = secure::load(&path) {
                 log::info!(
                     target: "session-cache",
-                    "WebView2 内无 ageofempires Cookie，改用加密缓存（{} 字节）",
+                    "WebView2 无可用 cookie-present，从加密缓存恢复候选凭证（credential-restored，{} 字节）",
                     cached.len()
                 );
                 log_key_credentials(&cached);
@@ -644,7 +723,10 @@ pub fn probe_session(app: &AppHandle) -> Result<SessionProbe, String> {
         }
     }
 
-    log::info!(target: "account", "当前没有可用的 ageofempires 会话 Cookie");
+    log::info!(
+        target: "account",
+        "未探测到可用凭证：WebView2 无有效 Cookie、加密缓存也无真凭证；此结论只代表 cookie-present 缺失，不代表服务端会话状态，最终以 API 探针为准"
+    );
     Err(user_err("account.notLoggedIn", json!({})))
 }
 
@@ -662,6 +744,8 @@ pub fn invalidate_cached_session(app: &AppHandle) -> Result<(), String> {
     invalidate_cookie_header_cache();
     // ① 立刻中止索引同步：退出登录后不该再有任何在线请求
     cancel_sync(app);
+    // ①-bis 真正的会话失效：单独事件，前端据此把身份态归零
+    broadcast_session_invalidated(app);
 
     let mut failures: Vec<String> = Vec::new();
     match app.get_webview_window(ACCOUNT_WINDOW) {
@@ -1119,9 +1203,12 @@ fn purge_webview_cookies(app: &AppHandle) -> Result<usize, String> {
         log::error!(target: "session-cookie", "{msg}");
         return Err(msg);
     }
+    // purge 已删除 WebView2 内的 AoE Cookie：5 秒 TTL 的内存头缓存必须立刻失效，
+    // 否则紧接着的首次重探会复用旧 header，把旧会话误判成仍有凭证。
+    invalidate_cookie_header_cache();
     log::info!(
         target: "session-cookie",
-        "已按域清理 AoE Cookie {deleted} 条（微软 SSO Cookie 未触碰）"
+        "已按域清理 AoE Cookie {deleted} 条（微软 SSO Cookie 未触碰），Cookie 头缓存已失效"
     );
     Ok(deleted)
 }
@@ -1146,6 +1233,8 @@ pub fn purge_aoe_cookies_for_relogin(app: &AppHandle) -> Result<usize, String> {
             target: "session-cookie",
             "登录前清理：账号窗口尚未创建，跳过 Cookie 清理"
         );
+        // 无活窗口时旧内存头同样可能是上一轮残留，一并清掉。
+        invalidate_cookie_header_cache();
         return Ok(0);
     }
     purge_webview_cookies(app)
@@ -1320,7 +1409,7 @@ fn is_aoe_host(host: &str) -> bool {
 /// 否则拿着刚被 401 的旧 Cookie 直接返回，重试必然再 401。
 /// **必须在非主线程调用**（内部会创建/复用 WebView2 窗口）。
 pub fn ensure_session(app: &AppHandle) -> Result<String, String> {
-    let before = match ensure_account_window(app, HOME_URL, false, None) {
+    let before = match ensure_account_window(app, HOME_URL, false, None, "startup-session") {
         Ok(win) => collect_cookie_header(&win).unwrap_or_default(),
         Err(e) => {
             log::warn!(target: "account", "自动重登前读取旧 Cookie 失败：{e}");
@@ -1334,7 +1423,7 @@ pub fn ensure_session(app: &AppHandle) -> Result<String, String> {
         "自动重登：旧 Cookie 共 {} 条，开始隐藏窗口跑 SSO",
         before_sig.len()
     );
-    let window = ensure_account_window(app, LOGIN_URL, false, None)?;
+    let window = ensure_account_window(app, LOGIN_URL, false, None, "startup-session")?;
     if let Ok(parsed) = Url::parse(LOGIN_URL) {
         window
             .navigate(parsed)
@@ -1356,6 +1445,16 @@ pub fn ensure_session(app: &AppHandle) -> Result<String, String> {
 
     while started.elapsed() < SILENT_LOGIN_TIMEOUT {
         std::thread::sleep(SILENT_LOGIN_POLL);
+
+        // 取消边界：logout / 新一轮登录置位 SYNC_CANCELLED 后，旧流程必须立刻收手，
+        // 不能继续跑满超时再把旧 Cookie / 旧结果带回新会话。
+        if is_sync_cancelled() {
+            log::warn!(
+                target: "account",
+                "自动重登被取消（会话已结束），停止等待，不再回写旧凭证"
+            );
+            return Err(user_err("session.loginCancelled", json!({})));
+        }
 
         // ① 先看窗口停在哪一步：微软 SSO 跳转期间 Cookie 尚未落地，
         //    此时绝不能按“没有真凭证”提前结束（这正是 25s 超时的根因）

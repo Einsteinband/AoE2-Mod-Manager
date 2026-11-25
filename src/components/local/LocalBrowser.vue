@@ -122,7 +122,6 @@ const {
 } = scan;
 
 // ---------------- 详情选中 ----------------
-const detailMod = computed<ModEntry | null>(() => (selectedId.value ? selected.value : null));
 const selectedEntryId = computed(() => selectedId.value);
 
 // ---------------- 区域设置（collation） ----------------
@@ -156,6 +155,28 @@ const {
   pickUpdatesOnly,
   clearFilters,
 } = filters;
+
+// 详情面板只认「当前状态下仍可查看」的条目：被隐藏的 Mod 在默认 / 其他筛选视图下
+// 不得残留详情；「已隐藏」视图内仍可点开管理。条目重扫后不存在同样进入空态。
+const detailMod = computed<ModEntry | null>(() => {
+  if (!selectedId.value) return null;
+  const mod = selected.value;
+  if (!mod) return null;
+  if (isHiddenMod(mod.id) && status.value !== "hidden") return null;
+  return mod;
+});
+
+// 隐藏集合 / 筛选 / 扫描结果变化后，过期选中状态不得覆盖当前有效状态：失效即清空，不自动代选
+watch(
+  () => [selectedId.value, status.value, mods.value, selectedId.value ? isHiddenMod(selectedId.value) : false] as const,
+  () => {
+    const id = selectedId.value;
+    if (!id) return;
+    const mod = mods.value.find((m) => m.id === id);
+    if (!mod || (isHiddenMod(id) && status.value !== "hidden")) selectedId.value = null;
+  },
+  { immediate: true },
+);
 
 // 侧栏是全局固定骨架：把本地页当前分类快照共享出去（收藏页只镜像展示，不重算口径），
 // 收藏页点击普通分类后，由本页 activated 时消费导航意图并套用同一个筛选。

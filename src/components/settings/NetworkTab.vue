@@ -7,6 +7,8 @@
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { getNetworkSettings, setNetworkSettings, setRememberLogin } from "../../online/service";
+import { requestDiagnosis } from "../../online/networkMonitor";
+import { applyProxySource } from "../../online/proxySourceStore";
 import type { NetworkSettingsView } from "../../online/types";
 import { msgText, normalizeBackendError, type Msg } from "../../format";
 
@@ -95,7 +97,11 @@ async function saveNetwork(): Promise<void> {
       rememberLogin: netRemember.value,
     });
     netView.value = view;
+    // 保存成功立即把新链路事实写进底栏胶囊；诊断回包后若有差异再覆盖
+    applyProxySource(view.source);
     netUrl.value = view.auto ? "" : (view.proxyUrl ?? "");
+    // 代理模式 / 地址变化后立即补一轮诊断（防抖合并，不打断在途请求）
+    requestDiagnosis("settings");
     if (view.error) {
       netError.value = view.error;
     } else {

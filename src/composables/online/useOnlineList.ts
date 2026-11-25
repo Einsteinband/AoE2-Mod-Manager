@@ -18,7 +18,8 @@ import { readCachedPages, readInstalledPages } from "../../online/cache";
 import { messageOf } from "../../online/errors";
 import { isNetworkError, isNetworkFailure } from "../../online/networkError";
 import { findMods, installedMods } from "../../online/service";
-import { isApiFailure, type OnlineMod } from "../../online/types";
+import { type OnlineMod } from "../../online/types";
+import { isUnauthenticatedError } from "../../online/sessionVerdict";
 import { ONLINE_SIZE_SORT, validSize } from "./sortOnlineMods";
 import { sessionPhase, setStatusMessageKey } from "../../sessionState";
 
@@ -87,7 +88,7 @@ export function useOnlineList(deps: {
   /** 列表一变就同步封面（本地优先） */
   syncImages: (list: OnlineMod[]) => void;
   /** 接口明确返回 401：交给登录层处理（清会话 + 尝试静默重登） */
-  onUnauthorized: (message: string) => void;
+  onUnauthorized: (error: unknown, message: string) => void;
   /**
    * 网络类失败（断线 / TLS 被掐断 / 超时）时回调：页面用它弹一条轻提示，
    * 不然用户只看得到「正在加载」而不知道是代理节点阵了。
@@ -451,8 +452,8 @@ export function useOnlineList(deps: {
           if (!items.value.length) error.value = messageOf(e);
           setStatusMessageKey("statusbar.offlineHint");
         }
-        if (isApiFailure(e) && e.kind === "unauthenticated") {
-          deps.onUnauthorized(messageOf(e));
+        if (isUnauthenticatedError(e)) {
+          deps.onUnauthorized(e, messageOf(e));
         }
       }
     } finally {

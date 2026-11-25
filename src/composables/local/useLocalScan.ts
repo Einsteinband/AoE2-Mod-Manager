@@ -12,7 +12,13 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { detectRootCandidates, pickFolder, scanMods, setModRoot } from "../../api";
 import { formatDateTime, translateBackendMessage, normalizeError } from "../../format";
+import { isHiddenMod } from "../../hiddenMods";
 import type { ModEntry, ScanReport } from "../../types";
+
+/** 重扫 / 换根后的默认选中项：跳过已隐藏条目，避免详情面板落到隐藏 Mod 上 */
+function firstVisibleId(list: ModEntry[]): string | null {
+  return list.find((m) => !isHiddenMod(m.id))?.id ?? null;
+}
 
 /** 提取原始错误串（不翻译），存进 ref，渲染时再翻译。 */
 export function useLocalScan() {
@@ -57,7 +63,7 @@ export function useLocalScan() {
       const next = await scanMods(root);
       report.value = next;
       if (!next.mods.some((m) => m.id === selectedId.value)) {
-        selectedId.value = next.mods[0]?.id ?? null;
+        selectedId.value = firstVisibleId(next.mods);
       }
     } catch (e) {
       errorRaw.value = normalizeError(e);
@@ -77,7 +83,7 @@ export function useLocalScan() {
       errorRaw.value = null;
       const next = await setModRoot(picked);
       report.value = next;
-      selectedId.value = next.mods[0]?.id ?? null;
+      selectedId.value = firstVisibleId(next.mods);
       if (!candidates.value.includes(picked)) candidates.value.unshift(picked);
     } catch (e) {
       errorRaw.value = normalizeError(e);
@@ -115,7 +121,7 @@ export function useLocalScan() {
   /** 引导完成：后端已写入 settings.json 并吐回完整扫描结果 */
   function handleWizardDone(next: ScanReport): void {
     report.value = next;
-    selectedId.value = next.mods[0]?.id ?? null;
+    selectedId.value = firstVisibleId(next.mods);
     errorRaw.value = null;
     showWizard.value = false;
     if (next.root && !candidates.value.includes(next.root)) candidates.value.unshift(next.root);

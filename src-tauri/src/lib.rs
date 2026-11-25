@@ -646,7 +646,7 @@ async fn online_startup_session(app: tauri::AppHandle) -> SessionStatus {
                 let count = probe.header.split(';').count();
                 log::info!(
                     target: "startup",
-                    "启动会话检查：已有可用会话（来源={} Cookie 数={}），无需静默重登",
+                    "启动会话检查：已有候选凭证（来源={} Cookie 数={}，待 API 探针背书），无需静默重登",
                     probe.source.as_str(),
                     count
                 );
@@ -663,14 +663,14 @@ async fn online_startup_session(app: tauri::AppHandle) -> SessionStatus {
                 // 开关开着却探测不到：持久 Cookie 已失效，交给用户手动登录
                 log::info!(
                     target: "startup",
-                    "启动会话检查：无有效会话（remember_login=true，不自动重登）：{e}"
+                    "启动会话检查：未探测到可用凭证（remember_login=true，不自动重登）：{e}"
                 );
                 session_status_logged_out(Some(e))
             }
             Err(e) => {
                 log::info!(
                     target: "startup",
-                    "启动会话检查：无有效会话（{e}），开始隐藏窗口静默重登"
+                    "启动会话检查：未探测到可用凭证（{e}），开始隐藏窗口静默重登"
                 );
                 match online::session::ensure_session(&handle) {
                     Ok(header) => {
@@ -712,19 +712,35 @@ async fn online_startup_session(app: tauri::AppHandle) -> SessionStatus {
 ///
 /// `title`：窗口标题，由前端按当前界面语言传入（i18n key `online.loginWindowTitle`）。
 /// 这是**可选参数**，旧调用方不传时回落到通用标题，不构成破坏性协议变更。
+///
+/// `purge`：开窗前是否清理旧 AoE Cookie。前端按当前身份态下发：已 authenticated 时只是
+/// 重新显示登录窗口，传 `false`，不得清掉当前有效凭证；未登录 / 过期 / 错误态才传 `true`。
+/// 缺省 `true`，保持旧调用方行为。
 #[tauri::command]
-async fn online_open_login(app: tauri::AppHandle, title: Option<String>) -> Result<(), String> {
+async fn online_open_login(
+    app: tauri::AppHandle,
+    title: Option<String>,
+    purge: Option<bool>,
+) -> Result<(), String> {
     let url = online::session::LOGIN_URL;
-    log::info!(target: "account-window", "前端请求打开登录窗口 url={url}");
+    let purge = purge.unwrap_or(true);
+    log::info!(target: "account-window", "前端请求打开登录窗口 url={url} purge={purge}");
     // v3.2 回归修复：**不再销毁窗口**。旧代码走 invalidate_cached_session（内部 destroy），
     // 而 destroy 是异步派发——紧接着的 ensure_account_window 会命中“正在销毁”的窗口，
     // show/navigate 静默失败，前端永远停在「等待登录」（即用户报的「点登录没反应」）。
     // 现在只清 AoE Cookie，窗口保留复用。
-    match online::session::purge_aoe_cookies_for_relogin(&app) {
-        Ok(n) => log::info!(target: "account-window", "登录前已清理 AoE Cookie {n} 条"),
-        Err(e) => log::warn!(target: "account-window", "登录前清理 AoE Cookie 未完成：{e}"),
+    if purge {
+        match online::session::purge_aoe_cookies_for_relogin(&app) {
+            Ok(n) => log::info!(target: "account-window", "登录前已清理 AoE Cookie {n} 条"),
+            Err(e) => log::warn!(target: "account-window", "登录前清理 AoE Cookie 未完成：{e}"),
+        }
+    } else {
+        log::info!(
+            target: "account-window",
+            "已登录态重新显示登录窗口：按意图跳过 AoE Cookie 清理，保留当前有效凭证"
+        );
     }
-    let window = online::session::ensure_account_window(&app, url, true, title.as_deref())?;
+    let window = online::session::ensure_account_window(&app, url, true, title.as_deref(), "manual-login")?;
     // show() 失败必须冒泡：否则前端拿到 Ok(()) 会一直停在 waitingLogin
     window.show().map_err(|e| {
         user_err(
@@ -751,7 +767,7 @@ async fn online_open_login_silent(app: tauri::AppHandle) -> Result<(), String> {
     let url = online::session::LOGIN_URL;
     log::info!(target: "account-window", "后台静默登录 url={url}");
     // 注意：不调用 invalidate_cached_session，失败时仍保留 DPAPI 兜底
-    let window = online::session::ensure_account_window(&app, url, false, None)?;
+    let window = online::session::ensure_account_window(&app, url, false, None, "silent-login")?;
     // 已有隐藏窗口时 ensure_account_window 不会导航，这里补一次，保证真的触发 SSO 回跳
     if let Ok(parsed) = tauri::Url::parse(url) {
         if let Err(e) = window.navigate(parsed) {
@@ -773,7 +789,7 @@ async fn online_close_login_window(app: tauri::AppHandle) {
 /// 登录/退出后让 WebView 回到普通页面（不接触账号数据）
 #[tauri::command]
 async fn online_reset_login_view(app: tauri::AppHandle) -> Result<(), String> {
-    let win = online::session::ensure_account_window(&app, online::session::HOME_URL, false, None)?;
+    let win = online::session::ensure_account_window(&app, online::session::HOME_URL, false, None, "reset-view")?;
     if let Ok(url) = tauri::Url::parse(online::session::HOME_URL) {
         let _ = win.navigate(url);
     }
@@ -789,6 +805,7 @@ async fn online_probe_account_window(app: tauri::AppHandle) -> Result<String, St
         online::session::HOME_URL,
         false,
         None,
+        "diagnostic-probe",
     )?;
     let label = window.label().to_string();
     let url = window
@@ -904,6 +921,222 @@ async fn set_network_settings(
     .await;
 
     Ok(network_view(&app, &settings))
+}
+
+// ---------------- 网络 / 代理诊断（与登录态正交，不改动会话状态机） ----------------
+
+/// 单个连通性探针结果：category 只落粗分类；原始传输错误留在 Rust 日志，不回传敏感 URL。
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosisProbe {
+    reachable: bool,
+    status: Option<u16>,
+    latency_ms: u64,
+    /// ok | unauthenticated | server | network
+    category: String,
+    /// 失败形态：dns | timeout | refused | tls | other；成功为 None
+    error_kind: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosisProxyInfo {
+    /// 注册表系统代理开关是否打开（TUN 模式可能为 false）
+    enabled: bool,
+    /// manual | system | env | direct（Rust API 实际生效链路）
+    source: String,
+    proxy_url: Option<String>,
+    pac_detected: bool,
+    has_explicit_server: bool,
+    /// WebView2 是否跟随系统代理（未传 --proxy-server 时为 true）
+    webview_follows_system: bool,
+    webview_args: Option<String>,
+    /// 环境变量代理是否存在（只读事实，不代表实际生效链路）
+    env_proxy_detected: bool,
+    /// Rust API 链路与 WebView2 链路是否存在潜在分叉（env 模式必为 true）
+    path_mismatch: bool,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct NetworkDiagnosisView {
+    proxy: DiagnosisProxyInfo,
+    website: DiagnosisProbe,
+    api: DiagnosisProbe,
+    note: Option<String>,
+}
+
+/// 传输层错误粗分类：只用于日志与前端分级，不回传原始错误文本。
+fn classify_transport(msg: &str) -> String {
+    let lower = msg.to_lowercase();
+    if lower.contains("dns") || lower.contains("lookup") || lower.contains("resolve") {
+        "dns".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout".to_string()
+    } else if lower.contains("refused") || lower.contains("unreachable") {
+        "refused".to_string()
+    } else if lower.contains("tls") || lower.contains("handshake") || lower.contains("closed") {
+        "tls".to_string()
+    } else {
+        "other".to_string()
+    }
+}
+
+/// 官网连通性探针（Rust / ureq 路径）。
+fn probe_website(proxy: Option<&ureq::Proxy>) -> DiagnosisProbe {
+    const WEBSITE_URL: &str = "https://www.ageofempires.com/mods/";
+    let start = std::time::Instant::now();
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(10))
+        .user_agent("AoE2ModManager/0.1 (diagnostic probe)");
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(proxy.clone());
+    }
+    let agent = builder.build();
+    let latency = start.elapsed().as_millis() as u64;
+    match agent.get(WEBSITE_URL).set("Accept", "text/html,*/*").call() {
+        Ok(resp) => {
+            let code = resp.status();
+            DiagnosisProbe {
+                reachable: true,
+                status: Some(code),
+                latency_ms: latency,
+                category: if code >= 500 { "server" } else { "ok" }.to_string(),
+                error_kind: None,
+            }
+        }
+        Err(ureq::Error::Status(code, _)) => DiagnosisProbe {
+            reachable: code < 500,
+            status: Some(code),
+            latency_ms: latency,
+            category: if code >= 500 { "server" } else { "ok" }.to_string(),
+            error_kind: None,
+        },
+        Err(ureq::Error::Transport(t)) => DiagnosisProbe {
+            reachable: false,
+            status: None,
+            latency_ms: latency,
+            category: "network".to_string(),
+            error_kind: Some(classify_transport(&t.to_string())),
+        },
+    }
+}
+
+/// API 探针错误细分：从协议码前缀还原 dns / timeout / refused / tls / other，
+/// 不再把所有传输层失败都压成 network；401 单独标记，不写成网络失败。
+fn api_transport_kind(failure: &ApiFailure) -> Option<String> {
+    if failure.kind == "unauthenticated" {
+        return Some("unauthenticated".to_string());
+    }
+    let msg = failure.message.to_lowercase();
+    if msg.contains("dnsfailed") {
+        return Some("dns".to_string());
+    }
+    if msg.contains("networktimeout") {
+        return Some("timeout".to_string());
+    }
+    if msg.contains("connectiondropped") {
+        return Some("tls".to_string());
+    }
+    if msg.contains("connectionrefused") {
+        return Some("refused".to_string());
+    }
+    if matches!(failure.kind.as_str(), "network" | "timeout" | "dns" | "offline") {
+        return Some("other".to_string());
+    }
+    None
+}
+
+/// API 连通性探针（匿名 Tags）：401=认证问题，5xx=官方服务异常，传输层=网络路径问题。
+fn probe_api(proxy: Option<&ureq::Proxy>) -> DiagnosisProbe {
+    let start = std::time::Instant::now();
+    let client = ApiClient::new("", proxy.cloned());
+    let latency = start.elapsed().as_millis() as u64;
+    match client.tags() {
+        Ok(_) => DiagnosisProbe {
+            reachable: true,
+            status: Some(200),
+            latency_ms: latency,
+            category: "ok".to_string(),
+            error_kind: None,
+        },
+        Err(failure) => {
+            let category = match failure.kind.as_str() {
+                "unauthenticated" => "unauthenticated",
+                "network" | "timeout" | "dns" | "offline" => "network",
+                "not_found" | "parse" => "other",
+                _ => "server",
+            };
+            DiagnosisProbe {
+                reachable: false,
+                status: failure.status,
+                latency_ms: latency,
+                category: category.to_string(),
+                error_kind: api_transport_kind(&failure),
+            }
+        }
+    }
+}
+
+/// 网络 / 代理诊断：只读探测，不读 Cookie、不触发 OAuth、不改动任何会话状态。
+#[tauri::command]
+async fn online_network_diagnosis(app: tauri::AppHandle) -> Result<NetworkDiagnosisView, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<NetworkDiagnosisView, String> {
+        let settings = settings::load_for_app(&handle);
+        let resolved = net::resolve(&net::NetConfig::from_settings(&settings))
+            .map_err(|e| e.to_string())?;
+        let proxy = net::ureq_proxy(&resolved).map_err(|e| e.to_string())?;
+        let system = net::system_probe();
+        let webview_args = net::webview_args(&resolved);
+
+        let env_proxy_detected = net::detect_env_proxy();
+        let path_mismatch = resolved.source == "env";
+        let proxy_info = DiagnosisProxyInfo {
+            enabled: system.enabled,
+            source: resolved.source.clone(),
+            proxy_url: resolved.proxy_url.clone(),
+            pac_detected: system.pac_url.is_some(),
+            has_explicit_server: system.server_url.is_some(),
+            webview_follows_system: webview_args.is_none(),
+            webview_args,
+            env_proxy_detected,
+            path_mismatch,
+        };
+
+        log::info!(
+            target: "diagnosis",
+            "network diagnosis start: source={}, systemEnabled={}, pac={}, explicitServer={}, webviewFollowsSystem={}, envProxy={}, pathMismatch={}",
+            resolved.source, system.enabled, proxy_info.pac_detected,
+            proxy_info.has_explicit_server, proxy_info.webview_follows_system,
+            env_proxy_detected, path_mismatch
+        );
+
+        let website = probe_website(proxy.as_ref());
+        log::info!(
+            target: "diagnosis",
+            "website probe: category={}, status={:?}, latencyMs={}, errorKind={:?}",
+            website.category, website.status, website.latency_ms, website.error_kind
+        );
+
+        let api = probe_api(proxy.as_ref());
+        log::info!(
+            target: "diagnosis",
+            "api probe: category={}, status={:?}, latencyMs={}, errorKind={:?}",
+            api.category, api.status, api.latency_ms, api.error_kind
+        );
+
+        log::info!(
+            target: "diagnosis",
+            "network diagnosis end: website={}, api={}",
+            website.category, api.category
+        );
+
+        Ok(NetworkDiagnosisView { proxy: proxy_info, website, api, note: resolved.note.clone() })
+    })
+    .await
+    .map_err(|e| user_err("session.threadFailed", json!({ "error": e.to_string() })))?
 }
 
 /// 「记住登录 7 天」开关：**只做存储**，不触发任何 Cookie/登录逻辑。
@@ -3708,6 +3941,7 @@ pub fn run() {
             online_close_login_window,
             online_reset_login_view,
             online_probe_account_window,
+            online_network_diagnosis,
             get_network_settings,
             set_network_settings,
             set_remember_login,

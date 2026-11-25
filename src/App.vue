@@ -44,6 +44,8 @@ import { getTranslateSettings } from "./online/service";
 import { kickIndexSync } from "./online/indexSync";
 import { startIndexStatusWatch } from "./online/indexStatusStore";
 import { initDownloadQueue, onTaskSettled } from "./online/downloadQueue";
+import { subscribeDiagnosisNotify } from "./online/diagnosisNotify";
+import { startNetworkMonitoring, stopNetworkMonitoring } from "./online/networkMonitor";
 import { hydrateFavoriteMeta } from "./favoriteMeta";
 import { normalizeBackendError } from "./format";
 import { SORT_OPTIONS } from "./online/types";
@@ -166,6 +168,10 @@ const currentLocale = computed(() => String(locale.value));
 
 // ---------------- Toast + 视图偏好 ----------------
 const { toast, showToast } = useToast();
+// 诊断通知桥：复用全局 Toast 浮动气泡，不另建通知系统
+const offDiagnosisNotify = subscribeDiagnosisNotify((req) => {
+  showToast(t(req.key, req.params ?? {}), req.kind);
+});
 const { viewMode, cardSize, applyFromSettings: applyViewPrefs } = useViewPrefs();
 
 // ---------------- 本地页引用（LocalBrowser template ref） ----------------
@@ -672,6 +678,7 @@ watch(locale, (next) => { syncUiLocale(String(next)); });
 onMounted(async () => {
   void ensureStartupSession();
   void initDownloadQueue();
+  startNetworkMonitoring();
   // 底部状态栏的索引进度：全局观察器（自动任务由 Rust 启动，前端只负责订阅与展示）
   void startIndexStatusWatch();
   void ensureUserData().then(() => hydrateFavoriteMeta()).catch(() => undefined);
@@ -755,6 +762,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   offDownloadSettled?.();
+  offDiagnosisNotify();
+  stopNetworkMonitoring();
 });
 </script>
 

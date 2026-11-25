@@ -22,6 +22,8 @@ import {
   onIndexProgress,
 } from "./service";
 import { runIndexSync } from "./indexSync";
+import { classifyAuthError } from "./sessionVerdict";
+import { handleAuthFailure } from "../sessionState";
 import type { IndexStatus } from "./types";
 
 /** 同步期间的状态轮询间隔（事件推送为主，轮询只在事件丢失时兜底） */
@@ -332,7 +334,8 @@ export async function retryIndexSync(): Promise<boolean> {
     if (!indexBar.failure && !indexBar.needLogin && !indexBar.status?.syncing) {
       const atMs = Date.now();
       indexBar.failure = raw || "sync failed";
-      indexBar.needLogin = /unauthenticated|needLogin|未登录/i.test(raw);
+      indexBar.needLogin = classifyAuthError(error) === "unauthenticated";
+      if (indexBar.needLogin) handleAuthFailure(error);
       indexBar.lastSync = {
         added: 0,
         updated: 0,

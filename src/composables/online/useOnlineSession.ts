@@ -1,74 +1,58 @@
 /**
- * 在线页的「账号 / 登录态」：登录窗口、轮询、静默免密登录、退出登录、分类字典。
+ * 在线页账号 / 登录态适配层（薄封装）。
  *
- * 登录态本身是全局单例（`sessionState`），本文件只做两件事：
- * 1. 把 `sessionInfo` 镜像成组件内可读的 `session`（底栏与在线页同源，绝不再发第二份探测）；
- * 2. 承载登录流程的**临时**状态（等待中 / 探测结果 / 提示文案）与定时器，
- *    这些随组件卸载即可丢弃，不需要跨页面共享。
+ * 登录生命周期（流程、定时器、窗口、轮询、静默重登、探针）全部由
+ * `src/session/controller.ts` 统一持有；本文件只做：
+ * 1. 把 Controller 状态镜像成组件可读的 ref；
+ * 2. 承载与登录无关的业务片段（官方分类字典、诊断探针结果）。
+ *
+ * 这里不再启动任何登录轮询 / silent timer，也不直接修改全局 authState。
  */
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { messageOf } from "../../online/errors";
-import { msgText, translateBackendMessage, type Msg } from "../../format";
-import {
-  clearLoginCache,
-  closeLoginWindow,
-  findMods,
-  modTags,
-  openLogin,
-  openLoginSilent,
-  probeAccountWindow,
-  sessionStatus,
-  uiLog,
-} from "../../online/service";
-import {
-  FALLBACK_TAGS,
-  SORT_OPTIONS,
-  type ModTag,
-  type SessionStatus,
-} from "../../online/types";
+import { msgText, type Msg } from "../../format";
+import { modTags, probeAccountWindow } from "../../online/service";
+import { FALLBACK_TAGS, type ModTag, type SessionStatus } from "../../online/types";
 import {
   ensureSession,
-  markOnline,
-  markUnauthenticated,
+  handleAuthFailure,
+  manualActive,
   sessionError as sharedSessionError,
   sessionInfo,
   sessionPhase,
-  setStatusMessageKey,
+  silentActive,
+  silentNote,
+  flowState,
+  startLogin as controllerStartLogin,
+  cancelLogin as controllerCancelLogin,
+  closeLoginAfterSuccess as controllerCloseSuccess,
 } from "../../sessionState";
 
-/** 分类字典请求上限：官方接口偶尔很慢，不能把界面卡在“加载中” */
 const TAGS_TIMEOUT_MS = 20_000;
+const PROBE_TIMEOUT_MS = 20_000;
 
-export function useOnlineSession(deps: {
-  /** 退出登录后用缓存重绘列表（不清空 items，离线也能继续看） */
+export function useOnlineSession(_deps: {
+  /** 退出登录后用缓存重绘列表；由 Controller logout 流程外部触发保留位 */
   reloadAfterLogout: () => Promise<void>;
-  /** 开始登录：清掉上一条安装提示（避免“登录前那个模组的报错”一直挂着） */
+  /** 开始登录：清掉上一条安装提示 */
   onLoginStart?: () => void;
 }) {
   const { t } = useI18n();
 
-  /**
-   * 提示文本存「key + 参数」，读的时候才翻译。
-   *
-   * 为什么不是存 t() 的结果：切语言后 ref 里的旧译文不会变，
-   * 英文 / 西语界面就会挂着上一条中文（字符串分支留给后端原始错误串）。
-   */
+  // ---------------- Controller 状态镜像 ----------------
+
   const session = ref<SessionStatus | null>(null);
   const sessionErrorState = ref<Msg | null>(null);
   const sessionError = computed(() => msgText(sessionErrorState.value));
-  const waitingLogin = ref(false);
-  const probing = ref(false);
-  const probeResultState = ref<Msg | null>(null);
-  const probeResult = computed(() => msgText(probeResultState.value));
 
-  /**
-   * 共享会话状态的镜像：本组件绝不再发起第二份探测，只把 sessionState 的结果同步到本地 ref，
-   * 原有的 session?.xxx 判断全部保持不变。
-   *
-   * immediate 必须为 true：本组件被 KeepAlive 缓存，用户可能在 App.vue 已完成静默校验
-   * 之后才第一次切到在线页——此时 sessionInfo 早已有值，普通 watch 永远收不到。
-   */
+  /** 手动登录流程是否活动（派生自 Controller） */
+  const waitingLogin = computed(() => manualActive.value);
+  /** 当前登录流程阶段（openingWindow / waitingBrowser / checking / success / …） */
+  const loginFlowState = computed(() => flowState.value);
+  const silentAuth = computed(() => silentActive.value);
+  const silentAuthNote = computed(() => silentNote.value);
+
   watch(
     sessionInfo,
     (info) => {
@@ -77,55 +61,31 @@ export function useOnlineSession(deps: {
     { immediate: true },
   );
 
-  /** 会话 / 退出登录的临时提示（代理与登录项已迁到 SettingsModal） */
+  // ---------------- 诊断探针（业务片段，非登录生命周期） ----------------
+
+  const probing = ref(false);
+  const probeResultState = ref<Msg | null>(null);
+  const probeResult = computed(() => msgText(probeResultState.value));
+
+  /** 旧退出链路残留的提示位；Controller logout 接管后保持空态 */
   const netClearing = ref(false);
   const netError = ref<string | null>(null);
   const netMessage = ref<string | null>(null);
 
-  /** 左侧分类（官方 /api/v4/mods/Tags） */
+  // ---------------- 官方分类字典（匿名可读，失败用内置兜底） ----------------
+
   const tags = ref<ModTag[]>([]);
   const tagsErrorState = ref<Msg | null>(null);
   const tagsError = computed(() => msgText(tagsErrorState.value));
 
-  let pollTimer: number | null = null;
-  let silentTimer: number | null = null;
-
-  /** 给可能卡住的 invoke 加超时，避免界面永远停在“检查中” */
-  function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        reject(new Error(t("online.timeout", { what, sec: Math.round(ms / 1000) })));
-      }, ms);
-      promise
-        .then((value) => {
-          window.clearTimeout(timer);
-          resolve(value);
-        })
-        .catch((err) => {
-          window.clearTimeout(timer);
-          reject(err);
-        });
-    });
-  }
-
-  /** 手动「重新检查登录状态」：强制再探一次；成功后由 sessionEpoch 统一触发刷新 */
-  async function refreshSession(): Promise<void> {
-    sessionErrorState.value = null;
-    await ensureSession(true);
-    session.value = sessionInfo.value;
-    sessionErrorState.value = sharedSessionError.value ? translateBackendMessage(sharedSessionError.value) : null;
-  }
-
-  /** 分类字典：GET /api/v4/mods/Tags（匿名可读）；失败时用内置 17 项兜底 */
   async function loadTags(): Promise<void> {
     tagsErrorState.value = null;
-    // 离线 / 未登录：官方字典接口需要登录态，直接用内置 17 项兜底，不打网络
     if (sessionPhase.value !== "online") {
       tags.value = FALLBACK_TAGS;
       return;
     }
     try {
-      const list = await withTimeout(modTags(), TAGS_TIMEOUT_MS, t("sidebar.officialTags"));
+      const list = await withTimeoutMsg(modTags(), TAGS_TIMEOUT_MS, t("sidebar.officialTags"));
       if (list.length) {
         tags.value = list;
       } else {
@@ -133,24 +93,22 @@ export function useOnlineSession(deps: {
         tagsErrorState.value = { key: "online.tagsEmpty" };
       }
     } catch (e) {
-      // 界面只给可操作文案；底层技术串（peer closed connection without sending
-      // TLS close_notify / docs.rs/rustls 链接 / os error 10060）只进日志文件。
-      // 以前这里直接插进 {msg}，导致一整条 rustls 报错原样显示在左侧栏。
-      void uiLog("warn", `读取官方分类失败：${messageOf(e)}`);
       tags.value = FALLBACK_TAGS;
       tagsErrorState.value = { key: "online.tagsFailed" };
     }
   }
 
-  /** 诊断：让后端显式创建隐藏会话窗口，把真实结果或错误显示出来 */
+  /** 诊断：让后端显式创建隐藏会话窗口，把真实结果或错误显示出来。
+   *  manual 登录流程活动期间跳过：不得把正在 OAuth 的可见登录窗口当作隐藏探测窗复用。 */
   async function runProbe(): Promise<void> {
+    if (manualActive.value) return;
     probing.value = true;
     probeResultState.value = null;
     sessionErrorState.value = null;
     try {
-      probeResultState.value = await withTimeout(
+      probeResultState.value = await withTimeoutMsg(
         probeAccountWindow(),
-        25_000,
+        PROBE_TIMEOUT_MS,
         t("online.probe"),
       );
     } catch (e) {
@@ -160,175 +118,58 @@ export function useOnlineSession(deps: {
     }
   }
 
-  async function doLogout(): Promise<void> {
-    if (netClearing.value) return;
-    netClearing.value = true;
-    netError.value = null;
-    netMessage.value = null;
+  async function withTimeoutMsg<T>(
+    promise: Promise<T>,
+    ms: number,
+    what: string,
+  ): Promise<T> {
+    const timer = window.setTimeout(() => {
+      throw new Error(t("online.timeout", { what, sec: Math.round(ms / 1000) }));
+    }, ms);
     try {
-      // Rust 侧已改为协议码（session.logoutDone，带 {path}），不再拼中文整句
-      const text = await withTimeout(clearLoginCache(), 30_000, t("online.clearCache"));
-      netMessage.value = translateBackendMessage(text);
-      session.value = null;
-      await refreshSession();
-      // 退出登录不清空列表：直接用缓存重绘，离线也能继续看
-      await deps.reloadAfterLogout();
-    } catch (e) {
-      // session.logoutFailed 自带 {detail}，由语言包决定文案；不再按中文关键词特判
-      netError.value = messageOf(e);
+      return await promise;
     } finally {
-      netClearing.value = false;
+      window.clearTimeout(timer);
     }
   }
 
-  function stopPoll(): void {
-    if (pollTimer) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
+  // ---------------- Controller 动作薄封装 ----------------
 
-  async function startLogin(): Promise<void> {
-    waitingLogin.value = true;
+  async function refreshSession(): Promise<void> {
     sessionErrorState.value = null;
-    deps.onLoginStart?.();
-    void uiLog("info", "user clicked sign in (Microsoft / Xbox)");
-    try {
-      await withTimeout(openLogin(), 25_000, t("online.openLogin"));
-    } catch (e) {
-      waitingLogin.value = false;
-      sessionErrorState.value = messageOf(e);
-      void uiLog("error", `failed to open the sign-in window: ${messageOf(e)}`);
-      return;
-    }
-    stopPoll();
-    pollTimer = window.setInterval(async () => {
-      try {
-        const status = await withTimeout(sessionStatus(), 15_000, t("online.recheck"));
-        session.value = status;
-        if (status.error) sessionErrorState.value = messageOf(status.error);
-        void uiLog(
-          "info",
-          `polling sign-in status: loggedIn=${status.loggedIn} cookieCount=${status.cookieCount} windowReady=${status.windowReady}`,
-        );
-        if (!status.loggedIn) return;
-
-        // Cookie 存在不代表真有权限，先跑一次最小请求验证，通过才关闭登录窗口
-        try {
-          const probe = await withTimeout(
-            findMods({ query: "", start: 1, count: 1, sort: SORT_OPTIONS[0].value, order: "DESC" }),
-            20_000,
-            t("online.probe"),
-          );
-          void uiLog("info", `probe passed (${probe.items.length} items returned); closing the sign-in window and loading the list`);
-          waitingLogin.value = false;
-          stopPoll();
-          await closeLoginWindow();
-          // 不在这里直接 reload：bump epoch 后由 handleSessionEpoch 统一刷新，避免重复请求
-          markOnline(status);
-          setStatusMessageKey("statusbar.loginDone");
-        } catch (e) {
-          const text = messageOf(e);
-          sessionErrorState.value = { key: "online.cookieButFailed", params: { text } };
-          void uiLog("warn", `cookies found but the API failed; keeping the window open: ${text}`);
-        }
-      } catch (e) {
-        sessionErrorState.value = messageOf(e);
-        void uiLog("warn", `polling error: ${messageOf(e)}`);
-      }
-    }, 2500);
+    await ensureSession(true);
+    session.value = sessionInfo.value;
+    sessionErrorState.value = sharedSessionError.value;
   }
 
-  /** 后台静默登录：不阻塞首屏，失败也不打断用户 */
-  const silentAuth = ref(false);
-  const silentAuthNoteState = ref<Msg | null>(null);
-  const silentAuthNote = computed(() => msgText(silentAuthNoteState.value));
-  let silentTried = false;
-
-  function stopSilentTimer(): void {
-    if (silentTimer !== null) {
-      window.clearInterval(silentTimer);
-      silentTimer = null;
-    }
+  function startLogin(): void {
+    _deps.onLoginStart?.();
+    controllerStartLogin("manual");
   }
 
-  /**
-   * 静默免密登录：用隐藏窗口打开登录入口，靠平台 SSO 的持久 Cookie 自动跑完跳转链；
-   * 每 2.5 秒查一次，拿到“Cookie 存在”就算成功，最多 6 次（约 15 秒）。
-   */
-  async function silentReauth(reason: string): Promise<void> {
-    if (silentTried || silentAuth.value || waitingLogin.value) return;
-    silentTried = true;
-    silentAuth.value = true;
-    silentAuthNoteState.value = { key: "online.silentNote", params: { reason } };
-    void uiLog("info", `background silent sign-in started: ${reason}`);
-    try {
-      await withTimeout(openLoginSilent(), 15_000, t("online.openLogin"));
-    } catch (e) {
-      silentAuth.value = false;
-      silentAuthNoteState.value = { key: "online.silentFailedStart", params: { msg: messageOf(e) } };
-      return;
-    }
-
-    let ticks = 0;
-    stopSilentTimer();
-    silentTimer = window.setInterval(async () => {
-      ticks += 1;
-      let ok = false;
-      try {
-        // 只查会话状态（读 Cookie，**不发任何 Find 请求**）：
-        // 旧实现每次都打一次 /Find 探测，是“每 2 秒一个 POST”的罪魁祸首之一。
-        const status = await withTimeout(sessionStatus(), 15_000, t("online.recheck"));
-        if (status.loggedIn) {
-          ok = true;
-          void uiLog("info", "background silent sign-in succeeded (session cookie ready)");
-          stopSilentTimer();
-          silentAuth.value = false;
-          silentAuthNoteState.value = null;
-          sessionErrorState.value = null;
-          await closeLoginWindow();
-          // 只在 离线→在线 这一跳 bump epoch；重复探测不会反复触发列表刷新
-          markOnline(status);
-          setStatusMessageKey("statusbar.loginDone");
-        }
-      } catch (e) {
-        void uiLog("info", `background silent sign-in attempt ${ticks} did not finish: ${messageOf(e)}`);
-      }
-      if (!ok && ticks >= 6) {
-        stopSilentTimer();
-        silentAuth.value = false;
-        silentAuthNoteState.value = { key: "online.silentFailed" };
-      }
-    }, 2500);
+  function stopWaiting(): void {
+    controllerCancelLogin("user-cancelled");
   }
 
-  async function stopWaiting(): Promise<void> {
-    waitingLogin.value = false;
-    stopPoll();
-    void uiLog("info", "user cancelled waiting for sign-in: hiding the sign-in window (closed by the front end)");
-    await closeLoginWindow();
+  /** 登录成功后手动关闭登录窗口：身份态保持不变 */
+  async function closeLoginWindow(): Promise<void> {
+    await controllerCloseSuccess();
   }
 
-  /**
-   * 接口明确返回 401：立刻把底栏打回离线，并尝试一次静默重登。
-   * （列表层发现 401 时通过 deps 回调转进来，避免它直接依赖登录流程。）
-   */
-  function reportUnauthorized(message: string): void {
+  /** 401 统一入口：把结构化错误透传给 Controller 分类身份态，并按策略触发静默恢复 */
+  function reportUnauthorized(error: unknown, message: string): void {
     session.value = null;
-    markUnauthenticated(message);
-    void silentReauth(t("online.reasonUnauthorized"));
+    handleAuthFailure(error, message);
   }
 
-  /** 组件卸载：清掉登录轮询与静默重登定时器 */
-  function dispose(): void {
-    stopPoll();
-    stopSilentTimer();
-  }
+  /** 兼容旧装配层：Controller 为全局单例，组件卸载无需回收生命周期 */
+  function dispose(): void {}
 
   return {
     session,
     sessionError,
     waitingLogin,
+    loginFlowState,
     probing,
     probeResult,
     netClearing,
@@ -339,15 +180,12 @@ export function useOnlineSession(deps: {
     silentAuth,
     silentAuthNote,
     refreshSession,
-    loadTags,
     runProbe,
-    doLogout,
     startLogin,
     stopWaiting,
-    silentReauth,
+    closeLoginWindow,
+    loadTags,
     reportUnauthorized,
     dispose,
   };
 }
-
-export type OnlineSession = ReturnType<typeof useOnlineSession>;
